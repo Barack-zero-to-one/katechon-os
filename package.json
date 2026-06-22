@@ -1,0 +1,17 @@
+{
+  "name": "tontinebot-watchdog",
+  "version": "9.18.0",
+  "description": "TontineBot Pro — Watchdog Node.js — BADF Ltd",
+  "main": "watchdog.js",
+  "scripts": {
+    "watch": "node watchdog.js",
+    "test-health": "curl -s http://localhost:5000/health | jq ."
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "BADF Ltd",
+  "license": "UNLICENSED",
+  "private": true
+}

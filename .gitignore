@@ -1,0 +1,26 @@
+# Credentials — NEVER commit
+ENV
+*.env
+.env*
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PDF (binary)
+*.pdf
