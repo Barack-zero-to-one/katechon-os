@@ -141,7 +141,7 @@ PG_HOST = os.getenv("PG_HOST", "localhost")
 PG_PORT = os.getenv("PG_PORT", "5432")
 PG_DB   = os.getenv("PG_DB",   "barack_corp")
 PG_USER = os.getenv("PG_USER", "postgres")
-PG_PASS = os.getenv("PG_PASS", "Barack2026")
+PG_PASS = os.getenv("PG_PASS", "")
 PG_BIN  = os.getenv("PG_BIN",  r"C:\Program Files\PostgreSQL\18\bin")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 
@@ -151,7 +151,7 @@ META_PHONE_ID     = os.getenv("META_PHONE_ID",     "")  # Phone Number ID
 META_TOKEN        = os.getenv("META_TOKEN",        "")  # Permanent access token
 META_BUSINESS_ID  = os.getenv("META_BUSINESS_ID",  "")  # WhatsApp Business Account ID
 META_APP_SECRET   = os.getenv("META_APP_SECRET",   "")  # Pour valider X-Hub-Signature-256
-META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "badf_meta_2026")
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "")
 WA_VERIFY_TOKEN   = META_VERIFY_TOKEN  # Alias compat
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────
@@ -226,7 +226,7 @@ def country_for_phone(numero: str) -> dict:
 
 # ── Webhook public (ngrok ou domaine) ────────────────────────────────────
 NGROK_DOMAIN  = os.getenv("NGROK_DOMAIN", "lennox-unbiographical-jasmin.ngrok-free.dev")
-NGROK_TOKEN   = os.getenv("NGROK_TOKEN",  "3ARM0xRRj0A2STAWHdTSaWADKUV_2dQcsTcFhDNFW8U12ywuM")
+NGROK_TOKEN   = os.getenv("NGROK_TOKEN",  "")
 PUBLIC_URL    = ""
 
 SESSION_TIMEOUT = 300
@@ -1527,15 +1527,24 @@ def creer_base_postgresql() -> bool:
         return False
 
 
+def _masquer_wa(wa: str) -> str:
+    if len(wa) > 6:
+        return wa[:4] + "****" + wa[-2:]
+    return "****"
+
 def log_audit(type_event: str, details: str, whatsapp: str = "", ip: str = ""):
-    audit.warning(f"[{type_event}] {details} | WA:{whatsapp} | IP:{ip}")
+    wa_masque = _masquer_wa(whatsapp) if whatsapp else ""
+    audit.warning(f"[{type_event}] {details} | WA:{wa_masque} | IP:{ip}")
     try:
         conn = get_conn()
         q(conn,
           "INSERT INTO audit_log (type_event, details, whatsapp, ip) VALUES (%s,%s,%s,%s)",
-          (type_event, details, whatsapp, ip))
+          (type_event, details, wa_masque, ip))
         conn.commit()
         release_conn(conn)
+        # Journal immuable append-only
+        with open("logs/audit_immutable.log", "a", encoding="utf-8") as _f:
+            _f.write(f"{datetime.now().isoformat()}|{type_event}|{details}|{wa_masque}\n")
     except Exception:
         pass
 
@@ -2620,6 +2629,10 @@ _outbox_lock = threading.Lock()
 _outbox_path = Path("logs/wa_outbox.jsonl")
 _outbox_path.parent.mkdir(exist_ok=True)
 
+# H6 — Backup sessions
+_sessions_path = Path("logs/sessions_backup.json")
+_sessions_bak_lock = threading.Lock()
+
 
 def _outbox_enqueue(kind: str, payload: dict):
     """Sauvegarde un message non envoyé pour retransmission ultérieure."""
@@ -3548,7 +3561,11 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
         # Vérifier doublon
         conn    = get_conn()
         doublon = fetchone(conn, "SELECT id FROM membres WHERE whatsapp=%s", (nouveau,))
+        # Anti-bypass blacklist : membre banni ne peut pas changer de numéro
+        mbr_actuel = fetchone(conn, "SELECT blackliste, statut_global FROM membres WHERE whatsapp=%s", (wa,))
         release_conn(conn)
+        if mbr_actuel and (mbr_actuel.get("blackliste") or mbr_actuel.get("statut_global") == "Banni"):
+            return "❌ Compte banni — changement de numéro impossible."
         if doublon:
             return "❌ Ce numéro est déjà utilisé par un autre membre."
         sess["data"]["chgnum_nouveau"] = nouveau
@@ -4270,6 +4287,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             sess["etape"] = "menu"
             return "❌ Annulé."
         num  = normaliser_numero(texte)
+        if num == wa:
+            return "❌ Vous ne pouvez pas modifier votre propre rang."
         conn = get_conn()
         m    = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num,))
         if not m:
@@ -5138,6 +5157,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                 f"Entrez une autre heure ou tapez *0* pour annuler."
             )
 
+        _COLONNES_HEURE_OK = {"heure_ouverture", "heure_limite", "heure_rappel", "heure_bouffage"}
+        if col not in _COLONNES_HEURE_OK:
+            log.error(f"🔴 Colonne invalide tentée dans UPDATE tontines : {col}")
+            return "❌ Erreur interne."
         q(conn, f"UPDATE tontines SET {col}=%s WHERE id=%s", (heure_str, tid))
         conn.commit()
 
@@ -5309,6 +5332,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         if not passage:
             release_conn(conn)
             return f"❌ Passage suspect #{passage_id} introuvable."
+
+        # Anti-fraude : un admin ne peut pas accorder son propre bouffage
+        if passage.get("whatsapp") == wa:
+            release_conn(conn)
+            return "❌ Vous ne pouvez pas accorder un bouffage sur votre propre numéro."
 
         # Réinitialiser le blocage + déclencher bouffage complet
         q(conn, """UPDATE liste_passage
@@ -5845,6 +5873,13 @@ def _verifier_liberation_caution(conn, membre_id: int, tontine_id: int):
 # ══════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
+
+@app.after_request
+def _add_security_headers(response):
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    return response
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -7068,15 +7103,23 @@ def _traiter_screenshot_adhesion_dm(wa: str, image_bytes: bytes) -> bool:
             "SELECT * FROM membres WHERE whatsapp=%s", (wa_norm,))
 
         if not membre:
-            # Inconnu — créer le profil minimal
+            # Inconnu — créer le profil minimal (ON CONFLICT évite la race condition)
             kyc_hash = hashlib.sha256(f"ADH{wa_norm}{img_hash}".encode()).hexdigest()
             cur = q(conn, """
                 INSERT INTO membres
                     (nom_complet, kyc_hash, whatsapp, adhesion_payee,
                      statut_global, kyc_etape)
-                VALUES (%s,%s,%s,1,'Actif',0) RETURNING id
+                VALUES (%s,%s,%s,1,'Actif',0)
+                ON CONFLICT (whatsapp) DO NOTHING
+                RETURNING id
             """, (f"Membre_{wa_norm[-4:]}", kyc_hash, wa_norm))
-            membre_id = cur.fetchone()[0]
+            row = cur.fetchone()
+            if row:
+                membre_id = row[0]
+            else:
+                # Conflit — profil créé par thread concurrent
+                membre = fetchone(conn, "SELECT * FROM membres WHERE whatsapp=%s", (wa_norm,))
+                membre_id = membre["id"]
             est_nouveau = True
         elif membre["adhesion_payee"] and membre["statut_global"] == "Actif":
             # Déjà actif — peut-être paiement d'une 2ème tontine
@@ -7264,11 +7307,13 @@ def webhook_whatsapp_meta():
     """
     # ── 1) Validation signature Meta ──────────────────────────────────────
     payload_brut = request.get_data()
-    if META_APP_SECRET:
-        signature = request.headers.get("X-Hub-Signature-256", "")
-        if not _meta_signature_valide(payload_brut, signature):
-            log_audit("META_SIG_INVALIDE", "Webhook rejeté", request.remote_addr)
-            return jsonify({"status": "invalid_signature"}), 403
+    if not META_APP_SECRET:
+        log.error("🔴 META_APP_SECRET non configuré — webhook refusé")
+        return jsonify({"status": "misconfigured"}), 503
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    if not _meta_signature_valide(payload_brut, signature):
+        log_audit("META_SIG_INVALIDE", "Webhook rejeté", request.remote_addr)
+        return jsonify({"status": "invalid_signature"}), 403
 
     # ── 2) Parsing payload Meta ───────────────────────────────────────────
     try:
@@ -7390,7 +7435,14 @@ def _meta_telecharger_media(media_id: str) -> str:
         media_url = r.json().get("url", "")
         if not media_url:
             return ""
-        # 2) Télécharger
+        # 2) Valider l'URL (SSRF protection) — accepter uniquement les CDN Meta
+        from urllib.parse import urlparse as _urlparse
+        _p = _urlparse(media_url)
+        _domaines_ok = (".fbcdn.net", ".whatsapp.net", ".cdninstagram.com", ".facebook.com")
+        if _p.scheme != "https" or not any(_p.netloc.endswith(d) for d in _domaines_ok):
+            log.warning(f"⚠️ URL média suspecte rejetée : {_p.netloc}")
+            return ""
+        # 3) Télécharger
         r2 = requests.get(media_url,
             headers={"Authorization": f"Bearer {META_TOKEN}"},
             timeout=20)
@@ -8729,6 +8781,44 @@ def _purger_sessions_expirees():
         _sessions_config.pop(k, None)
 
 
+def _sauvegarder_sessions():
+    """Snapshot des sessions actives vers fichier JSON (toutes les 60s + atexit)."""
+    now = time_module.time()
+    snapshot = {
+        "kyc": {k: v for k, v in _sessions_kyc.items() if now - v.get("ts", 0) < SESSION_TIMEOUT},
+        "admin": {k: v for k, v in _sessions_admin.items() if now - v.get("ts", 0) < SESSION_TIMEOUT},
+        "membre": {k: v for k, v in _sessions_membre.items() if now - v.get("ts", 0) < SESSION_TIMEOUT},
+    }
+    try:
+        with _sessions_bak_lock:
+            with open(_sessions_path, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f)
+    except Exception as e:
+        log.warning(f"⚠️ Sauvegarde sessions échouée : {e}")
+
+
+def _restaurer_sessions():
+    """Restaure les sessions non-expirées depuis le backup JSON au démarrage."""
+    if not _sessions_path.exists():
+        return
+    try:
+        with open(_sessions_path, encoding="utf-8") as f:
+            data = json.load(f)
+        now = time_module.time()
+        for k, v in data.get("kyc", {}).items():
+            if now - v.get("ts", 0) < SESSION_TIMEOUT:
+                _sessions_kyc[k] = v
+        for k, v in data.get("admin", {}).items():
+            if now - v.get("ts", 0) < SESSION_TIMEOUT:
+                _sessions_admin[k] = v
+        for k, v in data.get("membre", {}).items():
+            if now - v.get("ts", 0) < SESSION_TIMEOUT:
+                _sessions_membre[k] = v
+        log.info(f"Sessions restaurées : {len(_sessions_kyc)} KYC, {len(_sessions_admin)} admin, {len(_sessions_membre)} membre")
+    except Exception as e:
+        log.warning(f"⚠️ Restauration sessions échouée (non bloquant) : {e}")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # RAPPELS HORAIRES — PRESSION SOCIALE
 # ══════════════════════════════════════════════════════════════════════════
@@ -9471,6 +9561,8 @@ def verifier_dettes_badf_impayees():
 
 @app.route("/health", methods=["GET"])
 def health():
+    if request.args.get("token", "") != os.getenv("HEALTH_TOKEN", "badf_health_2026"):
+        return jsonify({"status": "unauthorized"}), 401
     try:
         conn = get_conn()
         fetchone(conn, "SELECT 1 AS ok")
@@ -9673,6 +9765,8 @@ def _check_meta_api():
 @app.route("/health/detail", methods=["GET"])
 def health_detail():
     """Endpoint santé détaillé pour monitoring externe."""
+    if request.args.get("token", "") != os.getenv("HEALTH_TOKEN", "badf_health_2026"):
+        return jsonify({"status": "unauthorized"}), 401
     with _health_lock:
         state = dict(_health_state)
     state["uptime_sec"] = int(time_module.time() - state["started_at"])
@@ -10126,6 +10220,7 @@ def demarrer_scheduler():
     # ── Outbox drain — réessaie les messages WhatsApp non envoyés ────────
     scheduler.add_job(_outbox_drain,             "interval", seconds=30,  id="outbox_drain")
     scheduler.add_job(_purger_sessions_expirees, "interval", minutes=5,   id="purge_sessions")
+    scheduler.add_job(_sauvegarder_sessions,     "interval", seconds=60,  id="sessions_backup")
 
     # ── Auto-healing — supervision silencieuse ────────────────────────────
     scheduler.add_job(_self_heal_check,  "interval", seconds=60,  id="self_heal_check")
@@ -10181,6 +10276,7 @@ if __name__ == "__main__":
     # ── 2. Init pool + tables ──────────────────────────────────────────────
     init_pool()
     init_db()
+    _restaurer_sessions()
     log.info("✅ Base de données v9.17 initialisée.")
 
     # ── 3. Détecter l'URL publique ngrok ──────────────────────────────────
@@ -10202,6 +10298,7 @@ if __name__ == "__main__":
 
     def _shutdown_bot():
         """Appelé par atexit à chaque arrêt — ferme proprement le pool DB."""
+        _sauvegarder_sessions()
         if _db_pool:
             try:
                 _db_pool.closeall()
