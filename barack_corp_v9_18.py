@@ -80,6 +80,7 @@ import re
 import json
 import shutil
 import subprocess
+import functools
 import logging
 import threading
 import time as time_module
@@ -5777,6 +5778,50 @@ def saisir_caution_et_compenser_groupe(conn, membre_id: int, tontine_id: int,
     }
 
 
+def healed(critical: bool = False, fallback=None):
+    """
+    Décorateur auto-healing : si la fonction échoue, log silencieux + retry +
+    fallback. Aucune alerte au owner si la fonction se rétablit seule.
+    Usage :
+        @healed(critical=True)
+        def ma_fonction(): ...
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            for attempt in range(3):
+                try:
+                    result = fn(*args, **kwargs)
+                    if attempt > 0:
+                        log.info(f"✅ Auto-heal OK : {fn.__name__} après {attempt+1} tentative(s)")
+                    return result
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                    log.warning(f"⚠️ DB error dans {fn.__name__} (tentative {attempt+1}) : {str(e)[:80]}")
+                    with _health_lock:
+                        _health_state["consecutive_db_failures"] += 1
+                        _health_state["last_db_failure"] = time_module.time()
+                    if attempt < 2:
+                        _self_heal_db()
+                        time_module.sleep(1 + attempt)
+                    elif critical:
+                        raise
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    log.warning(f"⚠️ Network error dans {fn.__name__} : {str(e)[:80]}")
+                    if attempt < 2:
+                        time_module.sleep(2 + attempt * 2)
+                except Exception as e:
+                    log.error(f"❌ Exception dans {fn.__name__} (tentative {attempt+1}/3) : {e}")
+                    if attempt < 2 and not critical:
+                        time_module.sleep(1)
+                    elif critical:
+                        raise
+                    else:
+                        break
+            return fallback
+        return wrapper
+    return deco
+
+
 @healed()
 def verifier_et_liberer_cautions():
     """
@@ -9620,8 +9665,6 @@ def health():
 # AUTO-HEALING — supervision et auto-réparation silencieuse
 # ══════════════════════════════════════════════════════════════════════════
 
-import functools
-
 # État de santé global du bot
 _health_state = {
     "db_ok":            True,
@@ -9635,52 +9678,6 @@ _health_state = {
     "started_at":                time_module.time(),
 }
 _health_lock = threading.Lock()
-
-
-def healed(critical: bool = False, fallback=None):
-    """
-    Décorateur auto-healing : si la fonction échoue, log silencieux + retry +
-    fallback. Aucune alerte au owner si la fonction se rétablit seule.
-    Usage :
-        @healed(critical=True)
-        def ma_fonction(): ...
-    """
-    def deco(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            for attempt in range(3):
-                try:
-                    result = fn(*args, **kwargs)
-                    # Succès après échec → on note la guérison silencieusement
-                    if attempt > 0:
-                        log.info(f"✅ Auto-heal OK : {fn.__name__} après {attempt+1} tentative(s)")
-                    return result
-                except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-                    # Erreur DB : tente de réinitialiser le pool
-                    log.warning(f"⚠️ DB error dans {fn.__name__} (tentative {attempt+1}) : {str(e)[:80]}")
-                    with _health_lock:
-                        _health_state["consecutive_db_failures"] += 1
-                        _health_state["last_db_failure"] = time_module.time()
-                    if attempt < 2:
-                        _self_heal_db()
-                        time_module.sleep(1 + attempt)
-                    elif critical:
-                        raise   # critique + dernier essai DB → re-raise pour que l'appelant sache
-                except (requests.ConnectionError, requests.Timeout) as e:
-                    log.warning(f"⚠️ Network error dans {fn.__name__} : {str(e)[:80]}")
-                    if attempt < 2:
-                        time_module.sleep(2 + attempt * 2)
-                except Exception as e:
-                    log.error(f"❌ Exception dans {fn.__name__} (tentative {attempt+1}/3) : {e}")
-                    if attempt < 2 and not critical:
-                        time_module.sleep(1)
-                    elif critical:
-                        raise          # re-raise → APScheduler loggue le crash correctement
-                    else:
-                        break
-            return fallback
-        return wrapper
-    return deco
 
 
 def _self_heal_db():
