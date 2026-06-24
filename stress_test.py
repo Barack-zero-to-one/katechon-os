@@ -15,7 +15,9 @@ Pré-requis : bot en cours d'exécution (python barack_corp_v9_18.py)
 import argparse
 import base64
 import hashlib
+import hmac
 import json
+import os
 import random
 import statistics
 import struct
@@ -32,6 +34,32 @@ try:
 except ImportError:
     print("❌ Installe requests : pip install requests")
     sys.exit(1)
+
+
+def _charger_env(chemin: str = "ENV") -> dict:
+    """Charge les variables depuis le fichier ENV (format KEY=VALUE)."""
+    vars_ = {}
+    if not os.path.exists(chemin):
+        return vars_
+    with open(chemin, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            vars_[k.strip()] = v.strip()
+    return vars_
+
+_ENV = _charger_env()
+_APP_SECRET = _ENV.get("META_APP_SECRET", os.getenv("META_APP_SECRET", ""))
+
+
+def _signer_payload(body: bytes) -> str:
+    """Calcule X-Hub-Signature-256 pour un payload."""
+    if not _APP_SECRET:
+        return ""
+    mac = hmac.new(_APP_SECRET.encode("utf-8"), body, hashlib.sha256)
+    return f"sha256={mac.hexdigest()}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -296,15 +324,19 @@ def _session() -> requests.Session:
 
 def envoyer(url: str, payload: dict, wa: str, scenario: str) -> ResultatReq:
     debut = time.perf_counter()
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    sig  = _signer_payload(body)
+    hdrs = {"Content-Type": "application/json", "Connection": "close"}
+    if sig:
+        hdrs["X-Hub-Signature-256"] = sig
     # Retry une fois sur ConnectionError (connexion keep-alive périmée)
     for tentative in range(2):
         try:
             r = _session().post(
                 f"{url}/webhook/whatsapp",
-                json=payload,
+                data=body,
                 timeout=TIMEOUT_REQ,
-                headers={"Content-Type": "application/json",
-                         "Connection": "close"},
+                headers=hdrs,
             )
             duree = (time.perf_counter() - debut) * 1000
             return ResultatReq(wa=wa, scenario=scenario,
