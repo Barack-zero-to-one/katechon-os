@@ -326,7 +326,7 @@ def envoyer(url: str, payload: dict, wa: str, scenario: str) -> ResultatReq:
     debut = time.perf_counter()
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     sig  = _signer_payload(body)
-    hdrs = {"Content-Type": "application/json", "Connection": "close"}
+    hdrs = {"Content-Type": "application/json"}
     if sig:
         hdrs["X-Hub-Signature-256"] = sig
     # Retry une fois sur ConnectionError (connexion keep-alive périmée)
