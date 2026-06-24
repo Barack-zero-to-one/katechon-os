@@ -85,7 +85,7 @@ import threading
 import time as time_module
 from pathlib import Path
 from collections import defaultdict
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, date as _date
 from typing import Optional
 
 import psycopg2
@@ -447,15 +447,19 @@ def parser_liste_passage(texte: str) -> list:
     lignes = texte.strip().splitlines()
 
     for ligne in lignes:
-        # Nettoyer les astérisques WhatsApp bold et espaces superflus
-        ligne = ligne.strip().replace("*", "").strip()
+        # Normaliser les artefacts WhatsApp : bold/italic/barré + variantes Unicode des tirets
+        ligne = ligne.strip()
+        ligne = ligne.replace("*", "").replace("_", "").replace("~", "")
+        ligne = ligne.replace("—", "-").replace("–", "-")  # em-dash, en-dash → hyphen
+        ligne = ligne.replace("‒", "-").replace("−", "-")  # figure dash, minus sign
+        ligne = ligne.strip()
         if not ligne:
             continue
 
-        # Pattern : NUMERO - NOM DATE
-        # Ex: "01- Nicole 30/10/24" ou "01 - Nicole 30/10/24"
+        # Pattern : NUMERO - NOM DATE (le tiret est toujours un hyphen ASCII après normalisation)
+        # Ex: "01- Nicole 30/10/24" ou "01— Nicole 30/10/24" (normalisé avant match)
         m = re.match(
-            r"^(\d{1,3})\s*[-–]\s*([A-Za-zÀ-ÿ\s\-'\.]+?)\s+"
+            r"^(\d{1,3})\s*[-]\s*([A-Za-zÀ-ÿ\s\-'\.]+?)\s+"
             r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})\s*$",
             ligne
         )
@@ -470,7 +474,6 @@ def parser_liste_passage(texte: str) -> list:
         annee     = 2000 + annee_raw if annee_raw < 100 else annee_raw
 
         try:
-            from datetime import date as _date
             date_bouffage = _date(annee, mois, jour).isoformat()
         except ValueError:
             date_bouffage = None  # Date invalide → on garde None
