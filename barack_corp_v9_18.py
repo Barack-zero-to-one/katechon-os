@@ -1754,8 +1754,30 @@ def incrementer_tentatives_fraude(membre_id: int, raison: str):
                 f"Dernière : {raison}"
             )
             wa_prive(row["whatsapp"], msg_dissuasion(row["whatsapp"]))
+        _alerter_burst_fraude()
     finally:
         release_conn(conn)
+
+
+def _alerter_burst_fraude():
+    """DE — Alerte owner si ≥5 tentatives fraude sur n'importe quel membre en 1h (attaque coordonnée)."""
+    try:
+        conn = get_conn()
+        row = fetchone(conn, """
+            SELECT COUNT(*) as nb FROM audit_log
+            WHERE type_event = 'TENTATIVE_FRAUDE'
+            AND date_heure > NOW() - INTERVAL '1 hour'
+        """)
+        release_conn(conn)
+        if row and row["nb"] >= 5:
+            wa_owner(
+                f"🚨 *ALERTE COORDONNÉE — BADF Ltd*\n"
+                f"{row['nb']} tentatives de fraude détectées en 1h.\n"
+                f"Vérifier audit_log immédiatement."
+            )
+            log_audit("ALERTE_BURST_FRAUDE", f"{row['nb']} tentatives en 1h")
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -9300,6 +9322,19 @@ def backup_postgresql():
             taille = os.path.getsize(fichier) // 1024
             log.info(f"✅ Backup OK : {fichier} ({taille} Ko)")
             log_audit("BACKUP_OK", f"{fichier} {taille}Ko")
+
+            # RC — Vérification intégrité : le dump plain SQL se termine par ce marqueur
+            try:
+                with open(fichier, "rb") as _bf:
+                    _bf.seek(-300, 2)
+                    _tail = _bf.read().decode("utf-8", errors="ignore")
+                if "PostgreSQL database dump complete" in _tail:
+                    log_audit("BACKUP_VERIFIE", f"Backup validé : {os.path.basename(fichier)}")
+                else:
+                    log_audit("BACKUP_CORROMPU", f"Marqueur fin absent : {os.path.basename(fichier)}")
+                    wa_owner(f"🔴 *BACKUP POTENTIELLEMENT CORROMPU*\n{os.path.basename(fichier)}\nManque le marqueur de fin — vérifier manuellement.")
+            except Exception as _ve:
+                log.warning(f"⚠️ Vérification backup échouée : {_ve}")
 
             # Rotation : garder seulement les 7 derniers
             backups = sorted([
