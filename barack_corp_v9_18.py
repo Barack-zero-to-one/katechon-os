@@ -2047,6 +2047,44 @@ def enregistrer_cotisation_manuelle(conn, membre_id: int, tontine_id: int,
         )
 
 
+def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> bool:
+    """
+    Paiement après heure_limite → déplace le membre en dernière position
+    dans liste_passage (cycle actif, statut En_attente ou Notifie).
+    Retourne True si reclassement effectué, False si déjà dernier / déjà bouffé.
+    """
+    passage = fetchone(conn, """
+        SELECT id, ordre, cycle FROM liste_passage
+        WHERE membre_id=%s AND tontine_id=%s
+          AND statut IN ('En_attente','Notifie')
+        ORDER BY cycle DESC LIMIT 1
+    """, (membre_id, tontine_id))
+
+    if not passage:
+        return False
+
+    cycle        = passage["cycle"]
+    ordre_actuel = passage["ordre"]
+
+    max_row = fetchone(conn,
+        "SELECT MAX(ordre) AS max_ordre FROM liste_passage WHERE tontine_id=%s AND cycle=%s",
+        (tontine_id, cycle))
+    max_ordre = (max_row["max_ordre"] or ordre_actuel) if max_row else ordre_actuel
+
+    if ordre_actuel >= max_ordre:
+        return False  # déjà dernier
+
+    # Décaler les membres entre l'ancienne position+1 et la dernière de -1
+    q(conn, """
+        UPDATE liste_passage SET ordre = ordre - 1
+        WHERE tontine_id=%s AND cycle=%s AND ordre > %s AND ordre <= %s
+    """, (tontine_id, cycle, ordre_actuel, max_ordre))
+
+    # Mettre le membre en dernière position
+    q(conn, "UPDATE liste_passage SET ordre=%s WHERE id=%s", (max_ordre, passage["id"]))
+    return True
+
+
 def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
     """
     Admin confirme une cotisation manuelle.
@@ -2110,7 +2148,7 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
         "SELECT nom_complet, whatsapp FROM membres WHERE id=%s",
         (cotis["membre_id"],))
     tontine = fetchone(conn,
-        "SELECT nom FROM tontines WHERE id=%s", (cotis["tontine_id"],))
+        "SELECT nom, heure_limite FROM tontines WHERE id=%s", (cotis["tontine_id"],))
 
     if membre and tontine:
         wa_prive(membre["whatsapp"],
@@ -2121,6 +2159,37 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
             f"a été confirmée et enregistrée.\n\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
+
+    # ── Reclassement si screenshot soumis après heure_limite ──────────────
+    try:
+        h_lim = (tontine or {}).get("heure_limite") or "18:00"
+        hh, mm = map(int, h_lim.split(":"))
+        heure_limite_obj = time(hh, mm)
+        # Convertir date_soumission (TIMESTAMPTZ) en heure locale WAT (UTC+1)
+        from datetime import timezone, timedelta
+        WAT = timezone(timedelta(hours=1))
+        soumis_local = cotis["date_soumission"].astimezone(WAT).time()
+        if soumis_local > heure_limite_obj:
+            reclasse = _reclasser_en_dernier(conn, cotis["membre_id"], cotis["tontine_id"])
+            if reclasse:
+                conn.commit()
+                if membre and tontine:
+                    wa_prive(membre["whatsapp"],
+                        f"⚠️ *RECLASSEMENT — {tontine['nom']}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"Votre cotisation a été enregistrée ✅, mais elle est "
+                        f"arrivée après l'heure limite (*{h_lim}*).\n\n"
+                        f"Conformément aux règles, vous avez été "
+                        f"*reclassé(e) en dernière position* dans la liste de passage.\n\n"
+                        f"💡 Payez avant *{h_lim}* pour conserver votre rang.\n\n"
+                        f"_TontineBot Pro — BADF Ltd_"
+                    )
+                log_audit("RECLASSEMENT_RETARD",
+                          f"Membre#{cotis['membre_id']} → dernière position | "
+                          f"Tontine#{cotis['tontine_id']} | "
+                          f"Soumis:{soumis_local} > Limite:{h_lim}")
+    except Exception as _re:
+        log.warning(f"⚠️ Reclassement retard non bloquant : {_re}")
 
     log_audit("COTISATION_CONFIRMEE",
               f"Cotis#{cotis_id} | Membre#{cotis['membre_id']} | "
