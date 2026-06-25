@@ -1233,6 +1233,9 @@ def init_db():
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS devise    TEXT NOT NULL DEFAULT 'FCFA'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS langue    TEXT NOT NULL DEFAULT 'fr'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS timezone  TEXT NOT NULL DEFAULT 'Africa/Douala'",
+        # ── Multi-cadence (v9.18) ──────────────────────────────────────────
+        "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS jour_semaine TEXT NOT NULL DEFAULT 'Lundi' CHECK(jour_semaine IN ('Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi','Dimanche'))",
+        "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS jour_mois INTEGER NOT NULL DEFAULT 1 CHECK(jour_mois BETWEEN 1 AND 28)",
     ]:
         try:
             c.execute("SAVEPOINT mig")
@@ -1312,7 +1315,9 @@ def creer_tontine(nom: str, type_tontine: str, montant_place: int,
                   groupe_wa: str = "",
                   capacite_max: int = 2000,
                   heure_limite: str = "18:00",
-                  caution_pourcent: int = 10) -> int:
+                  caution_pourcent: int = 10,
+                  jour_semaine: str = "Lundi",
+                  jour_mois: int = 1) -> int:
     """
     Crée une nouvelle tontine en base.
     Retourne l'ID de la tontine créée.
@@ -1321,10 +1326,12 @@ def creer_tontine(nom: str, type_tontine: str, montant_place: int,
     cur  = q(conn, """
         INSERT INTO tontines
             (nom, type_tontine, montant_place,
-             whatsapp_groupe, capacite_max, heure_limite, caution_pourcent)
-        VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+             whatsapp_groupe, capacite_max, heure_limite, caution_pourcent,
+             jour_semaine, jour_mois)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (nom, type_tontine, montant_place,
-          groupe_wa or None, capacite_max, heure_limite, caution_pourcent))
+          groupe_wa or None, capacite_max, heure_limite, caution_pourcent,
+          jour_semaine, jour_mois))
     tid = cur.fetchone()[0]
     conn.commit()
     release_conn(conn)
@@ -5015,9 +5022,54 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         if not t_type:
             return "❌ Tapez J, H ou M."
         sess["data"]["new_tontine"]["type"] = t_type
+        if t_type == "Journaliere":
+            sess["data"]["new_tontine"]["jour_semaine"] = "Lundi"
+            sess["data"]["new_tontine"]["jour_mois"]    = 1
+            sess["etape"] = "creer_tontine_montant"
+            return (
+                f"✅ Type : *Journalière*\n\n"
+                "Étape 3/5 — *Montant de cotisation* par jour (FCFA) :"
+            )
+        elif t_type == "Hebdomadaire":
+            sess["etape"] = "creer_tontine_jour"
+            return (
+                f"✅ Type : *Hebdomadaire*\n\n"
+                "Étape 2b/5 — Quel *jour de la semaine* ?\n\n"
+                "L = Lundi\nM = Mardi\nX = Mercredi\nJ = Jeudi\n"
+                "V = Vendredi\nS = Samedi\nD = Dimanche"
+            )
+        else:  # Mensuelle
+            sess["etape"] = "creer_tontine_jour"
+            return (
+                f"✅ Type : *Mensuelle*\n\n"
+                "Étape 2b/5 — Quel *jour du mois* ? (1 à 28)\n"
+                "_(ex : 1 = 1er de chaque mois, 15 = le 15)_"
+            )
+
+    elif sess.get("etape") == "creer_tontine_jour":
+        t_type = sess["data"]["new_tontine"]["type"]
+        if t_type == "Hebdomadaire":
+            mapping_j = {"L":"Lundi","M":"Mardi","X":"Mercredi","J":"Jeudi",
+                         "V":"Vendredi","S":"Samedi","D":"Dimanche"}
+            jour = mapping_j.get(texte.strip().upper())
+            if not jour:
+                return "❌ Tapez L, M, X, J, V, S ou D."
+            sess["data"]["new_tontine"]["jour_semaine"] = jour
+            sess["data"]["new_tontine"]["jour_mois"]    = 1
+            label_jour = f"*{jour}*"
+        else:  # Mensuelle
+            try:
+                j = int(texte.strip())
+                if not (1 <= j <= 28):
+                    return "❌ Entrez un nombre entre 1 et 28."
+            except ValueError:
+                return "❌ Entrez un nombre entre 1 et 28."
+            sess["data"]["new_tontine"]["jour_mois"]    = j
+            sess["data"]["new_tontine"]["jour_semaine"] = "Lundi"
+            label_jour = f"le *{j}* de chaque mois"
         sess["etape"] = "creer_tontine_montant"
         return (
-            f"✅ Type : *{t_type}*\n\n"
+            f"✅ Jour : {label_jour}\n\n"
             "Étape 3/5 — *Montant de cotisation* par période (FCFA) :"
         )
 
@@ -5060,15 +5112,18 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             tid_nouveau = creer_tontine(
                 nom=d["nom"], type_tontine=d["type"],
                 montant_place=d["montant"],
-                groupe_wa=d["groupe"], caution_pourcent=pct
+                groupe_wa=d["groupe"], caution_pourcent=pct,
+                jour_semaine=d.get("jour_semaine","Lundi"),
+                jour_mois=d.get("jour_mois",1)
             )
             if d["groupe"]:
-                # Si groupe renseigné, mettre à jour le champ dans la tontine créée
-                conn = get_conn()
-                q(conn, "UPDATE tontines SET whatsapp_groupe=%s WHERE id=%s",
-                  (d["groupe"], tid_nouveau))
-                conn.commit()
-                release_conn(conn)
+                conn_g = get_conn()
+                try:
+                    q(conn_g, "UPDATE tontines SET whatsapp_groupe=%s WHERE id=%s",
+                      (d["groupe"], tid_nouveau))
+                    conn_g.commit()
+                finally:
+                    release_conn(conn_g)
             sess["etape"] = "menu"
             sess["tontine_id"]  = tid_nouveau
             sess["tontine_nom"] = d["nom"]
@@ -6919,10 +6974,59 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
         if texte.strip() not in types:
             return "Tapez *1* (Journaliere), *2* (Hebdomadaire) ou *3* (Mensuelle)."
         data["type"] = types[texte.strip()]
+        sess["data"]  = data
+        if data["type"] == "Journaliere":
+            data["jour_semaine"] = "Lundi"
+            data["jour_mois"]    = 1
+            sess["etape"] = "en_cours"
+            return (
+                f"Type : *Journalière*\n\n"
+                "Question *3/4*\n\n"
+                "Cette tontine est-elle *déjà en cours* ?\n"
+                "(Les membres cotisent déjà, même sans le bot)\n\n"
+                "Répondez *OUI* ou *NON*"
+            )
+        elif data["type"] == "Hebdomadaire":
+            sess["etape"] = "jour"
+            return (
+                f"Type : *Hebdomadaire*\n\n"
+                "Question *2b/4* — Quel *jour de la semaine* ?\n\n"
+                "L = Lundi\nM = Mardi\nX = Mercredi\nJ = Jeudi\n"
+                "V = Vendredi\nS = Samedi\nD = Dimanche"
+            )
+        else:  # Mensuelle
+            sess["etape"] = "jour"
+            return (
+                f"Type : *Mensuelle*\n\n"
+                "Question *2b/4* — Quel *jour du mois* ? (1 à 28)\n"
+                "_(ex : 1 = 1er de chaque mois)_"
+            )
+
+    if etape == "jour":
+        t_type = data.get("type", "Journaliere")
+        if t_type == "Hebdomadaire":
+            mapping_j = {"L":"Lundi","M":"Mardi","X":"Mercredi","J":"Jeudi",
+                         "V":"Vendredi","S":"Samedi","D":"Dimanche"}
+            jour = mapping_j.get(texte.strip().upper())
+            if not jour:
+                return "❌ Tapez L, M, X, J, V, S ou D."
+            data["jour_semaine"] = jour
+            data["jour_mois"]    = 1
+            label_j = f"*{jour}*"
+        else:  # Mensuelle
+            try:
+                j = int(texte.strip())
+                if not (1 <= j <= 28):
+                    return "❌ Entrez un nombre entre 1 et 28."
+            except ValueError:
+                return "❌ Entrez un nombre entre 1 et 28."
+            data["jour_mois"]    = j
+            data["jour_semaine"] = "Lundi"
+            label_j = f"le *{j}* de chaque mois"
         sess["etape"] = "en_cours"
         sess["data"]  = data
         return (
-            f"Type : *{data['type']}*\n\n"
+            f"✅ Jour : {label_j}\n\n"
             "Question *3/4*\n\n"
             "Cette tontine est-elle *déjà en cours* ?\n"
             "(Les membres cotisent déjà, même sans le bot)\n\n"
@@ -6963,14 +7067,18 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
                 INSERT INTO tontines
                     (nom, type_tontine, montant_place, whatsapp_groupe,
                      statut, caution_pourcent, caution_active,
-                     heure_limite, heure_ouverture, heure_rappel, heure_bouffage)
-                VALUES (%s,%s,%s,%s,'Active',10,1,'18:00','05:00','14:00','17:00')
+                     heure_limite, heure_ouverture, heure_rappel, heure_bouffage,
+                     jour_semaine, jour_mois)
+                VALUES (%s,%s,%s,%s,'Active',10,1,'18:00','05:00','14:00','17:00',%s,%s)
                 ON CONFLICT (whatsapp_groupe) DO UPDATE SET
                     nom             = EXCLUDED.nom,
                     montant_place   = EXCLUDED.montant_place,
-                    type_tontine    = EXCLUDED.type_tontine
+                    type_tontine    = EXCLUDED.type_tontine,
+                    jour_semaine    = EXCLUDED.jour_semaine,
+                    jour_mois       = EXCLUDED.jour_mois
                 RETURNING id
-            """, (group_name, type_t, montant, group_id))
+            """, (group_name, type_t, montant, group_id,
+                  data.get("jour_semaine", "Lundi"), data.get("jour_mois", 1)))
             tontine_id = cur.fetchone()[0]
             q(conn, """
                 INSERT INTO admins_groupe (tontine_id, whatsapp, numero_collecte)
@@ -9003,6 +9111,31 @@ def _restaurer_sessions():
 # RAPPELS HORAIRES — PRESSION SOCIALE
 # ══════════════════════════════════════════════════════════════════════════
 
+_JOURS_SEMAINE = {"Lundi":0,"Mardi":1,"Mercredi":2,"Jeudi":3,"Vendredi":4,"Samedi":5,"Dimanche":6}
+
+def _est_jour_cotisation(t: dict) -> bool:
+    """True si aujourd'hui est un jour de cotisation pour cette tontine."""
+    tt = t.get("type_tontine", "Journaliere")
+    if tt == "Journaliere":
+        return True
+    # Heure locale du pays de la tontine
+    tz_name = t.get("timezone") or "Africa/Douala"
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        now = datetime.now()
+    if tt == "Hebdomadaire":
+        jour_cible = _JOURS_SEMAINE.get(t.get("jour_semaine"))
+        if jour_cible is None:
+            log.warning(f"jour_semaine invalide '{t.get('jour_semaine')}' tontine#{t.get('id')} — rappel ignoré")
+            return False
+        return now.weekday() == jour_cible
+    if tt == "Mensuelle":
+        return now.day == (t.get("jour_mois") or 1)
+    return True
+
+
 def rappel_ouverture():
     """Lancé toutes les heures — annonce l'ouverture des cotisations dans chaque groupe."""
     heure_now = datetime.now().strftime("%H:00")
@@ -9013,6 +9146,8 @@ def rappel_ouverture():
         (heure_now,))
     now_str = datetime.now().strftime("%A %d %B %Y").capitalize()
     for t in tontines:
+        if not _est_jour_cotisation(t):
+            continue
         # Récupérer le numéro de collecte de l'admin
         admin = fetchone(conn,
             """SELECT numero_collecte FROM admins_groupe
@@ -9051,6 +9186,8 @@ def rappel_matin():
             h_rappel_matin = "08:00"
         if heure_now != h_rappel_matin:
             continue
+        if not _est_jour_cotisation(t):
+            continue
         admin = fetchone(conn,
             "SELECT numero_collecte FROM admins_groupe WHERE tontine_id=%s AND numero_collecte IS NOT NULL LIMIT 1",
             (t["id"],))
@@ -9085,6 +9222,8 @@ def rappel_non_cotisants():
     now_str = datetime.now().strftime("%d/%m/%Y")
 
     for t in tontines:
+        if not _est_jour_cotisation(t):
+            continue
         retards   = _get_retardataires(conn, t["id"])
         nb_actifs = fetchone(conn,
             "SELECT COUNT(*) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
@@ -9162,8 +9301,10 @@ def verifier_suspensions_retard():
     try:
         conn     = get_conn()
         tontines = fetchall(conn, "SELECT * FROM tontines WHERE statut='Active'")
+        _mult_suspension = {"Journaliere": 1, "Hebdomadaire": 7, "Mensuelle": 30}
         for t in tontines:
-            seuil = datetime.now() - timedelta(hours=DELAI_SUSPENSION_HEURES)
+            mult  = _mult_suspension.get(t.get("type_tontine", "Journaliere"), 1)
+            seuil = datetime.now() - timedelta(hours=DELAI_SUSPENSION_HEURES * mult)
             en_retard = fetchall(conn, """
                 SELECT m.id, m.nom_complet, m.whatsapp, a.jours_avance
                 FROM adhesions a JOIN membres m ON m.id=a.membre_id
@@ -9241,7 +9382,11 @@ def detecter_fugitifs():
     try:
         conn     = get_conn()
         tontines = fetchall(conn, "SELECT * FROM tontines WHERE statut='Active'")
+        _periode_jours = {"Journaliere": 1, "Hebdomadaire": 7, "Mensuelle": 30}
         for t in tontines:
+            periode = _periode_jours.get(t.get("type_tontine", "Journaliere"), 1)
+            delai_alerte  = DELAI_ALERTE_FUGUE  * periode
+            delai_blocage = DELAI_BLOCAGE_FUGUE * periode
             membres = fetchall(conn, """
                 SELECT m.id, m.nom_complet, m.whatsapp, m.dernier_bouffage, m.score_confiance
                 FROM adhesions a JOIN membres m ON m.id=a.membre_id
@@ -9260,16 +9405,17 @@ def detecter_fugitifs():
                     jours = (datetime.now() - derniere["date_heure"].replace(tzinfo=None)).days
                 else:
                     jours = (datetime.now() - m["dernier_bouffage"].replace(tzinfo=None)).days
-                if jours < DELAI_ALERTE_FUGUE:
+                if jours < delai_alerte:
                     continue
-                montant_du = jours * t["montant_place"]
+                # Nombre de périodes manquées (pas de jours bruts) × montant par période
+                montant_du = (jours // periode) * t["montant_place"]
                 alerte     = fetchone(conn, """
                     SELECT type_alerte FROM alertes_fugue
                     WHERE membre_id=%s AND tontine_id=%s AND traite=0
                     ORDER BY created_at DESC LIMIT 1
                 """, (m["id"], t["id"]))
 
-                if jours >= DELAI_BLOCAGE_FUGUE and (not alerte or alerte["type_alerte"] != "Blocage"):
+                if jours >= delai_blocage and (not alerte or alerte["type_alerte"] != "Blocage"):
                     q(conn, "UPDATE membres SET statut_global='Suspendu_global' WHERE id=%s", (m["id"],))
                     _update_score_confiance(conn, m["id"], delta=-30, raison="Blocage fugue post-bouffage")
                     q(conn, "INSERT INTO alertes_fugue (membre_id, tontine_id, type_alerte, jours_retard, montant_du) VALUES (%s,%s,'Blocage',%s,%s)",
@@ -9290,7 +9436,7 @@ def detecter_fugitifs():
                         f"Retard: {jours}j | Doit: {montant_du:,} FCFA\n"
                         f"→ Tapez *admin {t['nom']}* puis *10* pour saisir la caution.")
 
-                elif jours >= DELAI_ALERTE_FUGUE + 1 and (not alerte or alerte["type_alerte"] == "Avertissement_1"):
+                elif jours >= delai_alerte + periode and (not alerte or alerte["type_alerte"] == "Avertissement_1"):
                     q(conn, "INSERT INTO alertes_fugue (membre_id, tontine_id, type_alerte, jours_retard, montant_du) VALUES (%s,%s,'Avertissement_2',%s,%s) ON CONFLICT DO NOTHING",
                       (m["id"], t["id"], jours, montant_du))
                     _update_score_confiance(conn, m["id"], delta=-15, raison="Avertissement 2 — retard cotisation post-bouffage")
@@ -9402,6 +9548,8 @@ def rapport_groupes_20h():
     conn     = get_conn()
     tontines = fetchall(conn, "SELECT * FROM tontines WHERE statut='Active'")
     for t in tontines:
+        if not _est_jour_cotisation(t):
+            continue
         nb_a    = fetchone(conn,
             "SELECT COUNT(*) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
             (t["id"],))["n"]
