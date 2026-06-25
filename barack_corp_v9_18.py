@@ -2160,34 +2160,75 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
             f"_TontineBot Pro — BADF Ltd_"
         )
 
-    # ── Reclassement si screenshot soumis après heure_limite ──────────────
+    # ── Reclassement si screenshot soumis après heure_limite + 5 min ────────
     try:
+        from datetime import timezone, timedelta as _td, datetime as _dt
         h_lim = (tontine or {}).get("heure_limite") or "18:00"
         hh, mm = map(int, h_lim.split(":"))
-        heure_limite_obj = time(hh, mm)
-        # Convertir date_soumission (TIMESTAMPTZ) en heure locale WAT (UTC+1)
-        from datetime import timezone, timedelta
-        WAT = timezone(timedelta(hours=1))
+        # Grace period : heure_limite + 5 minutes
+        limite_grace = (_dt.combine(_dt.today(), time(hh, mm)) + _td(minutes=5)).time()
+        WAT = timezone(_td(hours=1))
         soumis_local = cotis["date_soumission"].astimezone(WAT).time()
-        if soumis_local > heure_limite_obj:
+
+        if soumis_local > limite_grace:
+            # 1. IRA 150 FCFA — dette enregistrée en DB
+            q(conn, """INSERT INTO dettes_ira (membre_id, tontine_id, montant, motif)
+                       VALUES (%s, %s, %s, %s)""",
+              (cotis["membre_id"], cotis["tontine_id"], MONTANT_IRA,
+               f"Retard cotisation — soumis {soumis_local.strftime('%H:%M')} > limite {h_lim}"))
+            conn.commit()
+
+            # 2. Reclassement en dernière position
             reclasse = _reclasser_en_dernier(conn, cotis["membre_id"], cotis["tontine_id"])
             if reclasse:
                 conn.commit()
-                if membre and tontine:
-                    wa_prive(membre["whatsapp"],
-                        f"⚠️ *RECLASSEMENT — {tontine['nom']}*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"Votre cotisation a été enregistrée ✅, mais elle est "
-                        f"arrivée après l'heure limite (*{h_lim}*).\n\n"
-                        f"Conformément aux règles, vous avez été "
-                        f"*reclassé(e) en dernière position* dans la liste de passage.\n\n"
-                        f"💡 Payez avant *{h_lim}* pour conserver votre rang.\n\n"
-                        f"_TontineBot Pro — BADF Ltd_"
-                    )
-                log_audit("RECLASSEMENT_RETARD",
-                          f"Membre#{cotis['membre_id']} → dernière position | "
-                          f"Tontine#{cotis['tontine_id']} | "
-                          f"Soumis:{soumis_local} > Limite:{h_lim}")
+
+            # 3. Notification membre (IRA + reclassement)
+            if membre and tontine:
+                msg_retard = (
+                    f"⚠️ *COTISATION EN RETARD — {tontine['nom']}*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"Votre cotisation a été enregistrée ✅, mais elle est "
+                    f"arrivée après l'heure limite (*{h_lim}*).\n\n"
+                    f"📌 *Conséquences :*\n"
+                    f"• Pénalité IRA : *{MONTANT_IRA:,} FCFA* ajoutée à votre dette\n"
+                )
+                if reclasse:
+                    msg_retard += f"• Vous avez été *reclassé(e) en dernière position*\n"
+                msg_retard += (
+                    f"\n💡 Payez avant *{h_lim}* pour éviter ces pénalités.\n\n"
+                    f"_TontineBot Pro — BADF Ltd_"
+                )
+                wa_prive(membre["whatsapp"], msg_retard)
+
+            # 4. Envoyer la liste de bouffage mise à jour au groupe
+            tontine_full = fetchone(conn,
+                "SELECT id, nom, whatsapp_groupe, cycle_actuel FROM tontines WHERE id=%s",
+                (cotis["tontine_id"],))
+            if tontine_full and tontine_full.get("whatsapp_groupe") and reclasse:
+                passages = fetchall(conn, """
+                    SELECT lp.ordre, lp.statut, lp.nickname, lp.date_bouffage,
+                           m.nom_complet
+                    FROM liste_passage lp
+                    LEFT JOIN membres m ON m.id = lp.membre_id
+                    WHERE lp.tontine_id=%s AND lp.cycle=%s
+                    ORDER BY lp.ordre
+                """, (tontine_full["id"], tontine_full["cycle_actuel"]))
+                lines = [
+                    f"🔄 *LISTE DE BOUFFAGE MISE À JOUR — {tontine_full['nom']}*\n"
+                    f"_(Reclassement retard — {soumis_local.strftime('%H:%M')} > {h_lim})_\n"
+                ]
+                for p in passages:
+                    s   = {"Paye": "✅", "En_attente": "⏳", "Notifie": "🔔",
+                           "Intercepte": "🚫", "Cede": "🔄"}.get(p["statut"], "❓")
+                    nom = p["nom_complet"] or p["nickname"] or "???"
+                    dt  = f"  📅 {p['date_bouffage']}" if p["date_bouffage"] else ""
+                    lines.append(f"{str(p['ordre']).zfill(2)}- {s} {nom}{dt}")
+                wa_groupe(tontine_full["whatsapp_groupe"], "\n".join(lines))
+
+            log_audit("RECLASSEMENT_RETARD",
+                      f"Membre#{cotis['membre_id']} → dernière position | IRA {MONTANT_IRA} FCFA | "
+                      f"Tontine#{cotis['tontine_id']} | Soumis:{soumis_local.strftime('%H:%M')} > {h_lim}+5min")
     except Exception as _re:
         log.warning(f"⚠️ Reclassement retard non bloquant : {_re}")
 
