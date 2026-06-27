@@ -344,7 +344,7 @@ def msg_intro_groupe(nom_tontine: str, montant: int,
         f"escroquerie, abus de confiance. Peine : jusqu'à 10 ans d'emprisonnement ferme.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📲 *Enrôlement obligatoire :* tapez *menu* en DM à *{BOT_NOM}*\n"
-        f"   Frais d'ouverture de dossier KYC : *2 000 FCFA*\n"
+        f"   Frais d'ouverture de dossier KYC : *1 000 FCFA*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"_Barack & AI Development Facilities Ltd — BADF Ltd_\n"
         f"_« Utiliser la technologie pour servir le prochain avec intégrité »_"
@@ -386,9 +386,9 @@ def msg_dm_admin_bienvenue(nom_tontine: str) -> str:
         f"(cagnotte moins toutes les déductions). Vous virez ce montant sur son "
         f"numéro Mobile Money, puis confirmez via le menu admin.\n\n"
         f"*3️⃣ Reverser les FMP à BADF Ltd*\n"
-        f"Chaque soir à 20h, je vous envoie le relevé des frais de service (2%) "
-        f"à reverser sur *{NUMERO_BADF_ORANGE}*. Vous envoyez le code de "
-        f"transaction au bot pour clôturer.\n\n"
+        f"10 minutes après l'heure de bouffage, je vous envoie automatiquement "
+        f"le relevé des frais de service (2%) à reverser sur *{NUMERO_BADF_ORANGE}*. "
+        f"Vous envoyez le code de transaction au bot pour clôturer.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 *POUR DÉMARRER — ENVOYEZ LA LISTE*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -9549,8 +9549,41 @@ def rapport_owner_21h():
 
 
 
+def envoyer_releve_fmp_post_bouffage():
+    """
+    Tourne chaque minute. Pour chaque tontine dont heure_bouffage + 10 min
+    correspond à l'heure actuelle (WAT), envoie le relevé FMP à chaque admin.
+    """
+    from datetime import timezone, timedelta as _td, time as _time
+    WAT = timezone(_td(hours=1))
+    now_wat    = datetime.now(WAT)
+    hhmm_now   = now_wat.strftime('%H:%M')
+
+    conn     = get_conn()
+    tontines = fetchall(conn,
+        "SELECT id, nom, heure_bouffage FROM tontines WHERE statut='Active'")
+    for t in tontines:
+        hb = t.get("heure_bouffage") or "17:00"
+        try:
+            hh, mm = map(int, hb.split(":"))
+            bouffage_plus_10 = (
+                datetime.combine(now_wat.date(), _time(hh, mm)) + _td(minutes=10)
+            ).time().strftime('%H:%M')
+        except Exception:
+            continue
+        if hhmm_now != bouffage_plus_10:
+            continue
+        admins_t = fetchall(conn,
+            "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s", (t["id"],))
+        for adm in admins_t:
+            msg = rapport_dettes_badf_admin(adm["whatsapp"])
+            if msg:
+                wa_prive(adm["whatsapp"], msg)
+    release_conn(conn)
+
+
 def rapport_groupes_20h():
-    """Rapport de fin de journée dans chaque groupe + dettes BADF aux admins."""
+    """Rapport de fin de journée dans chaque groupe."""
     conn     = get_conn()
     tontines = fetchall(conn, "SELECT * FROM tontines WHERE statut='Active'")
     for t in tontines:
@@ -9591,14 +9624,6 @@ def rapport_groupes_20h():
                else f"⚠️ *{retards} membre(s) en retard.*")
             + f"\n\n_TontineBot Pro — BADF Ltd_"
         )
-
-        # ── Envoyer le relevé des dettes BADF à chaque admin ──────────────
-        admins_t = fetchall(conn,
-            "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s", (t["id"],))
-        for adm in admins_t:
-            msg_badf = rapport_dettes_badf_admin(adm["whatsapp"])
-            if msg_badf:
-                wa_prive(adm["whatsapp"], msg_badf)
 
     release_conn(conn)
 
@@ -10507,7 +10532,8 @@ def demarrer_scheduler():
     scheduler.add_job(notifier_prochain_bouffage, "cron", minute=9, id="bouffage")
 
     # ── Jobs fixes ────────────────────────────────────────────────────────
-    scheduler.add_job(rapport_groupes_20h,          "cron", hour=20, minute=0,  id="rapport_groupes")
+    scheduler.add_job(rapport_groupes_20h,             "cron", hour=20, minute=0,  id="rapport_groupes")
+    scheduler.add_job(envoyer_releve_fmp_post_bouffage,"cron", minute="*",         id="fmp_post_bouffage")
     scheduler.add_job(rapport_owner_21h,            "cron", hour=HEURE_RAPPORT_OWNER, minute=0, id="rapport_owner")
     scheduler.add_job(verifier_suspensions_retard,  "cron", minute=30, id="suspensions")
     scheduler.add_job(detecter_fugitifs,            "cron", hour=8,  minute=33, id="anti_fugue")
