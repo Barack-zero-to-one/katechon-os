@@ -2054,11 +2054,12 @@ def enregistrer_cotisation_manuelle(conn, membre_id: int, tontine_id: int,
         )
 
 
-def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> bool:
+def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> dict:
     """
     Paiement après heure_limite → déplace le membre en dernière position
     dans liste_passage (cycle actif, statut En_attente ou Notifie).
-    Retourne True si reclassement effectué, False si déjà dernier / déjà bouffé.
+    Retourne {"ok": True, "position_avant": N, "position_apres": M}
+    ou {"ok": False} si déjà dernier / déjà bouffé.
     """
     passage = fetchone(conn, """
         SELECT id, ordre, cycle FROM liste_passage
@@ -2068,7 +2069,7 @@ def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> bool:
     """, (membre_id, tontine_id))
 
     if not passage:
-        return False
+        return {"ok": False}
 
     cycle        = passage["cycle"]
     ordre_actuel = passage["ordre"]
@@ -2079,7 +2080,7 @@ def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> bool:
     max_ordre = (max_row["max_ordre"] or ordre_actuel) if max_row else ordre_actuel
 
     if ordre_actuel >= max_ordre:
-        return False  # déjà dernier
+        return {"ok": False}  # déjà dernier
 
     # Décaler les membres entre l'ancienne position+1 et la dernière de -1
     q(conn, """
@@ -2089,7 +2090,7 @@ def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> bool:
 
     # Mettre le membre en dernière position
     q(conn, "UPDATE liste_passage SET ordre=%s WHERE id=%s", (max_ordre, passage["id"]))
-    return True
+    return {"ok": True, "position_avant": ordre_actuel, "position_apres": max_ordre}
 
 
 def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
@@ -2187,7 +2188,7 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
 
             # 2. Reclassement en dernière position
             reclasse = _reclasser_en_dernier(conn, cotis["membre_id"], cotis["tontine_id"])
-            if reclasse:
+            if reclasse["ok"]:
                 conn.commit()
 
             # 3. Notification membre (IRA + reclassement)
@@ -2200,8 +2201,11 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
                     f"📌 *Conséquences :*\n"
                     f"• Pénalité IRA : *{MONTANT_IRA:,} FCFA* ajoutée à votre dette\n"
                 )
-                if reclasse:
-                    msg_retard += f"• Vous avez été *reclassé(e) en dernière position*\n"
+                if reclasse["ok"]:
+                    msg_retard += (
+                        f"• Reclassement : *position {reclasse['position_avant']}*"
+                        f" → *position {reclasse['position_apres']}*\n"
+                    )
                 msg_retard += (
                     f"\n💡 Payez avant *{h_lim}* pour éviter ces pénalités.\n\n"
                     f"_TontineBot Pro — BADF Ltd_"
@@ -2212,7 +2216,7 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
             tontine_full = fetchone(conn,
                 "SELECT id, nom, whatsapp_groupe, cycle_actuel FROM tontines WHERE id=%s",
                 (cotis["tontine_id"],))
-            if tontine_full and tontine_full.get("whatsapp_groupe") and reclasse:
+            if tontine_full and tontine_full.get("whatsapp_groupe") and reclasse["ok"]:
                 passages = fetchall(conn, """
                     SELECT lp.ordre, lp.statut, lp.nickname, lp.date_bouffage,
                            m.nom_complet
@@ -2233,8 +2237,10 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
                     lines.append(f"{str(p['ordre']).zfill(2)}- {s} {nom}{dt}")
                 wa_groupe(tontine_full["whatsapp_groupe"], "\n".join(lines))
 
+            pos_log = (f"position {reclasse['position_avant']} → position {reclasse['position_apres']}"
+                       if reclasse["ok"] else "déjà dernière position")
             log_audit("RECLASSEMENT_RETARD",
-                      f"Membre#{cotis['membre_id']} → dernière position | IRA {MONTANT_IRA} FCFA | "
+                      f"Membre#{cotis['membre_id']} | {pos_log} | IRA {MONTANT_IRA} FCFA | "
                       f"Tontine#{cotis['tontine_id']} | Soumis:{soumis_local.strftime('%H:%M')} > {h_lim}+5min")
     except Exception as _re:
         log.warning(f"⚠️ Reclassement retard non bloquant : {_re}")
