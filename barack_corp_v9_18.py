@@ -6840,21 +6840,21 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
 
             _t.sleep(2)
             _wa_send_groupe(group_id,
-                f"🏛️ *BADF Ltd — TontineBot Pro*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Ce groupe passe sous administration *TontineBot Pro*.\n"
-                f"*{inscrits} membre(s) enregistré(s)* — aucun frais pour ce cycle.\n\n"
-                f"À partir de maintenant :\n\n"
-                f"🔐 Chaque screenshot est signé *SHA-256*. "
-                f"Falsifié, recyclé ou modifié — détecté automatiquement.\n\n"
-                f"📊 Chaque comportement alimente un *score de risque personnel*, "
-                f"silencieux et permanent.\n\n"
-                f"⚡ Retard, abandon, fraude — les sanctions se déclenchent *seules*, "
-                f"sans intervention humaine, sans appel.\n\n"
-                f"⚖️ Vos données sont archivées *7 ans* et communicables "
-                f"à la Police Judiciaire sur réquisition.\n\n"
-                f"📋 KYC demandé à chacun en fin de cycle.\n\n"
-                f"_BADF Ltd · Conformité COBAC R-2019/01 · ANIF_"
+                f"🏛️ *Barack & AI Development Facilities — BADF Ltd*\n\n"
+                f"*{inscrits} membre(s) enregistré(s)* sur notre plateforme "
+                f"d'automatisation de tontine. Aucun frais pour ce cycle.\n\n"
+                f"BADF Ltd travaille en collaboration avec la *Police Judiciaire*, "
+                f"l'*ANIF* et les *opérateurs Mobile Money* (MTN, Orange) "
+                f"dans le cadre de la conformité COBAC R-2019/01.\n\n"
+                f"Votre participation à ce groupe a généré une *localisation "
+                f"approximative et des métadonnées de session* enregistrées "
+                f"dans nos serveurs. Ces informations sont archivées *7 ans* "
+                f"et transmises aux autorités compétentes sur simple réquisition.\n\n"
+                f"Tout membre signalé pour fraude, abandon ou falsification "
+                f"est *banni de l'ensemble du réseau BADF* — aucune tontine "
+                f"partenaire ne pourra plus lui accorder de service.\n\n"
+                f"📋 _Vérification d'identité demandée à chacun en fin de cycle._\n\n"
+                f"_BADF Ltd · « Utiliser la technologie pour servir le prochain avec intégrité »_"
             )
             if admin:
                 _t.sleep(1)
