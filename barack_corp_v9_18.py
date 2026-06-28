@@ -7754,8 +7754,11 @@ def webhook_whatsapp_greenapi():
         return jsonify({"status": "bad_json"}), 400
 
     # ── 2) Validation de l'instance (anti-usurpation) ─────────────────────
+    if not GREENAPI_INSTANCE_ID:
+        log.error("🔴 GREENAPI_INSTANCE_ID non configuré — webhook refusé")
+        return jsonify({"status": "misconfigured"}), 503
     instance_id = str((payload.get("instanceData") or {}).get("idInstance", ""))
-    if GREENAPI_INSTANCE_ID and instance_id != str(GREENAPI_INSTANCE_ID):
+    if instance_id != str(GREENAPI_INSTANCE_ID):
         log_audit("GREENAPI_INSTANCE_INVALIDE", f"idInstance={instance_id}", request.remote_addr)
         return jsonify({"status": "forbidden"}), 403
 
@@ -7771,9 +7774,6 @@ def webhook_whatsapp_greenapi():
     wa           = normaliser_numero(wa_brut)
     if not wa:
         return jsonify({"status": "ok"}), 200
-    if not rate_limit_ok(wa):
-        log.warning(f"⚠️ Rate limit pre-spawn : {wa}")
-        return jsonify({"status": "ok"}), 200
 
     # ── 5) Soumettre au thread pool ───────────────────────────────────────
     try:
@@ -7784,7 +7784,7 @@ def webhook_whatsapp_greenapi():
     return jsonify({"status": "ok"}), 200
 
 
-def _greenapi_telecharger_media(url_media: str) -> str:
+def _greenapi_telecharger_media(url_media: str) -> bytes:
     """Télécharge un média depuis l'URL Green API et retourne le contenu en bytes."""
     if not url_media:
         return b""
@@ -7828,6 +7828,9 @@ def _traiter_message_greenapi(payload: dict, wa: str):
         if not img_bytes and caption:
             texte = caption
             est_image = False
+        elif not img_bytes:
+            wa_prive(wa, "❌ Impossible de télécharger le reçu. Renvoyez le screenshot.")
+            return
     elif type_message == "extendedTextMessage":
         texte = (message_data.get("extendedTextMessageData") or {}).get("text", "").strip()
 
