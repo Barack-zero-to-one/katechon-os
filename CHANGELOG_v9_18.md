@@ -279,6 +279,19 @@ Config Tesseract mise à jour : `--psm 6 --oem 3 -c preserve_interword_spaces=1`
 
 ---
 
+### PATCH 22 — GitHub Ruleset : Merge bloqué tant que CI n'est pas vert
+
+**Problème :** Les 3 jobs CI (syntax, secrets, dependencies) tournaient mais GitHub laissait quand même merger même si l'un d'eux était rouge.
+
+**Fix :** Ruleset créé dans Settings > Rulesets (gratuit sur repo privé) :
+- Target : `Include default branch` (main)
+- Rule activée : `Require status checks to pass`
+- Checks requis : `Python Syntax Check`, `No Hardcoded Secrets`, `Dependency Install`
+
+**Effet :** Bouton Merge physiquement grisé tant que les 3 jobs ne sont pas verts. Zéro bypass possible.
+
+---
+
 ## Ordre d'application lundi matin
 
 ### 1. Backup complet (5 min)
