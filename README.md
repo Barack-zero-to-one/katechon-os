@@ -141,25 +141,6 @@ First behavioral credit bureau for Global South populations never seen by tradit
 
 ---
 
-## Codebase Stats
-
-| Metric | Value |
-|--------|-------|
-| Python lines | **10,351** |
-| PostgreSQL tables | **17** |
-| APScheduler jobs | **20** (cron + interval) |
-| Audit event types | **68+** |
-| `@healed` auto-retry functions | **13** |
-| Flask endpoints | **4** |
-| Recognized user commands | **35+** |
-| Waitress threads | **70** |
-| DB pool maxconn | **80** |
-| Session timeout | **300s** |
-| Security layers | **26** |
-| Development time | **3 months · solo** |
-
----
-
 ## Global South ROSCA Ecosystem
 
 The ROSCA (Rotating Savings and Credit Association) is the most widespread informal financial instrument in the developing world, coordinating the financial lives of 400–500 million unbanked people across 5 continents under dozens of local names, each embedded in the cultural fabric of its region.
