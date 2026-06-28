@@ -1823,6 +1823,13 @@ def _pretraiter_screenshot_whatsapp(image_bytes: bytes):
         gray = cv2.resize(gray, None, fx=scale, fy=scale,
                           interpolation=cv2.INTER_CUBIC)
 
+    # 4b. Crop clavier WhatsApp (18% bas) — portrait uniquement
+    #     Supprime le bruit QWERTY que Tesseract lit comme texte
+    h_cv, w_cv = gray.shape
+    if h_cv > w_cv:
+        crop_bottom = int(h_cv * 0.18)
+        gray = gray[:h_cv - crop_bottom, :]
+
     # 5. Lissage des artéfacts JPEG WhatsApp (blocs 8×8)
     #    Gaussian σ=1 (kernel 3×3) — supprime le bruit intra-bloc
     #    sans flouter les contours inter-caractères
@@ -1845,16 +1852,77 @@ def _pretraiter_screenshot_whatsapp(image_bytes: bytes):
     return Image.fromarray(binary)
 
 
+def _lire_pdf_switchn(pdf_bytes: bytes) -> dict:
+    """
+    Extrait les données d'un reçu SwitchN PDF (text-based, pas d'OCR requis).
+    Format SwitchN : MONTANT TRANSFÉRÉ, ID DE TRANSACTION OPÉRATEUR, DATE.
+    """
+    result = {
+        "ok": True, "montant": None, "operateur": "SwitchN",
+        "type": "envoi", "date": None, "reference": None,
+        "confiance": "faible", "brut": "",
+    }
+    try:
+        import pdfplumber, io as _io
+        with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
+            texte_brut = "\n".join(p.extract_text() or "" for p in pdf.pages)
+        result["brut"] = texte_brut[:300]
+        texte = texte_brut.upper()
+
+        # Montant : MONTANT TRANSFÉRÉ (ce que le bénéficiaire reçoit = montant cotisation)
+        # Format PDF : "1,000 FCFA" (virgule comme séparateur de milliers)
+        m_mt = re.search(r"MONTANT\s+TRANSF[EÉ]R[EÉ]\s+([\d,\s]+)\s*FCFA", texte)
+        if not m_mt:
+            m_mt = re.search(r"MONTANT\s+PAY[EÉ]\s+([\d,\s]+)\s*FCFA", texte)
+        if m_mt:
+            val_str = re.sub(r"[^\d]", "", m_mt.group(1))
+            try:
+                val = int(val_str)
+                if 100 <= val <= 10_000_000:
+                    result["montant"] = val
+            except ValueError:
+                pass
+
+        # Référence priorité 1 : ID DE TRANSACTION OPÉRATEUR (ex: MP260604.1129.C95759)
+        m_ref = re.search(
+            r"ID\s+DE\s+TRANSACTION\s+OP[EÉ]RATEUR\s+([A-Z]{2}\d{6}\.\d{4}\.[A-Z0-9]{4,8})",
+            texte)
+        if not m_ref:
+            # Priorité 2 : ID DU TRANSFERT (numérique court)
+            m_ref = re.search(r"ID\s+DU\s+TRANSFERT\s+(\d{5,12})", texte)
+        if not m_ref:
+            # Priorité 3 : ID DE LA DEMANDE DE PAIEMENT
+            m_ref = re.search(
+                r"ID\s+DE\s+LA\s+DEMANDE\s+DE\s+PAIEMENT\s+([\w_-]{5,20})", texte)
+        if m_ref:
+            result["reference"] = m_ref.group(1).strip()
+
+        # Date — format DD/MM/YYYY HH:MM
+        m_date = re.search(r"(\d{2}/\d{2}/\d{4})", texte)
+        if m_date:
+            result["date"] = m_date.group(1)
+
+        # Confirmation : "TERMINÉ" (statut SwitchN) ou confirmation opérateur
+        if "TERMIN" in texte or "SUCCESSFULLY" in texte:
+            result["confiance"] = "haute" if (result["montant"] and result["reference"]) \
+                                  else "moyenne"
+
+    except Exception as _e:
+        log.warning(f"⚠️ _lire_pdf_switchn : {_e}")
+        result["ok"] = False
+    return result
+
+
 def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
     """
-    Analyse un screenshot Mobile Money via OCR local (pytesseract).
-    Gratuit, tourne en local, zéro appel API externe.
+    Analyse un screenshot ou reçu PDF Mobile Money.
+    PDFs SwitchN : extraction directe (pas d'OCR). JPG/PNG : OCR Tesseract.
 
     Retourne un dict :
     {
       "ok":        True/False,
       "montant":   int ou None,
-      "operateur": "MTN" | "Orange" | "Inconnu",
+      "operateur": "MTN" | "Orange" | "SwitchN" | "Inconnu",
       "type":      "envoi" | "recharge" | "inconnu",
       "date":      str ou None,
       "reference": str ou None,
@@ -1862,6 +1930,10 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
       "brut":      str (texte extrait brut)
     }
     """
+    # Dispatch PDF SwitchN — magic bytes %PDF
+    if image_bytes[:4] == b'%PDF':
+        return _lire_pdf_switchn(image_bytes)
+
     try:
         import pytesseract
         from PIL import Image
@@ -1892,13 +1964,14 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
             "brut":      texte_brut[:300],
         }
 
-        # ── Détection opérateur / source ─────────────────────────────────
+        # ── Détection opérateur — ordre critique : SwitchN > Orange > MTN ──
+        # "MTN" seul retiré : trop générique, apparaît dans reçus Orange→MTN
         if "SWITCHN" in texte or "SWITCH N" in texte:
             result["operateur"] = "SwitchN"
-        elif "MTN" in texte or "MOMO" in texte or "MOBILE MONEY" in texte:
-            result["operateur"] = "MTN"
-        elif "ORANGE" in texte or "FLOOZ" in texte or "OM " in texte:
+        elif any(k in texte for k in ("ORANGE MONEY", "FLOOZ", "OM ", "TRANSFERT DE")):
             result["operateur"] = "Orange"
+        elif any(k in texte for k in ("MTN MOMO", "MOMO", "MOBILE MONEY")):
+            result["operateur"] = "MTN"
 
         # ── Détection type ────────────────────────────────────────────────
         if any(k in texte for k in ("ENVOI", "TRANSFERT", "VOUS AVEZ ENVOYE",
@@ -1914,6 +1987,7 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
         _NBR = r"(\d{1,3}(?:[\s\.  ]\d{3})*|\d{4,10})"
         _DEV = r"(?:FCFA|XAF|CFA|FRS|F\b)"
         patterns_montant = [
+            r"(?:MONTANT\s+TRANSACTION|MONTANT\s+BRUT)\s*[:\-=]?\s*" + _NBR,  # priorité : "Montant Transaction: 5 000"
             _NBR + r"\s*" + _DEV,                                   # "5 000 FCFA"
             _DEV + r"\s*:?\s*" + _NBR,                              # "XAF: 5000"
             r"(?:MONTANT|AMOUNT|SOMME|TOTAL)\s*[:\-=]?\s*" + _NBR,  # "MONTANT: 5 000"
@@ -1943,6 +2017,7 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
         patterns_ref_kw = []
         if _op == "Orange":
             patterns_ref_kw = [
+                r"\b(PP\d{6}\.\d{4}\.[A-Z0-9]{4,8})\b",            # PP260623.1152.AD63N5
                 r"\b(OM\d{8,12})\b",
                 r"(?:R[EÉ]F[EÉ]RENCE?|TRANS(?:ACTION)?|ID)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
             ]
@@ -7817,6 +7892,12 @@ def _traiter_message_meta(msg: dict, metadata: dict):
     elif msg_type == "image":
         est_image = True
         media_id = (msg.get("image", {}) or {}).get("id", "")
+        if media_id:
+            media_b64 = _meta_telecharger_media(media_id)
+    elif msg_type == "document":
+        # PDF SwitchN envoyé en DM — même pipeline que image
+        est_image = True
+        media_id = (msg.get("document", {}) or {}).get("id", "")
         if media_id:
             media_b64 = _meta_telecharger_media(media_id)
     elif msg_type == "interactive":

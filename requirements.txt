@@ -7,3 +7,4 @@ Pillow==12.1.1
 pytesseract==0.3.13
 opencv-python==4.10.0.84
 numpy==2.2.5
+pdfplumber==0.11.4

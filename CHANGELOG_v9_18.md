@@ -279,6 +279,20 @@ Config Tesseract mise à jour : `--psm 6 --oem 3 -c preserve_interword_spaces=1`
 
 ---
 
+### PATCH 23 — Calibration OCR sur 59 vrais reçus (56 Orange/MTN + 3 SwitchN PDF)
+
+| # | Problème | Fix |
+|---|----------|-----|
+| 1 | SwitchN envoie des PDFs — `cv2.imdecode()` crash sur PDF bytes | Nouvelle fonction `_lire_pdf_switchn()` : extraction directe via `pdfplumber` (zéro OCR, 100% précision). Dispatch automatique dans `lire_screenshot_mobile_money` via magic bytes `b'%PDF'`. Handler `document` ajouté dans `_traiter_message_meta`. |
+| 2 | ID Orange Money format `PP260623.1152.AD63N5` non capturé | Pattern `r"\b(PP\d{6}\.\d{4}\.[A-Z0-9]{4,8})\b"` ajouté en priorité 1 Orange |
+| 3 | `Montant Transaction: X FCFA` capturé après `Montant Net` | Pattern `MONTANT TRANSACTION` ajouté en tête de `patterns_montant` |
+| 4 | Reçus Orange→MTN : `"MTN"` détecté avant `"ORANGE MONEY"` | Détection opérateur réécrite : `"MTN"` seul supprimé, remplacé par `"MTN MOMO"/"MOMO"`. `"TRANSFERT DE"` ajouté comme signal Orange exclusif. |
+| 5 | Clavier WhatsApp QWERTY en bas du screenshot pollue OCR | Crop 18% du bas si portrait (`h > w`) dans `_pretraiter_screenshot_whatsapp` |
+
+**Dépendance ajoutée :** `pdfplumber==0.11.4` dans `requirements.txt`
+
+---
+
 ### PATCH 22 — GitHub Ruleset : Merge bloqué tant que CI n'est pas vert
 
 **Problème :** Les 3 jobs CI (syntax, secrets, dependencies) tournaient mais GitHub laissait quand même merger même si l'un d'eux était rouge.
