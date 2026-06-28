@@ -147,9 +147,10 @@ PG_BIN  = os.getenv("PG_BIN",  r"C:\Program Files\PostgreSQL\18\bin")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 
 # ── WhatsApp — Green API (compte perso existant, scan QR) ─────────────────
-GREENAPI_INSTANCE_ID = os.getenv("GREENAPI_INSTANCE_ID", "")  # Ex: 1234567890
-GREENAPI_TOKEN       = os.getenv("GREENAPI_TOKEN",       "")  # API token Green API
-GREENAPI_BASE        = "https://api.green-api.com"
+GREENAPI_INSTANCE_ID    = os.getenv("GREENAPI_INSTANCE_ID",    "")  # Ex: 1234567890
+GREENAPI_TOKEN          = os.getenv("GREENAPI_TOKEN",          "")  # API token Green API
+GREENAPI_WEBHOOK_SECRET = os.getenv("GREENAPI_WEBHOOK_SECRET", "")  # Token secret webhook (256 bits)
+GREENAPI_BASE           = "https://api.green-api.com"
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────
 GROUPE_ADMIN = "Admin Barack Corp"
@@ -7747,20 +7748,23 @@ def webhook_whatsapp_greenapi():
     Reçoit les événements WhatsApp depuis Green API.
     Format Green API : { typeWebhook, instanceData, senderData, messageData }
     """
-    # ── 1) Parsing payload ────────────────────────────────────────────────
+    # ── 1) Authentification cryptographique — token secret dans le query string ──
+    # GREENAPI_WEBHOOK_SECRET est configuré dans l'URL webhook du dashboard Green API :
+    # https://<ngrok>/webhook/whatsapp?token=<SECRET>
+    # Green API transmet ce token en query param à chaque appel entrant.
+    if not GREENAPI_WEBHOOK_SECRET:
+        log.error("🔴 GREENAPI_WEBHOOK_SECRET non configuré — webhook refusé")
+        return jsonify({"status": "misconfigured"}), 503
+    incoming_token = request.args.get("token", "")
+    if not hmac.compare_digest(incoming_token, GREENAPI_WEBHOOK_SECRET):
+        log_audit("GREENAPI_TOKEN_INVALIDE", "Webhook token mismatch", request.remote_addr)
+        return jsonify({"status": "forbidden"}), 403
+
+    # ── 2) Parsing payload ────────────────────────────────────────────────
     try:
         payload = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"status": "bad_json"}), 400
-
-    # ── 2) Validation de l'instance (anti-usurpation) ─────────────────────
-    if not GREENAPI_INSTANCE_ID:
-        log.error("🔴 GREENAPI_INSTANCE_ID non configuré — webhook refusé")
-        return jsonify({"status": "misconfigured"}), 503
-    instance_id = str((payload.get("instanceData") or {}).get("idInstance", ""))
-    if instance_id != str(GREENAPI_INSTANCE_ID):
-        log_audit("GREENAPI_INSTANCE_INVALIDE", f"idInstance={instance_id}", request.remote_addr)
-        return jsonify({"status": "forbidden"}), 403
 
     # ── 3) Filtrer — on traite uniquement les messages entrants ───────────
     type_webhook = payload.get("typeWebhook", "")
