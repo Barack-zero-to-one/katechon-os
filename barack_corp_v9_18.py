@@ -334,7 +334,8 @@ def msg_intro_groupe(nom_tontine: str, montant: int,
         f"─────────────────────────────────────────────\n"
         f"📌 *ARTICLE 3 — SANCTIONS*\n"
         f"─────────────────────────────────────────────\n\n"
-        f"▪ *Retard > 72h* → Suspension automatique + pénalité de réactivation : 1 000 FCFA\n"
+        f"▪ *Premier retard > 72h* → Sursis accordé. Aucune sanction.\n"
+        f"▪ *Récidive* → Suspension automatique + pénalité de réactivation : 1 000 FCFA\n"
         f"▪ *Abandon post-bouffage* → Saisie caution + dossier transmis à la Police Judiciaire\n"
         f"▪ *Screenshot falsifié ou recyclé* → Exclusion définitive + poursuites pénales\n"
         f"▪ *3 anomalies détectées* → Bannissement réseau BADF + signalement opérateurs Mobile Money\n\n"
@@ -932,8 +933,9 @@ def init_db():
         dernier_bouffage    TIMESTAMPTZ,
         nb_bouffages        INTEGER NOT NULL DEFAULT 0,
         -- Suspension pour retard cotisation
-        suspendu_retard     INTEGER NOT NULL DEFAULT 0,
-        date_suspension_retard TIMESTAMPTZ,
+        suspendu_retard              INTEGER NOT NULL DEFAULT 0,
+        date_suspension_retard       TIMESTAMPTZ,
+        nb_avertissements_retard     INTEGER NOT NULL DEFAULT 0,
         date_adhesion       TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
 
@@ -1224,6 +1226,7 @@ def init_db():
         # ── Multi-cadence (v9.18) ──────────────────────────────────────────
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS jour_semaine TEXT NOT NULL DEFAULT 'Lundi' CHECK(jour_semaine IN ('Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi','Dimanche'))",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS jour_mois INTEGER NOT NULL DEFAULT 1 CHECK(jour_mois BETWEEN 1 AND 28)",
+        "ALTER TABLE membres ADD COLUMN IF NOT EXISTS nb_avertissements_retard INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             c.execute("SAVEPOINT mig")
@@ -9424,7 +9427,8 @@ def verifier_suspensions_retard():
             mult  = _mult_suspension.get(t.get("type_tontine", "Journaliere"), 1)
             seuil = datetime.now() - timedelta(hours=DELAI_SUSPENSION_HEURES * mult)
             en_retard = fetchall(conn, """
-                SELECT m.id, m.nom_complet, m.whatsapp, a.jours_avance
+                SELECT m.id, m.nom_complet, m.whatsapp, a.jours_avance,
+                       m.nb_avertissements_retard
                 FROM adhesions a JOIN membres m ON m.id=a.membre_id
                 WHERE a.tontine_id=%s AND a.statut='Actif'
                   AND m.suspendu_retard=0
@@ -9444,40 +9448,46 @@ def verifier_suspensions_retard():
             """, (t["id"], t["id"], t["id"], seuil))
 
             for m in en_retard:
-                q(conn, """UPDATE membres
-                           SET suspendu_retard=1, date_suspension_retard=NOW(),
-                               statut_global='Suspendu_global'
-                           WHERE id=%s""", (m["id"],))
-                _update_score_confiance(conn, m["id"], delta=-25, raison="Suspension retard paiement")
-                q(conn, "UPDATE adhesions SET statut='Suspendu' WHERE membre_id=%s AND tontine_id=%s",
-                  (m["id"], t["id"]))
-                q(conn, """INSERT INTO sanctions
-                           (membre_id, tontine_id, type_sanction, notes)
-                           VALUES (%s,%s,'Suspension_72h','Suspension auto 72h sans cotisation')""",
-                  (m["id"], t["id"]))
-                conn.commit()
-                wa_prive(m["whatsapp"],
-                    f"🔴 *COMPTE SUSPENDU — BARACK CORP*\n"
-                    f"Tontine *{t['nom']}*\n"
-                    f"Vous n'avez pas cotisé depuis *72h*.\n\n"
-                    f"Pour vous réactiver, payez *{FRAIS_REACTIV:,} FCFA*\n"
-                    f"Code : *REACTIV*\n"
-                    f"MTN : *✱126✱1000✱REACTIV#*\n"
-                    f"Orange : *#150✱1000✱REACTIV#*\n\n"
-                    f"⚠️ Sans régularisation sous 48h, votre caution sera saisie."
-                )
-                # Annonce publique dans le groupe — pression sociale
-                if t.get("whatsapp_groupe"):
-                    wa_groupe(t["whatsapp_groupe"],
-                        f"🔴 *{t['nom']} — SUSPENSION*\n\n"
-                        f"Le compte de *{m['nom_complet']}* a été suspendu "
-                        f"pour non-paiement depuis 72h.\n\n"
-                        f"Son accès au menu est bloqué jusqu'à régularisation.\n"
-                        f"Le groupe ne sera pas pénalisé.\n\n"
-                        f"_TontineBot Pro — BADF Ltd_"
+                if m["nb_avertissements_retard"] == 0:
+                    # PREMIÈRE FOIS — sursis silencieux, aucun message
+                    q(conn, "UPDATE membres SET nb_avertissements_retard=1 WHERE id=%s", (m["id"],))
+                    q(conn, """INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes)
+                               VALUES (%s,%s,'Avertissement_retard','Premier retard — sursis silencieux')""",
+                      (m["id"], t["id"]))
+                    conn.commit()
+                    log_audit("AVERTISSEMENT_RETARD_SURSIS",
+                              f"{m['nom_complet']} — {t['nom']}", m["whatsapp"])
+                else:
+                    # RÉCIDIVE — suspension complète + 1 000 FCFA
+                    q(conn, """UPDATE membres
+                               SET suspendu_retard=1, date_suspension_retard=NOW(),
+                                   statut_global='Suspendu_global'
+                               WHERE id=%s""", (m["id"],))
+                    _update_score_confiance(conn, m["id"], delta=-25, raison="Suspension retard — récidive")
+                    q(conn, "UPDATE adhesions SET statut='Suspendu' WHERE membre_id=%s AND tontine_id=%s",
+                      (m["id"], t["id"]))
+                    q(conn, """INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes)
+                               VALUES (%s,%s,'Suspension_72h','Suspension auto — récidive retard')""",
+                      (m["id"], t["id"]))
+                    conn.commit()
+                    wa_prive(m["whatsapp"],
+                        f"🔴 *COMPTE SUSPENDU — {t['nom']}*\n\n"
+                        f"Vous n'avez pas cotisé depuis plus de 72h.\n\n"
+                        f"Pour vous réactiver, payez *{FRAIS_REACTIV:,} FCFA*\n"
+                        f"Code : *REACTIV*\n\n"
+                        f"⚠️ Sans régularisation sous 48h, votre caution sera saisie."
                     )
-                log_audit("SUSPENSION_AUTO_72H",
-                          f"{m['nom_complet']} — {t['nom']}", m["whatsapp"])
+                    if t.get("whatsapp_groupe"):
+                        wa_groupe(t["whatsapp_groupe"],
+                            f"🔴 *{t['nom']} — SUSPENSION*\n\n"
+                            f"Le compte de *{m['nom_complet']}* a été suspendu "
+                            f"pour non-paiement (récidive).\n\n"
+                            f"Son accès est bloqué jusqu'à régularisation.\n"
+                            f"Le groupe ne sera pas pénalisé.\n\n"
+                            f"_TontineBot Pro — BADF Ltd_"
+                        )
+                    log_audit("SUSPENSION_AUTO_72H",
+                              f"{m['nom_complet']} — {t['nom']}", m["whatsapp"])
     except Exception as e:
         log.error(f"❌ verifier_suspensions_retard : {e}")
     finally:
