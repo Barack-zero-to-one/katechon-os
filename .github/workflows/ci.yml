@@ -1,0 +1,63 @@
+name: CI — KATECHON OS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  syntax:
+    name: Python Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Syntax check
+        run: |
+          python -c "
+          import ast, sys
+          with open('barack_corp_v9_18.py', encoding='utf-8') as f:
+              src = f.read()
+          try:
+              ast.parse(src)
+              print('Syntax OK —', len(src.splitlines()), 'lines')
+          except SyntaxError as e:
+              print(f'SyntaxError: {e}')
+              sys.exit(1)
+          "
+
+  secrets-audit:
+    name: No Hardcoded Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for hardcoded Meta credentials
+        run: |
+          if grep -P "(META_PHONE_ID|META_TOKEN|META_BUSINESS_ID|META_APP_SECRET)\s*=\s*['\"][A-Za-z0-9]" barack_corp_v9_18.py; then
+            echo "FAIL: hardcoded secret detected"
+            exit 1
+          fi
+          echo "OK: no hardcoded secrets"
+
+  dependencies:
+    name: Dependency Install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: System deps (Tesseract + libpq)
+        run: sudo apt-get update -qq && sudo apt-get install -y tesseract-ocr libpq-dev
+      - name: pip install
+        run: pip install --upgrade pip && pip install -r requirements.txt
+      - name: Verify key imports
+        run: |
+          python -c "
+          import flask, waitress, psycopg2, apscheduler, requests
+          import PIL, pytesseract, cv2, numpy
+          print('All imports OK')
+          "

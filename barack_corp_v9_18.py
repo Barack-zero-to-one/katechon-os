@@ -106,7 +106,7 @@ WAITRESS_THREADS = 70   # aligné sur maxconn=80 (-10 réservés APScheduler)
 BOT_NOM = os.getenv("BOT_NOM", "TontineBot Pro")
 
 # ── Frais BADF Ltd ────────────────────────────────────────────────────────
-FRAIS_ADHESION   = 1_000   # Une seule fois, valable à vie sur le réseau BADF
+FRAIS_ADHESION   = 0       # Adhésion gratuite — revenu 100% FMP
 FRAIS_FMP        = 0.02    # 2% prélevé sur chaque cotisation → reversé à BADF
 MONTANT_IRA      = 150     # Pénalité retard (FCFA/jour)
 HEURE_LIMITE_DEF = time(18, 0)
@@ -344,7 +344,6 @@ def msg_intro_groupe(nom_tontine: str, montant: int,
         f"escroquerie, abus de confiance. Peine : jusqu'à 10 ans d'emprisonnement ferme.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📲 *Enrôlement obligatoire :* tapez *menu* en DM à *{BOT_NOM}*\n"
-        f"   Frais d'ouverture de dossier KYC : *1 000 FCFA*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"_Barack & AI Development Facilities Ltd — BADF Ltd_\n"
         f"_« Utiliser la technologie pour servir le prochain avec intégrité »_"
@@ -641,38 +640,27 @@ def msg_kyc_groupe(nom_tontine: str) -> str:
         f"sans avertissement préalable*\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📲 Tapez *menu* en DM à *TontineBot Pro*\n"
-        f"   Frais d'ouverture de dossier KYC : *1 000 FCFA*\n"
         f"   Conformité COBAC R-2019/01 | ANIF | Archivage 7 ans\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"_Barack & AI Development Facilities Ltd — BADF Ltd_\n"
         f"_« Utiliser la technologie pour servir le prochain avec intégrité »_"
     )
 MSG_BIENVENUE_DM = (
-    "🏦 *Bienvenue chez Barack Corp — BADF Ltd*\n"
+    "🏦 *Bienvenue sur TontineBot Pro — BADF Ltd*\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Vous n'êtes pas encore inscrit.\n\n"
-    "Pour rejoindre une tontine Barack Corp, voici les étapes :\n\n"
-    "*Étape 1 — Payer les frais d'adhésion*\n"
-    "Montant : *1 000 FCFA* (une seule fois, pour toutes les tontines)\n\n"
-    "📱 *MTN Mobile Money :*\n"
-    "Composez `✱126✱1000✱ADHESION#`\n\n"
-    "📱 *Orange Money :*\n"
-    "Composez `#150✱1000✱ADHESION#`\n\n"
-    "*Étape 2 — Compléter votre dossier KYC*\n"
-    "Une fois le paiement reçu, je vous enverrai un formulaire "
-    "d'identification sécurisé (5 étapes, moins de 3 minutes).\n\n"
+    "Pour rejoindre une tontine, une seule étape : "
+    "compléter votre *dossier KYC gratuit* (moins de 3 minutes).\n\n"
+    "🔒 *Pourquoi le KYC ?*\n\n"
+    "TontineBot Pro gère des fonds réels. Chaque membre doit être "
+    "identifié conformément aux exigences *CEMAC/ANIF*. "
+    "Vos données sont chiffrées SHA-256, archivées 7 ans, "
+    "et ne sont jamais partagées avec des tiers.\n\n"
+    "En cas de fraude, votre dossier KYC permet d'enclencher "
+    "les procédures légales et le blocage Mobile Money.\n\n"
     "─────────────────────────────────────────\n"
-    "🔒 *Pourquoi le KYC est obligatoire ?*\n\n"
-    "Barack Corp gère des fonds réels. Pour protéger tous les membres, "
-    "chaque participant doit être identifié conformément aux exigences "
-    "CEMAC/ANIF. Vos données sont chiffrées SHA-256 et ne sont jamais "
-    "partagées avec des tiers.\n\n"
-    "En cas de fraude ou de non-paiement, votre dossier KYC permet "
-    "d'enclencher les procédures légales appropriées.\n\n"
-    "─────────────────────────────────────────\n"
-    "❓ *Des questions ?* Tapez *0* pour contacter un admin.\n"
+    "Tapez *menu* pour démarrer votre vérification.\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "_Barack & AI Development Facilities Ltd — BADF Ltd_"
+    "_BADF Ltd — Technologie au service du prochain_"
 )
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1372,17 +1360,14 @@ def inscrire_dans_tontine(membre_id: int, tontine_id: int,
                           nb_places: int = 1) -> None:
     """
     Inscrit un membre dans une tontine et l'ajoute à la liste de passage.
-    Vérifie : adhésion payée, capacité max, doublon.
+    Vérifie : capacité max, doublon.
     """
     conn    = get_conn()
     membre  = fetchone(conn,
-        "SELECT adhesion_payee, nom_complet FROM membres WHERE id=%s", (membre_id,))
+        "SELECT nom_complet FROM membres WHERE id=%s", (membre_id,))
     if not membre:
         release_conn(conn)
         raise ValueError(f"Membre {membre_id} introuvable.")
-    if not membre["adhesion_payee"]:
-        release_conn(conn)
-        raise ValueError(f"Adhésion non payée pour {membre['nom_complet']}.")
 
     tontine = fetchone(conn,
         "SELECT capacite_max, cycle_actuel, nom FROM tontines WHERE id=%s", (tontine_id,))
@@ -1795,6 +1780,66 @@ def _alerter_burst_fraude():
 # PAIEMENT MANUEL — Screenshot + Confirmation Admin
 # ══════════════════════════════════════════════════════════════════════════
 
+def _pretraiter_screenshot_whatsapp(image_bytes: bytes):
+    """
+    Pipeline OpenCV 7 étapes pour screenshots WhatsApp compressés.
+    Gère : artéfacts JPEG, mode sombre, texte petit, binarisation adaptative.
+    Retourne une PIL Image noir/blanc pur prête pour Tesseract.
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image
+    import io
+
+    # 1. Décoder les bytes → tableau BGR OpenCV
+    arr = np.frombuffer(image_bytes, np.uint8)
+    img_cv = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img_cv is None:
+        # Fallback PIL si format non supporté par OpenCV
+        pil = Image.open(io.BytesIO(image_bytes)).convert("L")
+        w, h = pil.size
+        if w < 1400:
+            scale = 1400.0 / w
+            pil = pil.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        return pil
+
+    # 2. Convertir en niveaux de gris
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+    # 3. Détection mode sombre + inversion
+    #    Luminosité moyenne < 127 → texte clair sur fond sombre → inverser
+    if gray.mean() < 127:
+        gray = cv2.bitwise_not(gray)
+
+    # 4. Agrandir pour les petits textes (cible : 1400 px de large minimum)
+    h_cv, w_cv = gray.shape
+    if w_cv < 1400:
+        scale = 1400.0 / w_cv
+        gray = cv2.resize(gray, None, fx=scale, fy=scale,
+                          interpolation=cv2.INTER_CUBIC)
+
+    # 5. Lissage des artéfacts JPEG WhatsApp (blocs 8×8)
+    #    Gaussian σ=1 (kernel 3×3) — supprime le bruit intra-bloc
+    #    sans flouter les contours inter-caractères
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    # 6. Seuillage adaptatif → noir/blanc pur
+    #    blockSize=31 : fenêtre large pour gérer les en-têtes colorés des apps
+    #    C=15 : marge de contraste pour les polices fines
+    binary = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        blockSize=31, C=15
+    )
+
+    # 7. Bordure blanche 20px — empêche Tesseract de tronquer les bords
+    binary = cv2.copyMakeBorder(binary, 20, 20, 20, 20,
+                                cv2.BORDER_CONSTANT, value=255)
+
+    return Image.fromarray(binary)
+
+
 def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
     """
     Analyse un screenshot Mobile Money via OCR local (pytesseract).
@@ -1819,21 +1864,14 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
         # re est déjà importé globalement en haut du fichier
         pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-        # Charger l'image
-        img = Image.open(io.BytesIO(image_bytes))
-
-        # Amélioration image pour meilleur OCR
-        # Convertir en niveaux de gris + agrandir
-        img = img.convert("L")
-        w, h = img.size
-        if w < 600:
-            img = img.resize((w * 2, h * 2), Image.LANCZOS)
+        # Prétraitement OpenCV (dark mode, JPEG artifacts, upscale, binarisation)
+        img = _pretraiter_screenshot_whatsapp(image_bytes)
 
         # OCR — français + anglais pour couvrir MTN/Orange
         texte = pytesseract.image_to_string(
             img,
             lang="fra+eng",
-            config="--psm 6 --oem 3"
+            config="--psm 6 --oem 3 -c preserve_interword_spaces=1"
         )
         texte_brut = texte
         texte      = texte.upper()
@@ -1849,8 +1887,10 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
             "brut":      texte_brut[:300],
         }
 
-        # ── Détection opérateur ───────────────────────────────────────────
-        if "MTN" in texte or "MOMO" in texte or "MOBILE MONEY" in texte:
+        # ── Détection opérateur / source ─────────────────────────────────
+        if "SWITCHN" in texte or "SWITCH N" in texte:
+            result["operateur"] = "SwitchN"
+        elif "MTN" in texte or "MOMO" in texte or "MOBILE MONEY" in texte:
             result["operateur"] = "MTN"
         elif "ORANGE" in texte or "FLOOZ" in texte or "OM " in texte:
             result["operateur"] = "Orange"
@@ -1863,20 +1903,24 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
             result["type"] = "recharge"
 
         # ── Extraction montant ────────────────────────────────────────────
-        # Patterns courants : "5 000 FCFA", "5.000 F", "5000F", "XAF 5000"
+        # _NBR : groupes de 3 chiffres séparés par espace/point/NBSP
+        #        OU bloc brut 4-10 chiffres
+        # Couvert : "5000", "5 000", "5.000", "1 000 000", "10.500.000"
+        _NBR = r"(\d{1,3}(?:[\s\.  ]\d{3})*|\d{4,10})"
+        _DEV = r"(?:FCFA|XAF|CFA|FRS|F\b)"
         patterns_montant = [
-            r"(\d[\d\s]{2,8})\s*(?:FCFA|XAF|F\b|CFA)",
-            r"(?:MONTANT|AMOUNT|SOMME)\s*[:\-]?\s*(\d[\d\s]{2,8})",
-            r"(\d[\d\s]{2,8})\s*(?:FRANC)",
+            _NBR + r"\s*" + _DEV,                                   # "5 000 FCFA"
+            _DEV + r"\s*:?\s*" + _NBR,                              # "XAF: 5000"
+            r"(?:MONTANT|AMOUNT|SOMME|TOTAL)\s*[:\-=]?\s*" + _NBR,  # "MONTANT: 5 000"
         ]
         for pat in patterns_montant:
             m = re.search(pat, texte)
             if m:
-                # Nettoyer : enlever espaces internes
-                val_str = re.sub(r"\s", "", m.group(1))
+                # Garder uniquement les chiffres (espaces, points, NBSP supprimés)
+                val_str = re.sub(r"[^\d]", "", m.group(1))
                 try:
                     val = int(val_str)
-                    if 100 <= val <= 10_000_000:  # plage réaliste FCFA
+                    if 100 <= val <= 10_000_000:
                         result["montant"] = val
                         break
                 except ValueError:
@@ -1889,13 +1933,50 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
             result["date"] = m_date.group(0)
 
         # ── Extraction référence transaction ──────────────────────────────
-        for pat in [r"REF[:\s#]*([A-Z0-9]{6,20})",
-                    r"TXN[:\s#]*([A-Z0-9]{6,20})",
-                    r"ID[:\s#]*([A-Z0-9]{8,20})"]:
+        # Priorité 1 : patterns spécifiques à l'opérateur détecté
+        _op = result["operateur"]
+        patterns_ref_kw = []
+        if _op == "Orange":
+            patterns_ref_kw = [
+                r"\b(OM\d{8,12})\b",
+                r"(?:R[EÉ]F[EÉ]RENCE?|TRANS(?:ACTION)?|ID)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
+            ]
+        elif _op == "MTN":
+            patterns_ref_kw = [
+                r"\bTXN?(\d{8,12})\b",
+                r"(?:TRANSACTION\s*ID|TXN?|REF)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
+            ]
+        elif _op == "SwitchN":
+            patterns_ref_kw = [
+                r"\bSWN?-?([A-Z0-9]{6,14})\b",             # SWN-XXXXXXXX ou SW-XXXXXXXX
+                r"(?:ORDER|REF\.?|TRANSACTION|RECU)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
+            ]
+        # Priorité 2 : patterns génériques (Switch + opérateur non détecté)
+        patterns_ref_kw += [
+            r"(?:REF\.?|R[EÉ]F[EÉ]RENCE?)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
+            r"(?:TXN?|TRANSACTION)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
+            r"(?:N[°O]\.?|ID)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
+        ]
+        for pat in patterns_ref_kw:
             m_ref = re.search(pat, texte)
             if m_ref:
                 result["reference"] = m_ref.group(1)
                 break
+        # Priorité 3 : FALLBACK — OCR a mal lu "Référence"/"Transfert"
+        # Cherche la première chaîne alphanumérique MAJUSCULE isolée 8-15 chars
+        # commençant par une lettre (exclut les montants purement numériques)
+        if not result["reference"]:
+            _MOTS_CONNUS = {
+                "FCFA", "MOMO", "MOBILE", "MONEY", "ORANGE", "FLOOZ",
+                "CREDIT", "SUCCES", "SUCCESS", "REUSSI", "CONFIRME",
+                "EFFECTUE", "COMPLETED", "MONTANT", "AMOUNT", "TRANSFERT",
+                "RECHARGE", "AIRTIME", "ENVOI", "PAYMENT", "SOMME", "TOTAL",
+            }
+            for m_fb in re.finditer(r"\b([A-Z][A-Z0-9]{9,14})\b", texte):
+                cand = m_fb.group(1)
+                if cand not in _MOTS_CONNUS:
+                    result["reference"] = cand
+                    break
 
         # ── Niveau de confiance ───────────────────────────────────────────
         score = 0
@@ -3194,7 +3275,8 @@ def demarrer_kyc(wa: str):
       Mineur  (<18 ans) : Nom → Naissance → Ville        (3 étapes)
     La détection adulte/mineur se fait à l'étape 2 (date de naissance).
     """
-    _sessions_kyc[wa] = {"etape": 0, "data": {}, "mineur": None, "ts": time_module.time()}
+    with _sessions_lock:
+        _sessions_kyc[wa] = {"etape": 0, "data": {}, "mineur": None, "ts": time_module.time()}
     wa_prive(wa,
         "📋 *VÉRIFICATION D'IDENTITÉ — BADF Ltd*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -3491,7 +3573,22 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
     if texte_lower in ("menu", "bonjour", "aide", "hello", "hi", "salut", "help", "start"):
         _sessions_membre[wa] = {"etape": "menu", "data": {}, "ts": time_module.time()}
         if not membre:
-            return MSG_BIENVENUE_DM
+            conn_new = get_conn()
+            try:
+                kyc_hash_new = hashlib.sha256(f"NEW{wa}".encode()).hexdigest()
+                cur_new = q(conn_new, """
+                    INSERT INTO membres
+                        (nom_complet, kyc_hash, whatsapp, adhesion_payee, statut_global, kyc_etape)
+                    VALUES (%s,%s,%s,1,'En_attente_kyc',0)
+                    ON CONFLICT (whatsapp) DO NOTHING
+                """, (f"Membre_{wa[-4:]}", kyc_hash_new, wa))
+                inserted = cur_new.rowcount > 0
+                conn_new.commit()
+            finally:
+                release_conn(conn_new)
+            if inserted:
+                demarrer_kyc(wa)
+            return ""
         if membre["statut_global"] == "En_attente_kyc":
             demarrer_kyc(wa)
             return ""
@@ -4977,9 +5074,9 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                          VALUES (%s,%s,%s,1,'En_attente_kyc') RETURNING id""",
                 (nom, kyc_hash, num))
         mid = cur.fetchone()[0]
-        inscrire_dans_tontine(mid, tid)
         conn.commit()
         release_conn(conn)
+        inscrire_dans_tontine(mid, tid)
         log_audit("AJOUT_MANUEL", f"{nom} par admin {wa}", num)
         wa_prive(num,
             f"👋 Bienvenue *{nom}* dans Barack Corp !\n"
@@ -6265,14 +6362,14 @@ def _owner_rapport_jour() -> str:
 
         # Adhésions du jour
         adhesions = fetchone(conn, """
-            SELECT COUNT(*) n, COALESCE(SUM(montant), 0) v FROM transactions
+            SELECT COUNT(*) n, COALESCE(SUM(montant_brut), 0) v FROM transactions
             WHERE type_transaction='Adhesion' AND statut='Confirmee'
               AND date_heure::date = CURRENT_DATE
         """)
 
         # Cotisations du jour
         cot = fetchone(conn, """
-            SELECT COUNT(*) n, COALESCE(SUM(montant), 0) v FROM transactions
+            SELECT COUNT(*) n, COALESCE(SUM(montant_brut), 0) v FROM transactions
             WHERE type_transaction='Cotisation' AND statut='Confirmee'
               AND date_heure::date = CURRENT_DATE
         """)
@@ -6353,7 +6450,7 @@ def _owner_rapport_mois() -> str:
             WHERE statut='Confirmee' AND date_heure >= %s
         """, (debut_mois,))["v"]
         adhesions = fetchone(conn, """
-            SELECT COUNT(*) n, COALESCE(SUM(montant), 0) v FROM transactions
+            SELECT COUNT(*) n, COALESCE(SUM(montant_brut), 0) v FROM transactions
             WHERE type_transaction='Adhesion' AND statut='Confirmee'
               AND date_heure >= %s
         """, (debut_mois,))
@@ -6402,7 +6499,7 @@ def _owner_historique_n_jours(nb_jours: int, titre: str = None) -> str:
             WHERE statut='Confirmee' AND date_heure >= %s
         """, (debut,))["v"]
         adhesions = fetchone(conn, """
-            SELECT COUNT(*) n, COALESCE(SUM(montant), 0) v FROM transactions
+            SELECT COUNT(*) n, COALESCE(SUM(montant_brut), 0) v FROM transactions
             WHERE type_transaction='Adhesion' AND statut='Confirmee'
               AND date_heure >= %s
         """, (debut,))
@@ -6506,7 +6603,7 @@ def _owner_membres_stats() -> str:
             WHERE created_at >= date_trunc('month', CURRENT_DATE)
         """)["n"]
         revenus_adh = fetchone(conn, """
-            SELECT COALESCE(SUM(montant), 0) v FROM transactions
+            SELECT COALESCE(SUM(montant_brut), 0) v FROM transactions
             WHERE type_transaction='Adhesion' AND statut='Confirmee'
         """)["v"]
 
@@ -6840,21 +6937,30 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
 
             _t.sleep(2)
             _wa_send_groupe(group_id,
-                f"🏛️ *Barack & AI Development Facilities — BADF Ltd*\n\n"
-                f"*{inscrits} membre(s) enregistré(s)* sur notre plateforme "
-                f"d'automatisation de tontine. Aucun frais pour ce cycle.\n\n"
-                f"BADF Ltd travaille en collaboration avec la *Police Judiciaire*, "
-                f"l'*ANIF* et les *opérateurs Mobile Money* (MTN, Orange) "
-                f"dans le cadre de la conformité COBAC R-2019/01.\n\n"
-                f"Votre participation à ce groupe a généré une *localisation "
-                f"approximative et des métadonnées de session* enregistrées "
-                f"dans nos serveurs. Ces informations sont archivées *7 ans* "
-                f"et transmises aux autorités compétentes sur simple réquisition.\n\n"
-                f"Tout membre signalé pour fraude, abandon ou falsification "
-                f"est *banni de l'ensemble du réseau BADF* — aucune tontine "
-                f"partenaire ne pourra plus lui accorder de service.\n\n"
-                f"📋 _Vérification d'identité demandée à chacun en fin de cycle._\n\n"
-                f"_BADF Ltd · « Utiliser la technologie pour servir le prochain avec intégrité »_"
+                f"🏛️ *{tontine['nom']} — TontineBot Pro*\n\n"
+                f"🛡️ *CADRE JURIDIQUE ET SÉCURITÉ ANTIFRAUDE*\n\n"
+                f"Pour le confort et la protection absolue des fonds de nos membres honnêtes, "
+                f"*TontineBot Pro* opère sous un protocole de sécurité strict :\n\n"
+                f"*Conformité Institutionnelle :* Notre infrastructure est alignée sur les exigences "
+                f"du règlement *COBAC R-2019/01* et collabore activement avec l'*ANIF* "
+                f"(Agence Nationale d'Investigation Financière) ainsi que la *Police Judiciaire*.\n\n"
+                f"*Tolérance Zéro :* En cas de tentative d'escroquerie ou de bouffage frauduleux "
+                f"sans remboursement, le bot déclenche une alerte immédiate. Les numéros "
+                f"*Orange Money* / *MTN MoMo* associés seront bloqués auprès des opérateurs "
+                f"et une procédure judiciaire sera engagée.\n\n"
+                f"📊 *BARÈME DES FRAIS ET PÉNALITÉS*\n\n"
+                f"• *FMP (Frais de Maintenance) :* 2 % par cotisation "
+                f"_(Financement des serveurs ultra-sécurisés)_\n"
+                f"• *Discipline Collective (Retard) :* 150 FCFA / jour\n"
+                f"• *Réactivation :* 1 000 FCFA "
+                f"_(Après 48h de suspension sans cotisation et sans avoir prévenu l'Administrateur)_\n"
+                f"• *Mise à jour Dossier :* 250 FCFA _(Changement de numéro sécurisé)_\n\n"
+                f"🎁 *RÉCO-RÉCOMPENSE (PARRAINAGE)*\n\n"
+                f"*Bonus Spécial :* Ajoutez une nouvelle tontine sur la plateforme et recevez "
+                f"instantanément *1 000 FCFA de crédit de communication* "
+                f"tous réseaux (Orange, MTN, Camtel).\n\n"
+                f"_Avec TontineBot Pro, construisons ensemble une épargne forte, transparente "
+                f"et sans stress. Bienvenue dans l'ère de la tontine professionnelle._"
             )
             if admin:
                 _t.sleep(1)
@@ -7423,9 +7529,9 @@ def _traiter_screenshot_adhesion_dm(wa: str, image_bytes: bytes) -> bool:
                 membre_id = membre["id"]
             est_nouveau = True
         elif membre["adhesion_payee"] and membre["statut_global"] == "Actif":
-            # Déjà actif — peut-être paiement d'une 2ème tontine
-            membre_id  = membre["id"]
-            est_nouveau = False
+            # Déjà actif — image DM ignorée (adhesion gratuite, pas de screenshot requis)
+            release_conn(conn)
+            return True
         else:
             # Pré-enregistré par admin mais pas encore activé
             membre_id = membre["id"]
@@ -7475,7 +7581,6 @@ def _traiter_screenshot_adhesion_dm(wa: str, image_bytes: bytes) -> bool:
             f"✅ *COMPTE ACTIVÉ — BADF Ltd*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Bonjour *{nom}* !\n\n"
-            f"Votre paiement de *{FRAIS_ADHESION:,} FCFA* a été reçu.\n"
             f"Votre compte est maintenant *actif*.\n\n"
             f"Tontines activées :\n{tontines_txt}\n\n"
             f"─────────────────────────────────────────\n"

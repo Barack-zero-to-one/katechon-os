@@ -3,9 +3,16 @@ ENV
 *.env
 .env*
 
-# Logs
+# Logs & backups runtime
 logs/
 *.log
+backups/
+
+# Screenshots utilisateurs (données sensibles)
+Sample_receipts/
+
+# Données utilisateurs réelles
+exemple liste de bouffage.txt
 
 # Python
 __pycache__/
@@ -22,5 +29,6 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# PDF (binary)
-*.pdf
+# IDE
+.vscode/
+.idea/
