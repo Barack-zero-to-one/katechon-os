@@ -959,6 +959,7 @@ def init_db():
         penalite_desist  INTEGER NOT NULL DEFAULT 20000,
         caution_active   INTEGER NOT NULL DEFAULT 1,
         caution_pourcent INTEGER NOT NULL DEFAULT 10,
+        credit_comm_statut TEXT NOT NULL DEFAULT 'Non_eligible',
         date_creation    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
 
@@ -1227,6 +1228,7 @@ def init_db():
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS jour_semaine TEXT NOT NULL DEFAULT 'Lundi' CHECK(jour_semaine IN ('Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi','Dimanche'))",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS jour_mois INTEGER NOT NULL DEFAULT 1 CHECK(jour_mois BETWEEN 1 AND 28)",
         "ALTER TABLE membres ADD COLUMN IF NOT EXISTS nb_avertissements_retard INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS credit_comm_statut TEXT NOT NULL DEFAULT 'Non_eligible'",
     ]:
         try:
             c.execute("SAVEPOINT mig")
@@ -2329,6 +2331,7 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
     except Exception as _re:
         log.warning(f"⚠️ Reclassement retard non bloquant : {_re}")
 
+    _verifier_credit_comm(conn, cotis["tontine_id"])
     log_audit("COTISATION_CONFIRMEE",
               f"Cotis#{cotis_id} | Membre#{cotis['membre_id']} | "
               f"Tontine#{cotis['tontine_id']} | Admin:{admin_wa}")
@@ -6258,6 +6261,23 @@ def traiter_menu_owner(wa: str, texte: str) -> str | None:
     if not est_owner(wa):
         return None
 
+    # ── Commande directe CREDIT_VERSE (hors menu) ──────────────────────────
+    if texte.strip().upper().startswith("CREDIT_VERSE"):
+        parts = texte.strip().split()
+        if len(parts) == 2 and parts[1].isdigit():
+            conn = get_conn()
+            try:
+                tid = int(parts[1])
+                q(conn, "UPDATE tontines SET credit_comm_statut='Verse' WHERE id=%s", (tid,))
+                conn.commit()
+                log_audit("CREDIT_COMM_VERSE", f"Tontine ID {tid}", wa)
+                return f"✅ Crédit comm marqué comme versé pour tontine ID {tid}."
+            except Exception as _e:
+                return f"❌ Erreur : {_e}"
+            finally:
+                release_conn(conn)
+        return "⚠️ Usage : CREDIT_VERSE <tontine_id>"
+
     t  = texte.strip().lower()
     sess = _sessions_owner.setdefault(wa, {"etape": "hors_menu", "data": {}})
 
@@ -6959,8 +6979,9 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                 f"_(Après 48h de suspension sans cotisation et sans avoir prévenu l'Administrateur)_\n"
                 f"• *Mise à jour Dossier :* 250 FCFA _(Changement de numéro sécurisé)_\n\n"
                 f"🎁 *RÉCO-RÉCOMPENSE (PARRAINAGE)*\n\n"
-                f"*Bonus Spécial :* Ajoutez une nouvelle tontine sur la plateforme et recevez "
-                f"instantanément *1 000 FCFA de crédit de communication* "
+                f"*Bonus Spécial :* Dès que votre groupe réalise ses *5 premières "
+                f"transactions validées* via notre système, recevez "
+                f"*1 000 FCFA de crédit de communication* "
                 f"tous réseaux (Orange, MTN, Camtel).\n\n"
                 f"_Avec TontineBot Pro, construisons ensemble une épargne forte, transparente "
                 f"et sans stress. Bienvenue dans l'ère de la tontine professionnelle._"
@@ -9404,6 +9425,37 @@ def rappel_non_cotisants():
     release_conn(conn)
 
 
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# CRÉDIT COMMUNICATION — GATE ANTI-FRAUDE 5 TRANSACTIONS
+# ══════════════════════════════════════════════════════════════════════════
+
+def _verifier_credit_comm(conn, tontine_id: int):
+    """Débloque le crédit comm 1000 FCFA après 5 cotisations confirmées réelles.
+    Prévient les faux groupes créés pour obtenir le bonus sans activité réelle."""
+    try:
+        tontine = fetchone(conn, "SELECT * FROM tontines WHERE id=%s", (tontine_id,))
+        if not tontine or tontine["credit_comm_statut"] != "Non_eligible":
+            return
+        nb_tx = fetchone(conn, """
+            SELECT COUNT(*) AS n FROM transactions
+            WHERE tontine_id=%s AND type_transaction='Cotisation' AND statut='Confirmee'
+        """, (tontine_id,))["n"]
+        if nb_tx >= 5:
+            q(conn, "UPDATE tontines SET credit_comm_statut='Eligible' WHERE id=%s", (tontine_id,))
+            conn.commit()
+            log_audit("CREDIT_COMM_ELIGIBLE",
+                      f"Tontine {tontine['nom']} — {nb_tx} tx confirmées", "system")
+            wa_prive(OWNER_WA,
+                f"🎁 *CRÉDIT COMM À VERSER*\n\n"
+                f"Tontine : *{tontine['nom']}*\n"
+                f"Transactions confirmées : *{nb_tx}*\n\n"
+                f"Versez *1 000 FCFA* de crédit à l'admin de ce groupe.\n"
+                f"Tapez *CREDIT_VERSE {tontine_id}* pour confirmer le versement."
+            )
+    except Exception as _e:
+        log.warning(f"⚠️ _verifier_credit_comm tontine#{tontine_id} : {_e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
