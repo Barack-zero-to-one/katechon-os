@@ -1978,9 +1978,11 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
             result["operateur"] = "MTN"
 
         # ── Détection type ────────────────────────────────────────────────
+        # "CASH IN" retiré : c'est un dépôt reçu (sens inverse de envoi)
+        # "HAVE TRANSFERRED" retiré : déjà dans la détection opérateur MTN,
+        # le dupliquer ici donnait +2 score depuis un seul keyword (vecteur fraude)
         if any(k in texte for k in ("ENVOI", "TRANSFERT", "VOUS AVEZ ENVOYE",
-                                     "TRANSFER", "SENT", "PAYMENT",
-                                     "CASH IN", "HAVE TRANSFERRED")):
+                                     "TRANSFER", "SENT", "PAYMENT")):
             result["type"] = "envoi"
         elif any(k in texte for k in ("RECHARGE", "CREDIT", "AIRTIME")):
             result["type"] = "recharge"
@@ -2012,7 +2014,11 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
 
         # ── Extraction date ───────────────────────────────────────────────
         # ISO (2026-06-17) ou DD/MM/YYYY — cherche les deux formats
+        # Validation année 2020-2035 sur le pattern ISO pour éviter de matcher
+        # des montants ou fragments d'ID (ex. "5000.06.28")
         m_date = re.search(r"(\d{4})[/\-\.](\d{1,2})[/\-\.](\d{1,2})", texte)
+        if m_date and not (2020 <= int(m_date.group(1)) <= 2035):
+            m_date = None
         if not m_date:
             m_date = re.search(r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2,4})", texte)
         if m_date:
@@ -2030,7 +2036,7 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
             ]
         elif _op == "MTN":
             patterns_ref_kw = [
-                r"TRANSACTION\s+ID\s*[:\-]?\s*(\d{8,15})\b",        # Cash in format MTN EN
+                r"\bTRANSACTION\s+ID\s*[:\-]?\s*(\d{8,15})\b",       # Cash in format MTN EN
                 r"\bTXN?(\d{8,12})\b",
                 r"(?:TRANSACTION\s*ID|TXN?|REF)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
             ]
