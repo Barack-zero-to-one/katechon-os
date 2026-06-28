@@ -1811,9 +1811,11 @@ def _pretraiter_screenshot_whatsapp(image_bytes: bytes):
     # 2. Convertir en niveaux de gris
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    # 3. Détection mode sombre + inversion
-    #    Luminosité moyenne < 127 → texte clair sur fond sombre → inverser
-    if gray.mean() < 127:
+    # 3. Détection fond sombre + inversion
+    #    Ratio > 35% de pixels < 100 → fond sombre (bulle WhatsApp violet-gris)
+    #    Plus robuste que la moyenne : les zones blanches hors-bulle tirent
+    #    la moyenne vers le haut sans représenter le fond réel du texte.
+    if float(np.mean(gray < 100)) > 0.35:
         gray = cv2.bitwise_not(gray)
 
     # 4. Agrandir pour les petits textes (cible : 1400 px de large minimum)
@@ -1970,12 +1972,15 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
             result["operateur"] = "SwitchN"
         elif any(k in texte for k in ("ORANGE MONEY", "FLOOZ", "OM ", "TRANSFERT DE")):
             result["operateur"] = "Orange"
-        elif any(k in texte for k in ("MTN MOMO", "MOMO", "MOBILE MONEY")):
+        elif any(k in texte for k in ("MTN MOMO", "MOMO", "MOBILE MONEY",
+                                       "CASH IN OF", "HAVE TRANSFERRED",
+                                       "YOU HAVE TRANSFERRED")):
             result["operateur"] = "MTN"
 
         # ── Détection type ────────────────────────────────────────────────
         if any(k in texte for k in ("ENVOI", "TRANSFERT", "VOUS AVEZ ENVOYE",
-                                     "TRANSFER", "SENT", "PAYMENT")):
+                                     "TRANSFER", "SENT", "PAYMENT",
+                                     "CASH IN", "HAVE TRANSFERRED")):
             result["type"] = "envoi"
         elif any(k in texte for k in ("RECHARGE", "CREDIT", "AIRTIME")):
             result["type"] = "recharge"
@@ -2006,8 +2011,10 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
                     continue
 
         # ── Extraction date ───────────────────────────────────────────────
-        m_date = re.search(
-            r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2,4})", texte)
+        # ISO (2026-06-17) ou DD/MM/YYYY — cherche les deux formats
+        m_date = re.search(r"(\d{4})[/\-\.](\d{1,2})[/\-\.](\d{1,2})", texte)
+        if not m_date:
+            m_date = re.search(r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2,4})", texte)
         if m_date:
             result["date"] = m_date.group(0)
 
@@ -2023,6 +2030,7 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
             ]
         elif _op == "MTN":
             patterns_ref_kw = [
+                r"TRANSACTION\s+ID\s*[:\-]?\s*(\d{8,15})\b",        # Cash in format MTN EN
                 r"\bTXN?(\d{8,12})\b",
                 r"(?:TRANSACTION\s*ID|TXN?|REF)\s*[:\-#=]?\s*([A-Z0-9]{8,15})",
             ]

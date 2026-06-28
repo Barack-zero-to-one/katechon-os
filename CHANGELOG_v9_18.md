@@ -293,6 +293,24 @@ Config Tesseract mise à jour : `--psm 6 --oem 3 -c preserve_interword_spaces=1`
 
 ---
 
+### PATCH 24 — OCR : dark mode inversion + format MTN anglais Cameroun
+
+**Résultat :** 91% → **96% confiance haute** sur 56 reçus réels (stress test 1 screenshot/seconde).
+
+| # | Problème | Root cause | Fix |
+|---|----------|-----------|-----|
+| 1 | Notifications MTN anglaises ("Cash in of 5000 XAF") → `operateur=Inconnu`, chiffres lus comme lettres ("SOOO" au lieu de "5000") | `gray.mean() < 127` ne déclenchait pas l'inversion : la bulle WhatsApp violet-gris a `mean≈130-137` (tiré vers le haut par les zones blanches hors-bulle), donc le texte blanc restait sur fond noir → Tesseract lisait des lettres | Inversion basée sur le **ratio de pixels sombres** : `np.mean(gray < 100) > 0.35`. Gap naturel entre bulles sombres (0.69–0.74) et reçus fond clair (0.08–0.33). |
+| 2 | "Cash in of" non reconnu comme MTN | Aucun keyword MTN dans ces notifications anglaises | Ajout : `"CASH IN OF"`, `"HAVE TRANSFERRED"`, `"YOU HAVE TRANSFERRED"` dans détection opérateur MTN |
+| 3 | Type `inconnu` sur ces notifications | "CASH IN" absent des keywords de type | Ajout : `"CASH IN"`, `"HAVE TRANSFERRED"` dans détection type envoi |
+| 4 | Date `2026-06-17` non détectée | Regex `\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}` ne matchait pas `YYYY-MM-DD` | Ajout prioritaire du pattern ISO `\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2}` |
+| 5 | `Transaction ID:17566837242` (numérique pur) non capturé comme référence MTN | Pattern MTN cherchait `[A-Z0-9]{8,15}` mais pas de motif spécifique pour `TRANSACTION ID:\d+` | Ajout pattern MTN : `TRANSACTION\s+ID\s*[:\-]?\s*(\d{8,15})` en priorité 1 |
+
+**2 cas non résolus** (4%) : photos physiques d'écran à travers vitre rayée (FDXJ9842, GAEG3286). Inrécupérables par preprocessing — le bot demandera au membre de renvoyer une capture d'écran propre.
+
+**Localisation :** `_pretraiter_screenshot_whatsapp` (ligne ~1816), `lire_screenshot_mobile_money` (ligne ~1985–2050)
+
+---
+
 ### PATCH 22 — GitHub Ruleset : Merge bloqué tant que CI n'est pas vert
 
 **Problème :** Les 3 jobs CI (syntax, secrets, dependencies) tournaient mais GitHub laissait quand même merger même si l'un d'eux était rouge.
