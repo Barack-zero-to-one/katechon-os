@@ -239,7 +239,7 @@ c0a93fa  feat: message intro tontine en cours — dissuasion comportementale com
 
 ---
 
-## 5 Structural Moats
+## 6 Structural Moats
 
 1. **Trust Graph** — the strongest moat. 24–36 months of irreplicable behavioral data. First behavioral credit bureau for Global South populations that traditional rating agencies have never seen. Builds only with time — impossible to buy or copy.
 
@@ -250,6 +250,8 @@ c0a93fa  feat: message intro tontine en cours — dissuasion comportementale com
 4. **Asymmetric economics** — CAC = 0 (existing WhatsApp groups). Infrastructure = laptop + ngrok. A well-funded competitor copying this spends 100× more for the same result.
 
 5. **Absolute founder-market fit** — founder born into the problem, Yaoundé, Cameroon. A California VC cannot send a team to understand this market in 6 months. Not learned in an MBA.
+
+6. **Financial data flywheel** — more members generate more Trust Graph data, which enables better USDC credit pricing, which produces more competitive yield, which attracts more members. The same compounding moat Stripe built on fraud data, applied to the 400M-person unbanked segment. Widens automatically with volume — no competitor can buy their way in.
 
 ---
 
