@@ -35,7 +35,7 @@ AMEN. AMEN. AMEN. (Vibration 3-6-9 activée).
 ║   TONTINEBOT PRO — VERSION 9.17 — BADF Ltd — Cameroun 🇨🇲               ║
 ║   "Utiliser la technologie pour servir le prochain avec intégrité"      ║
 ║                                                                          ║
-║   Stack : Python 3.11 · Flask · PostgreSQL · Meta WhatsApp Cloud API    ║
+║   Stack : Python 3.11 · Flask · PostgreSQL · Green API WhatsApp         ║
 ║                                                                          ║
 ║   CORRECTIFS v9.2 :                                                      ║
 ║   ✅ Changement de numéro (CHGNUM 250 FCFA) — handler complet           ║
@@ -146,14 +146,10 @@ PG_PASS = os.getenv("PG_PASS", "")
 PG_BIN  = os.getenv("PG_BIN",  r"C:\Program Files\PostgreSQL\18\bin")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 
-# ── WhatsApp Cloud API Meta (officielle, anti-ban) ───────────────────────
-META_GRAPH_URL    = "https://graph.facebook.com/v21.0"
-META_PHONE_ID     = os.getenv("META_PHONE_ID",     "")  # Phone Number ID
-META_TOKEN        = os.getenv("META_TOKEN",        "")  # Permanent access token
-META_BUSINESS_ID  = os.getenv("META_BUSINESS_ID",  "")  # WhatsApp Business Account ID
-META_APP_SECRET   = os.getenv("META_APP_SECRET",   "")  # Pour valider X-Hub-Signature-256
-META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "")
-WA_VERIFY_TOKEN   = META_VERIFY_TOKEN  # Alias compat
+# ── WhatsApp — Green API (compte perso existant, scan QR) ─────────────────
+GREENAPI_INSTANCE_ID = os.getenv("GREENAPI_INSTANCE_ID", "")  # Ex: 1234567890
+GREENAPI_TOKEN       = os.getenv("GREENAPI_TOKEN",       "")  # API token Green API
+GREENAPI_BASE        = "https://api.green-api.com"
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────
 GROUPE_ADMIN = "Admin Barack Corp"
@@ -700,7 +696,7 @@ _msg_executor = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="MsgWorker",
 )
 
-# ── WA throttle — ≤ 77 msg/s vers Meta Cloud API ─────────────────────────────
+# ── WA throttle — ≤ 77 msg/s vers Green API ──────────────────────────────────
 _wa_throttle_lock = threading.Lock()
 _wa_last_send_ts  = 0.0
 
@@ -3018,43 +3014,37 @@ def _outbox_drain():
         log.error(f"Outbox drain erreur : {e}")
 
 
-def _wa_request(endpoint: str, payload: dict, max_retries: int = 3) -> bool:
+def _wa_request(method: str, payload: dict, max_retries: int = 3) -> bool:
     """
-    Wrapper résilient Meta Cloud API avec retry exponentiel + auto-healing.
-    endpoint : '/messages' (envoi), '/groups' n'existe pas dans Meta Cloud.
+    Wrapper résilient Green API avec retry exponentiel.
+    method : 'sendMessage', 'sendFileByUrl', etc.
     Retourne True si envoyé, False sinon (la queue rattrape).
     """
-    if not META_PHONE_ID or not META_TOKEN:
-        log.warning("⚠️ Meta API non configurée (META_PHONE_ID / META_TOKEN manquants)")
+    if not GREENAPI_INSTANCE_ID or not GREENAPI_TOKEN:
+        log.warning("⚠️ Green API non configurée (GREENAPI_INSTANCE_ID / GREENAPI_TOKEN manquants)")
         return False
 
-    url = f"{META_GRAPH_URL}/{META_PHONE_ID}{endpoint}"
-    headers = {
-        "Authorization": f"Bearer {META_TOKEN}",
-        "Content-Type":  "application/json",
-    }
+    url = f"{GREENAPI_BASE}/waInstance{GREENAPI_INSTANCE_ID}/{method}/{GREENAPI_TOKEN}"
+    headers = {"Content-Type": "application/json"}
     delays = [2, 5, 10]
     for attempt in range(max_retries):
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=20)
             if 200 <= r.status_code < 300:
                 return True
-            # 401/403 → token invalide → auto-healing : on log et on remonte
             if r.status_code in (401, 403):
-                log.error(f"🔴 Meta token invalide ({r.status_code}). Vérifier META_TOKEN.")
+                log.error(f"🔴 Green API token invalide ({r.status_code}). Vérifier GREENAPI_TOKEN.")
                 return False
-            # 429 → rate limit → on attend plus longtemps
             if r.status_code == 429:
                 wait = int(r.headers.get("Retry-After", 30))
-                log.warning(f"⚠️ Meta rate limit. Attente {wait}s")
+                log.warning(f"⚠️ Green API rate limit. Attente {wait}s")
                 time_module.sleep(min(wait, 60))
                 continue
-            # 5xx → erreur serveur Meta → on retry
             if r.status_code >= 500:
                 if attempt < max_retries - 1:
                     time_module.sleep(delays[attempt])
                     continue
-            log.warning(f"⚠️ Meta {endpoint} → {r.status_code} : {r.text[:120]}")
+            log.warning(f"⚠️ Green API {method} → {r.status_code} : {r.text[:120]}")
             return False
         except (requests.ConnectionError, requests.Timeout):
             if attempt < max_retries - 1:
@@ -3062,123 +3052,65 @@ def _wa_request(endpoint: str, payload: dict, max_retries: int = 3) -> bool:
                 continue
             return False
         except Exception as e:
-            log.error(f"❌ Meta {endpoint} : {e}")
+            log.error(f"❌ Green API {method} : {e}")
             return False
     return False
 
 
 def _wa_send_direct(to: str, body: str) -> bool:
-    """Envoi DM via Meta Cloud API. `to` au format +237XXXXXXXXX."""
+    """Envoi DM via Green API. `to` au format +237XXXXXXXXX."""
     _throttle_wa()   # ≤ 77 msg/s — évite le 429 sur les batchs APScheduler
-    # Meta exige le numéro sans le +
+    # Green API chatId : numéro sans + ni espaces + @c.us
     to_clean = to.lstrip("+").replace(" ", "")
+    chat_id  = f"{to_clean}@c.us"
     payload  = {
-        "messaging_product": "whatsapp",
-        "recipient_type":    "individual",
-        "to":                to_clean,
-        "type":              "text",
-        "text":              {"preview_url": False, "body": body[:4096]},
+        "chatId":  chat_id,
+        "message": body[:4096],
     }
-    return _wa_request("/messages", payload)
+    return _wa_request("sendMessage", payload)
 
 
 def wa_envoyer_boutons(to: str, body: str, boutons: list, header: str = None, footer: str = None) -> bool:
     """
-    Envoie un message avec des boutons cliquables WhatsApp natifs.
-    Maximum 3 boutons. Chaque bouton est un dict {"id": "...", "titre": "..."}.
-    Retombe sur message texte simple si l'envoi échoue.
+    Green API ne supporte pas les boutons interactifs natifs.
+    Retombe systématiquement sur un message texte avec les options en clair.
     """
-    if not boutons or len(boutons) > 3:
+    if not boutons:
         return _wa_send(to, body)
-    to_clean = to.lstrip("+").replace(" ", "")
-    interactive = {
-        "type": "button",
-        "body": {"text": body[:1024]},
-        "action": {
-            "buttons": [
-                {
-                    "type": "reply",
-                    "reply": {
-                        "id":    str(b.get("id", f"btn_{i}"))[:256],
-                        "title": str(b.get("titre", ""))[:20],
-                    }
-                }
-                for i, b in enumerate(boutons)
-            ]
-        }
-    }
-    if header:
-        interactive["header"] = {"type": "text", "text": header[:60]}
+    options = "\n".join(f"• Tapez *{b.get('titre', '')}*" for b in boutons)
+    texte = body + "\n\n" + options
     if footer:
-        interactive["footer"] = {"text": footer[:60]}
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type":    "individual",
-        "to":                to_clean,
-        "type":              "interactive",
-        "interactive":       interactive,
-    }
-    if _wa_request("/messages", payload):
-        return True
-    # Fallback : message texte avec les options en clair
-    fallback_text = body + "\n\n" + "\n".join(f"• Tapez *{b.get('titre', '')}*" for b in boutons)
-    return _wa_send(to, fallback_text)
+        texte += f"\n\n_{footer}_"
+    return _wa_send(to, texte)
 
 
 def wa_envoyer_liste(to: str, body: str, sections: list, button_text: str = "Choisir",
                      header: str = None, footer: str = None) -> bool:
     """
-    Envoie une liste interactive WhatsApp (jusqu'à 10 items).
-    `sections` = [{"titre": "...", "items": [{"id": "...", "titre": "...", "description": "..."}]}]
-    Retombe sur texte simple si échec.
+    Green API ne supporte pas les listes interactives natives.
+    Retombe systématiquement sur un message texte avec les items numérotés.
     """
     if not sections:
         return _wa_send(to, body)
-    to_clean = to.lstrip("+").replace(" ", "")
-    interactive = {
-        "type": "list",
-        "body": {"text": body[:1024]},
-        "action": {
-            "button":   button_text[:20],
-            "sections": [
-                {
-                    "title": (s.get("titre", "Options"))[:24],
-                    "rows":  [
-                        {
-                            "id":          str(it.get("id", f"item_{i}"))[:200],
-                            "title":       str(it.get("titre", ""))[:24],
-                            "description": str(it.get("description", ""))[:72],
-                        }
-                        for i, it in enumerate(s.get("items", []))[:10]
-                    ]
-                }
-                for s in sections
-            ]
-        }
-    }
-    if header:
-        interactive["header"] = {"type": "text", "text": header[:60]}
+    lignes = [body]
+    for s in sections:
+        titre_section = s.get("titre", "")
+        if titre_section:
+            lignes.append(f"\n*{titre_section}*")
+        for it in s.get("items", [])[:10]:
+            t = it.get("titre", "")
+            d = it.get("description", "")
+            ligne = f"• *{t}*" + (f" — {d}" if d else "")
+            lignes.append(ligne)
     if footer:
-        interactive["footer"] = {"text": footer[:60]}
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type":    "individual",
-        "to":                to_clean,
-        "type":              "interactive",
-        "interactive":       interactive,
-    }
-    if _wa_request("/messages", payload):
-        return True
-    return _wa_send(to, body)
+        lignes.append(f"\n_{footer}_")
+    return _wa_send(to, "\n".join(lignes))
 
 
 def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
     """
-    Meta Cloud API ne supporte PAS l'envoi dans des groupes WhatsApp.
-    Solution adoptée : pour chaque "groupe logique" (tontine), on envoie un
-    message individuel à chaque membre actif. C'est plus coûteux en quota
-    mais c'est la seule voie supportée par l'API officielle.
-    `group_id` ici sert d'identifiant de la tontine (whatsapp_groupe = id_tontine).
+    Broadcast : envoie un DM individuel à chaque membre actif de la tontine.
+    `group_id` est l'identifiant interne de la tontine (colonne whatsapp_groupe).
     """
     try:
         conn    = get_conn()
@@ -3210,7 +3142,7 @@ def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
 
 
 def _wa_send(to: str, body: str) -> bool:
-    """Envoie un DM avec fallback outbox si Meta indisponible."""
+    """Envoie un DM avec fallback outbox si Green API indisponible."""
     if _wa_send_direct(to, body):
         return True
     _outbox_enqueue("send", {"to": to, "body": body})
@@ -3218,7 +3150,7 @@ def _wa_send(to: str, body: str) -> bool:
 
 
 def _wa_send_groupe(group_id: str, body: str) -> bool:
-    """Envoie à tous les membres d'une tontine, fallback outbox si Meta down."""
+    """Envoie à tous les membres d'une tontine, fallback outbox si Green API down."""
     if _wa_send_groupe_direct(group_id, body):
         return True
     _outbox_enqueue("send_group", {"group_id": group_id, "body": body})
@@ -3227,19 +3159,14 @@ def _wa_send_groupe(group_id: str, body: str) -> bool:
 
 def wa_kick_membre(group_id: str, wa_membre: str) -> bool:
     """
-    Meta Cloud API ne permet pas de kicker un membre d'un groupe WhatsApp.
-    On marque le bannissement en base — l'admin humain devra retirer
-    manuellement le membre du groupe WhatsApp.
+    Bannissement signalé — l'admin humain doit retirer manuellement le membre du groupe WhatsApp.
     """
     log.warning(f"⚠️ KICK manuel requis : {wa_membre} doit être retiré de {group_id} par l'admin")
     return False
 
 
 def wa_quitter_groupe(group_id: str) -> bool:
-    """
-    Meta Cloud API ne permet pas de quitter un groupe.
-    On envoie un message d'au revoir à tous les membres et on marque la tontine clôturée.
-    """
+    """Envoie un message d'au revoir à tous les membres et marque la tontine clôturée."""
     _wa_send_groupe_direct(group_id,
         "🏁 *Cycle terminé.*\nLe service TontineBot Pro se retire de cette tontine. "
         "Merci pour votre confiance.\n\n_BADF Ltd_")
@@ -7810,179 +7737,126 @@ def traiter_kyc_rapide(wa: str, texte: str) -> bool:
 
 @app.route("/webhook/whatsapp", methods=["GET"])
 def webhook_whatsapp_verify():
-    """
-    Vérification du webhook Meta lors de la configuration.
-    Meta envoie GET ?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
-    """
-    mode      = request.args.get("hub.mode", "")
-    token     = request.args.get("hub.verify_token", "")
-    challenge = request.args.get("hub.challenge", "")
-    if mode == "subscribe" and token == META_VERIFY_TOKEN:
-        log.info("✅ Webhook Meta vérifié")
-        return challenge, 200
-    log.warning(f"⚠️ Webhook Meta refusé (token={token!r})")
-    return "Forbidden", 403
+    """Health check — Green API n'utilise pas de challenge GET."""
+    return jsonify({"status": "ok", "bot": "TontineBot Pro"}), 200
 
 
 @app.route("/webhook/whatsapp", methods=["POST"])
-def webhook_whatsapp_meta():
+def webhook_whatsapp_greenapi():
     """
-    Reçoit les événements WhatsApp Cloud API Meta.
-    Vérifie X-Hub-Signature-256 puis convertit le payload Meta vers le
-    format interne attendu par le bot.
+    Reçoit les événements WhatsApp depuis Green API.
+    Format Green API : { typeWebhook, instanceData, senderData, messageData }
     """
-    # ── 1) Validation signature Meta ──────────────────────────────────────
-    payload_brut = request.get_data()
-    if not META_APP_SECRET:
-        log.error("🔴 META_APP_SECRET non configuré — webhook refusé")
-        return jsonify({"status": "misconfigured"}), 503
-    signature = request.headers.get("X-Hub-Signature-256", "")
-    if not _meta_signature_valide(payload_brut, signature):
-        log_audit("META_SIG_INVALIDE", "Webhook rejeté", request.remote_addr)
-        return jsonify({"status": "invalid_signature"}), 403
-
-    # ── 2) Parsing payload Meta ───────────────────────────────────────────
+    # ── 1) Parsing payload ────────────────────────────────────────────────
     try:
         payload = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"status": "bad_json"}), 400
 
-    # Format Meta : { object: "whatsapp_business_account", entry: [{ changes: [{ value: { messages: [...], statuses: [...] } }] }] }
+    # ── 2) Validation de l'instance (anti-usurpation) ─────────────────────
+    if not GREENAPI_INSTANCE_ID:
+        log.error("🔴 GREENAPI_INSTANCE_ID non configuré — webhook refusé")
+        return jsonify({"status": "misconfigured"}), 503
+    instance_id = str((payload.get("instanceData") or {}).get("idInstance", ""))
+    if instance_id != str(GREENAPI_INSTANCE_ID):
+        log_audit("GREENAPI_INSTANCE_INVALIDE", f"idInstance={instance_id}", request.remote_addr)
+        return jsonify({"status": "forbidden"}), 403
+
+    # ── 3) Filtrer — on traite uniquement les messages entrants ───────────
+    type_webhook = payload.get("typeWebhook", "")
+    if type_webhook not in ("incomingMessageReceived", "incomingAPIMessageReceived"):
+        return jsonify({"status": "ignored"}), 200
+
+    # ── 4) Extraire l'émetteur ────────────────────────────────────────────
+    sender_data  = payload.get("senderData") or {}
+    chat_id      = sender_data.get("chatId", "")   # ex: 237693969773@c.us
+    wa_brut      = chat_id.split("@")[0]            # ex: 237693969773
+    wa           = normaliser_numero(wa_brut)
+    if not wa:
+        return jsonify({"status": "ok"}), 200
+
+    # ── 5) Soumettre au thread pool ───────────────────────────────────────
     try:
-        entries = payload.get("entry", [])
-        for entry in entries:
-            for change in entry.get("changes", []):
-                value = change.get("value", {})
-                # Statuts (delivered, read, failed) — on log seulement
-                for st in value.get("statuses", []) or []:
-                    if st.get("status") == "failed":
-                        err = (st.get("errors", [{}])[0] or {}).get("message", "")
-                        log.warning(f"⚠️ Meta status failed : {err[:100]}")
-                # Messages reçus — on traite
-                meta = value.get("metadata", {})
-                for msg in value.get("messages", []) or []:
-                    # Rate limit vérifié AVANT submit (évite de créer le thread)
-                    wa_from = msg.get("from", "")
-                    if wa_from and not rate_limit_ok(wa_from):
-                        log.warning(f"⚠️ Rate limit pre-spawn : {wa_from}")
-                        continue
-                    _msg_executor.submit(_traiter_message_meta, msg, meta)
+        _msg_executor.submit(_traiter_message_greenapi, payload, wa)
     except Exception as e:
-        log.error(f"Webhook Meta exception : {e}")
-        return jsonify({"status": "error"}), 200  # 200 sinon Meta retry en boucle
+        log.error(f"Webhook Green API submit : {e}")
 
     return jsonify({"status": "ok"}), 200
 
 
-def _meta_signature_valide(payload_brut: bytes, signature_header: str) -> bool:
-    """Valide HMAC-SHA256 du payload Meta avec META_APP_SECRET."""
-    if not signature_header.startswith("sha256="):
-        return False
-    expected = signature_header[7:]
-    actual   = hmac.new(
-        META_APP_SECRET.encode("utf-8"),
-        payload_brut,
-        hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected, actual)
+def _greenapi_telecharger_media(url_media: str) -> bytes:
+    """Télécharge un média depuis l'URL Green API et retourne le contenu en bytes."""
+    if not url_media:
+        return b""
+    try:
+        from urllib.parse import urlparse as _urlparse
+        _p = _urlparse(url_media)
+        _domaines_ok = (".green-api.com", ".sms.by", ".whatsapp.net")
+        if _p.scheme != "https" or not any(_p.netloc.endswith(d) for d in _domaines_ok):
+            log.warning(f"⚠️ URL média Green API suspecte rejetée : {_p.netloc}")
+            return b""
+        r = requests.get(url_media, timeout=30)
+        if r.status_code == 200:
+            return r.content
+    except Exception as e:
+        log.error(f"Téléchargement média Green API : {e}")
+    return b""
 
 
-def _traiter_message_meta(msg: dict, metadata: dict):
-    """Convertit un message Meta vers le format interne et le route."""
-    wa_brut = msg.get("from", "")
-    wa      = normaliser_numero(wa_brut)
-    if not wa:
-        return
+def _traiter_message_greenapi(payload: dict, wa: str):
+    """Parse un événement Green API et route vers la logique métier."""
     if not rate_limit_ok(wa):
         return
 
-    msg_type = msg.get("type", "")
-    texte    = ""
-    est_image = False
-    media_b64 = ""
+    message_data = payload.get("messageData") or {}
+    type_message = message_data.get("typeMessage", "")
 
-    if msg_type == "text":
-        texte = (msg.get("text", {}) or {}).get("body", "").strip()
-    elif msg_type == "image":
-        est_image = True
-        media_id = (msg.get("image", {}) or {}).get("id", "")
-        if media_id:
-            media_b64 = _meta_telecharger_media(media_id)
-    elif msg_type == "document":
-        # PDF SwitchN envoyé en DM — même pipeline que image
-        est_image = True
-        media_id = (msg.get("document", {}) or {}).get("id", "")
-        if media_id:
-            media_b64 = _meta_telecharger_media(media_id)
-    elif msg_type == "interactive":
-        # Boutons / listes
-        inter = msg.get("interactive", {}) or {}
-        if inter.get("type") == "button_reply":
-            texte = inter.get("button_reply", {}).get("title", "")
-        elif inter.get("type") == "list_reply":
-            texte = inter.get("list_reply", {}).get("title", "")
+    texte     = ""
+    est_image = False
+    img_bytes = b""
+
+    if type_message == "textMessage":
+        texte = (message_data.get("textMessageData") or {}).get("textMessage", "").strip()
+    elif type_message in ("imageMessage", "documentMessage"):
+        est_image  = True
+        data_key   = "imageData" if type_message == "imageMessage" else "documentData"
+        media_data = message_data.get(data_key) or {}
+        url_media  = media_data.get("downloadUrl", "")
+        caption    = media_data.get("caption", "")
+        if url_media:
+            img_bytes = _greenapi_telecharger_media(url_media)
+        if not img_bytes and caption:
+            texte = caption
+            est_image = False
+        elif not img_bytes:
+            wa_prive(wa, "❌ Impossible de télécharger le reçu. Renvoyez le screenshot.")
+            return
+    elif type_message == "extendedTextMessage":
+        texte = (message_data.get("extendedTextMessageData") or {}).get("text", "").strip()
 
     log.info(f"WA ← {wa} : {texte[:60]!r}" + (" [IMG]" if est_image else ""))
 
-    # Route DM uniquement (Meta Cloud n'envoie pas d'événements groupe)
-    if est_image and media_b64:
+    if est_image and img_bytes:
         try:
-            img_bytes = base64.b64decode(media_b64)
             _traiter_screenshot_adhesion_dm(wa, img_bytes)
         except Exception as e:
-            log.error(f"Erreur image : {e}")
+            log.error(f"Erreur image Green API : {e}")
         return
 
-    # Owner ?
     if wa == OWNER_WA:
         rep = traiter_menu_owner(wa, texte)
         if rep:
             wa_prive(wa, rep)
             return
 
-    # Admin ?
     rep_admin = traiter_menu_admin(wa, texte)
     if rep_admin:
         wa_prive(wa, rep_admin)
         return
 
-    # Membre — silence radio si commande inconnue
     rep_membre = traiter_menu_membre(wa, texte, est_image)
     if rep_membre:
         wa_prive(wa, rep_membre)
-
-
-def _meta_telecharger_media(media_id: str) -> str:
-    """Télécharge un média depuis Meta et retourne le b64."""
-    if not META_TOKEN:
-        return ""
-    try:
-        # 1) Récupérer l'URL
-        url_meta = f"{META_GRAPH_URL}/{media_id}"
-        r = requests.get(url_meta,
-            headers={"Authorization": f"Bearer {META_TOKEN}"},
-            timeout=15)
-        if r.status_code != 200:
-            return ""
-        media_url = r.json().get("url", "")
-        if not media_url:
-            return ""
-        # 2) Valider l'URL (SSRF protection) — accepter uniquement les CDN Meta
-        from urllib.parse import urlparse as _urlparse
-        _p = _urlparse(media_url)
-        _domaines_ok = (".fbcdn.net", ".whatsapp.net", ".cdninstagram.com", ".facebook.com")
-        if _p.scheme != "https" or not any(_p.netloc.endswith(d) for d in _domaines_ok):
-            log.warning(f"⚠️ URL média suspecte rejetée : {_p.netloc}")
-            return ""
-        # 3) Télécharger
-        r2 = requests.get(media_url,
-            headers={"Authorization": f"Bearer {META_TOKEN}"},
-            timeout=20)
-        if r2.status_code == 200:
-            return base64.b64encode(r2.content).decode("ascii")
-    except Exception as e:
-        log.error(f"Téléchargement média Meta : {e}")
-    return ""
 
 
 def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
@@ -10245,12 +10119,12 @@ def health():
 # État de santé global du bot
 _health_state = {
     "db_ok":            True,
-    "meta_ok":          True,
+    "wa_ok":          True,
     "scheduler_ok":     True,
     "last_db_failure":  0,
-    "last_meta_failure":0,
+    "last_wa_failure":0,
     "consecutive_db_failures":   0,
-    "consecutive_meta_failures": 0,
+    "consecutive_wa_failures": 0,
     "self_heal_attempts":        0,
     "started_at":                time_module.time(),
 }
@@ -10325,53 +10199,49 @@ def _self_heal_check():
 
 
 def _self_heal_outbox():
-    """Force le drain de l'outbox quand Meta revient."""
+    """Force le drain de l'outbox quand Green API revient."""
     with _health_lock:
-        meta_ok = _health_state["meta_ok"]
-    if meta_ok:
+        wa_ok = _health_state["wa_ok"]
+    if wa_ok:
         _outbox_drain()
 
 
-def _check_meta_api():
-    """Ping léger Meta API toutes les 10 min — détecte les pannes et notifie le recovery."""
-    if not META_TOKEN or not META_PHONE_ID:
+def _check_greenapi():
+    """Ping Green API toutes les 10 min — détecte les pannes et notifie le recovery."""
+    if not GREENAPI_INSTANCE_ID or not GREENAPI_TOKEN:
         return
     try:
-        r = requests.get(
-            f"{META_GRAPH_URL}/{META_PHONE_ID}",
-            headers={"Authorization": f"Bearer {META_TOKEN}"},
-            timeout=10)
-        ok = (r.status_code == 200)
+        url = f"{GREENAPI_BASE}/waInstance{GREENAPI_INSTANCE_ID}/getStateInstance/{GREENAPI_TOKEN}"
+        r = requests.get(url, timeout=10)
+        state = (r.json().get("stateInstance", "") if r.status_code == 200 else "")
+        ok = (state == "authorized")
         with _health_lock:
-            prev_ok = _health_state["meta_ok"]
-            _health_state["meta_ok"] = ok
+            prev_ok = _health_state["wa_ok"]
+            _health_state["wa_ok"] = ok
             if ok:
-                _health_state["consecutive_meta_failures"] = 0
+                _health_state["consecutive_wa_failures"] = 0
             else:
-                _health_state["consecutive_meta_failures"] += 1
-                _health_state["last_meta_failure"] = time_module.time()
-            failures = _health_state["consecutive_meta_failures"]
-        # Alerte graduée : à 3 échecs (30 min), puis tous les 3
-        # Utilise l'outbox — canal fiable même quand Meta est down (livré au recovery)
+                _health_state["consecutive_wa_failures"] += 1
+                _health_state["last_wa_failure"] = time_module.time()
+            failures = _health_state["consecutive_wa_failures"]
         if not ok and failures >= 3 and failures % 3 == 0:
             _outbox_enqueue("send", {
                 "to":   OWNER_WA,
-                "body": (f"🟠 *ALERTE META API #{failures // 3}*\n\n"
-                         f"API WhatsApp injoignable depuis {failures * 10} min.\n"
-                         f"Messages en file d'attente outbox."),
+                "body": (f"🟠 *ALERTE GREEN API #{failures // 3}*\n\n"
+                         f"WhatsApp injoignable depuis {failures * 10} min.\n"
+                         f"État : {state or 'inconnu'}. Messages en file d'attente outbox."),
             })
-        # Recovery notification — Meta est revenue, envoi direct + drain immédiat de l'outbox
         if ok and not prev_ok:
             try:
                 _wa_send_direct(OWNER_WA,
-                    "✅ *META API RÉTABLIE*\n\nMessages en file d'attente en cours d'envoi.")
+                    "✅ *GREEN API RÉTABLIE*\n\nMessages en file d'attente en cours d'envoi.")
             except Exception:
                 pass
-            _outbox_drain()   # vider l'outbox immédiatement, y compris les alertes accumulées
+            _outbox_drain()
     except Exception:
         with _health_lock:
-            _health_state["meta_ok"] = False
-            _health_state["consecutive_meta_failures"] += 1
+            _health_state["wa_ok"] = False
+            _health_state["consecutive_wa_failures"] += 1
 
 
 @app.route("/health/detail", methods=["GET"])
@@ -10383,7 +10253,7 @@ def health_detail():
         state = dict(_health_state)
     state["uptime_sec"] = int(time_module.time() - state["started_at"])
     state["timestamp"]  = datetime.now().isoformat()
-    overall = state["db_ok"] and state["meta_ok"]
+    overall = state["db_ok"] and state["wa_ok"]
     return jsonify(state), 200 if overall else 503
 
 
@@ -10747,7 +10617,7 @@ def zto_supervision_quotidienne():
         # ── État santé actuel ─────────────────────────────────────────────
         with _health_lock:
             db_ok      = _health_state["db_ok"]
-            meta_ok    = _health_state["meta_ok"]
+            wa_ok      = _health_state["wa_ok"]
             heal_count = _health_state["self_heal_attempts"]
             uptime_sec = int(time_module.time() - _health_state["started_at"])
 
@@ -10775,7 +10645,7 @@ def zto_supervision_quotidienne():
         # ── Décision : envoyer un rapport seulement si incident ───────────
         incidents = (heal_count > 0 or outbox_size > 10
                      or stats_24h["erreurs"] > 5
-                     or not db_ok or not meta_ok)
+                     or not db_ok or not wa_ok)
 
         if not incidents:
             log.info("🟢 ZTO : tout va bien, aucun rapport envoyé")
@@ -10791,7 +10661,7 @@ def zto_supervision_quotidienne():
             f"⚙️ *État système*\n"
             f"   Uptime          : {uptime_str}\n"
             f"   Base de données : {'✅ OK' if db_ok else '🔴 KO'}\n"
-            f"   Meta WhatsApp   : {'✅ OK' if meta_ok else '🔴 KO'}\n"
+            f"   WhatsApp (GA)   : {'✅ OK' if wa_ok else '🔴 KO'}\n"
             f"   Auto-réparations: {heal_count}\n"
             f"   Outbox WA       : {outbox_size} message(s) en attente\n\n"
             f"📋 *24 dernières heures*\n"
@@ -10838,7 +10708,7 @@ def demarrer_scheduler():
     # ── Auto-healing — supervision silencieuse ────────────────────────────
     scheduler.add_job(_self_heal_check,  "interval", seconds=60,  id="self_heal_check")
     scheduler.add_job(_self_heal_outbox, "interval", seconds=120, id="self_heal_outbox")
-    scheduler.add_job(_check_meta_api,   "interval", minutes=10,  id="check_meta_api",
+    scheduler.add_job(_check_greenapi,   "interval", minutes=10,  id="check_greenapi",
                       next_run_time=datetime.now())
 
     # ── Zero Touch Ops — supervision quotidienne du owner ────────────────
@@ -10868,7 +10738,7 @@ if __name__ == "__main__":
     log.info("   BADF Ltd — Cameroun 🇨🇲")
     log.info("━" * 60)
     log.info(f"   Owner           : {OWNER_WA}")
-    log.info(f"   WhatsApp       : Meta Cloud API v21 — Phone ID {META_PHONE_ID or '(non configuré)'}")
+    log.info(f"   WhatsApp       : Green API — Instance {GREENAPI_INSTANCE_ID or '(non configurée)'}")
     log.info(f"   Base de données : {PG_USER}@{PG_HOST}:{PG_PORT}/{PG_DB}")
     log.info(f"   Port Flask      : {PORT}")
     log.info(f"   Numéro BADF MTN : {NUMERO_BADF_MTN}")
