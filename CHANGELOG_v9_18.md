@@ -1,6 +1,6 @@
 # CHANGELOG v9.17 → v9.18
 
-**Date initiale :** 17 mai 2026 | **Dernière mise à jour :** 28 juin 2026
+**Date initiale :** 17 mai 2026 | **Dernière mise à jour :** 28 juin 2026 (PATCH 26)
 **Fichiers modifiés :** `barack_corp_v9_17.py` → `barack_corp_v9_18.py`
 **Migration DB requise :** `migration_v9_18.sql`
 
@@ -308,6 +308,38 @@ Config Tesseract mise à jour : `--psm 6 --oem 3 -c preserve_interword_spaces=1`
 **2 cas non résolus** (4%) : photos physiques d'écran à travers vitre rayée (FDXJ9842, GAEG3286). Inrécupérables par preprocessing — le bot demandera au membre de renvoyer une capture d'écran propre.
 
 **Localisation :** `_pretraiter_screenshot_whatsapp` (ligne ~1816), `lire_screenshot_mobile_money` (ligne ~1985–2050)
+
+---
+
+### PATCH 26 — Migration WhatsApp : Meta Cloud API → Green API
+
+**Problème :** Le code utilisait 100% Meta WhatsApp Cloud API, qui détruit l'historique d'un compte WhatsApp existant en le convertissant en Business API. Incompatible avec l'objectif de conserver le compte actif avec son historique.
+
+**Fix :** Migration complète de la couche WhatsApp vers Green API (scan QR, compte perso existant).
+
+**Fichiers modifiés :** `barack_corp_v9_18.py`, `ENV`
+
+**Changements :**
+- ENV : suppression des vars META_* → ajout `GREENAPI_INSTANCE_ID` et `GREENAPI_TOKEN`
+- `_wa_request()` : réécriture pour l'endpoint `sendMessage` Green API
+- `_wa_send_direct()` : format chatId `237XXXXXXXXXX@c.us` au lieu du numéro brut Meta
+- `wa_envoyer_boutons()` : fallback texte systématique (Green API ne supporte pas les boutons interactifs)
+- `wa_envoyer_liste()` : fallback texte systématique avec items numérotés
+- `webhook_whatsapp_verify()` (GET) : simplifiée en health check (pas de hub.challenge)
+- `webhook_whatsapp_meta()` → `webhook_whatsapp_greenapi()` : parsing du format Green API
+- `_meta_signature_valide()` → validation par `instanceData.idInstance` (anti-usurpation)
+- `_traiter_message_meta()` → `_traiter_message_greenapi()` : parser format `typeWebhook/messageData`
+- `_meta_telecharger_media()` → `_greenapi_telecharger_media()` : `downloadUrl` direct dans le webhook
+- `_check_meta_api()` → `_check_greenapi()` : ping `getStateInstance` Green API
+- `_health_state` : renommage `meta_ok` → `wa_ok`, `consecutive_meta_failures` → `consecutive_wa_failures`
+
+**Logique métier inchangée :** `traiter_menu_owner`, `traiter_menu_admin`, `traiter_menu_membre`, OCR pipeline, Trust Graph, APScheduler, DB — tout intact.
+
+**Configuration requise (une seule fois) :**
+1. Créer instance sur console.green-api.com
+2. Remplir `GREENAPI_INSTANCE_ID` et `GREENAPI_TOKEN` dans `ENV`
+3. Scanner le QR code depuis le dashboard
+4. Configurer le webhook URL : `https://lennox-unbiographical-jasmin.ngrok-free.dev/webhook/whatsapp`
 
 ---
 
