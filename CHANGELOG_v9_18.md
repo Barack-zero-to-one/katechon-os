@@ -1,6 +1,6 @@
 # CHANGELOG v9.17 → v9.18
 
-**Date initiale :** 17 mai 2026 | **Dernière mise à jour :** 20 juin 2026
+**Date initiale :** 17 mai 2026 | **Dernière mise à jour :** 28 juin 2026
 **Fichiers modifiés :** `barack_corp_v9_17.py` → `barack_corp_v9_18.py`
 **Migration DB requise :** `migration_v9_18.sql`
 
@@ -176,6 +176,94 @@ dans l'environnement avant le lancement du watchdog.
 
 **Effet immédiat :** Remplir `META_PHONE_ID`, `META_TOKEN`, `META_BUSINESS_ID`,
 `META_APP_SECRET` dans le fichier `ENV` puis `DEMARRAGE.bat` → le bot répond.
+
+---
+
+---
+
+## Améliorations post-lancement (28 juin 2026)
+
+### PATCH 15 — Pipeline OCR WhatsApp : OpenCV dark mode + compression
+
+**Problème :** Tesseract recevait les screenshots bruts compressés par WhatsApp (artefacts JPEG 8×8, petit texte illisible, mode sombre non géré → texte blanc sur fond noir rejeté).
+
+**Fix :** Nouvelle fonction `_pretraiter_screenshot_whatsapp(image_bytes)` :
+1. Décodage OpenCV (BGR) avec fallback PIL si image corrompue
+2. Conversion grayscale
+3. Détection dark mode : `mean < 127` → `cv2.bitwise_not()` (inversion)
+4. Upscale INTER_CUBIC si largeur < 1400px
+5. `GaussianBlur(3,3)` pour lisser les artefacts JPEG
+6. `adaptiveThreshold(blockSize=31, C=15)` — gère l'illumination mixte (barre de statut colorée + corps blanc)
+7. Bordure blanche 20px → Tesseract reçoit toujours du noir pur sur blanc pur
+
+Config Tesseract mise à jour : `--psm 6 --oem 3 -c preserve_interword_spaces=1`
+
+**Dépendances ajoutées :** `opencv-python==4.10.0.84`, `numpy==2.2.5` dans `requirements.txt`
+
+---
+
+### PATCH 16 — Extraction regex ultra-tolérante (montant + référence)
+
+**Problème :** Regex montant trop étroite : ratait `5.000 FCFA`, montants > 999 999, devise FRS. Regex référence : aucune logique par opérateur, zéro fallback si OCR manglait le mot-clé "Référence".
+
+**Fix — Montant :**
+- `_NBR = r"(\d{4,10}|\d{1,3}(?:[. \xa0]\d{3})*)"` — `\d{4,10}` testé en premier (évite capture partielle)
+- Devises : `FCFA|XAF|CFA|FRS|F\b`
+- Nettoyage : `re.sub(r"[^\d]", "")` → `int()` ne lève jamais ValueError
+
+**Fix — Référence :** 3 niveaux de priorité :
+1. Pattern spécifique opérateur : Orange `OM\d{8,12}`, MTN `TXN?\d{8,12}`, SwitchN `SWN?-?[A-Z0-9]{6,14}`
+2. Patterns génériques REF/TXN/ID
+3. Fallback OCR : chaîne alphanumérique majuscule 10-15 chars commençant par lettre, filtrée contre liste de mots-clés connus
+
+---
+
+### PATCH 17 — Détection SwitchN avant MTN/Orange
+
+**Problème :** SwitchN (agrégateur camerounais, 500k+ downloads) mentionne "MTN" et "ORANGE" dans ses reçus comme opérateurs sous-jacents → détecté à tort comme MTN ou Orange.
+
+**Fix :** Ordre de détection : `SWITCHN/SWITCH N` vérifié EN PREMIER, avant `MTN/MOMO/MOBILE MONEY` et `ORANGE/FLOOZ/OM `.
+
+---
+
+### PATCH 18 — 7 bugs corrigés (code review)
+
+| # | Bug | Fix |
+|---|-----|-----|
+| 1 | `conn.commit()` + `release_conn()` après INSERT membre, AVANT `inscrire_dans_tontine()` — la nouvelle connexion du pool ne voyait pas le membre | Déplacé commit/release avant l'appel |
+| 2 | `_traiter_screenshot_adhesion_dm` ne retournait pas tôt pour membres déjà actifs | `release_conn(conn); return True` ajouté |
+| 3 | `statut_global='Actif'` à l'INSERT inline → membre actif sans KYC complété | Corrigé en `'En_attente_kyc'` |
+| 4 | KYC ne démarrait pas : `cur_new` non déclaré, `inserted` jamais évalué | `cur_new = q(...)`, `inserted = cur_new.rowcount > 0` |
+| 5 | `demarrer_kyc()` mutait `_sessions_kyc` sans verrou | `with _sessions_lock: _sessions_kyc[wa] = {...}` |
+| 6 | 5 requêtes analytiques utilisaient `SUM(montant)` au lieu de `SUM(montant_brut)` | Corrigé dans toutes les occurrences |
+| 7 | Message confirmation adhesion mentionnait encore le paiement alors que `FRAIS_ADHESION=0` | Ligne supprimée |
+
+---
+
+### PATCH 19 — Sursis premier retard de cotisation
+
+**Problème :** Membre en retard > 72H suspendu et taxé 1 000 FCFA dès la PREMIÈRE fois, même pour une erreur honnête.
+
+**Fix :**
+- Nouvelle colonne `membres.nb_avertissements_retard INTEGER DEFAULT 0`
+- Migration `ALTER TABLE IF NOT EXISTS` au démarrage
+- `verifier_suspensions_retard()` bifurquée :
+  - `nb_avertissements_retard == 0` → sursis silencieux (compteur +1, trace `sanctions`, aucun message)
+  - `nb_avertissements_retard >= 1` → suspension 72H + 1 000 FCFA (comportement existant)
+- Message intro groupe ARTICLE 3 mis à jour : "Premier retard → Sursis accordé. Récidive → Suspension + 1 000 FCFA"
+
+---
+
+### PATCH 20 — Crédit communication 1 000 FCFA : gate anti-fraude 5 transactions
+
+**Problème :** Le message de bienvenue promettait "instantanément 1 000 FCFA de crédit" dès l'ajout du bot. Zéro implémentation. Risque : faux groupes de 3 amis créés pour obtenir le bonus sans activité réelle.
+
+**Fix :**
+- Nouvelle colonne `tontines.credit_comm_statut TEXT DEFAULT 'Non_eligible'` (états : `Non_eligible` → `Eligible` → `Verse`)
+- Migration `ALTER TABLE IF NOT EXISTS` au démarrage
+- Nouvelle fonction `_verifier_credit_comm(conn, tontine_id)` : appelée après chaque cotisation confirmée, déclenche `Eligible` + notification `OWNER_WA` à la 5ème transaction réelle
+- Commande owner `CREDIT_VERSE <id>` : marque le crédit comme versé manuellement (`Verse`)
+- Message bienvenue groupe corrigé : "5 premières transactions validées" remplace "instantanément"
 
 ---
 
