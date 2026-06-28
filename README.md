@@ -1,8 +1,8 @@
 # KATECHON OS — TontineBot Pro v9.18
 
-**Barack & AI Development Facilities Ltd (BADF Ltd) · Cameroun 🇨🇲**
+**Barack & AI Development Facilities Ltd (BADF Ltd) · Yaoundé, Cameroon 🇨🇲**
 
-`Python 3.11` · `Flask + Waitress` · `PostgreSQL 18` · `OWASP Audited` · `NIST CSF 82%` · `Stress Test 100% — 0 erreur`
+`Python 3.11` · `Flask + Waitress` · `PostgreSQL 18` · `OWASP Audited` · `NIST CSF 82%` · `Stress Test 100% — 0 errors`
 
 ---
 
@@ -10,7 +10,9 @@
 
 Financial coordination protocol for the Global South informal economy. WhatsApp-native, 2G-compatible, built to serve ROSCAs — the $800B–$1T/year rotating savings networks (tontines, chit funds, esusu, arisan, consórcio) that coordinate the financial lives of 400–500 million unbanked people across 5 continents. A single Python process orchestrates KYC onboarding, multi-layer fraud detection, behavioral credit scoring (Trust Graph), automated payout scheduling, screenshot OCR payment verification, and full financial accounting — zero external fintech dependency, zero licensing requirement, deployable on a laptop.
 
-**WhatsApp is the Trojan horse. KATECHON OS is the infrastructure underneath.**
+WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distribution. It is the tactical layer to aggregate the unbanked masses and map the initial Trust Graph. However, we are built for programmatic resilience. Our 5-layer decoupled architecture allows us to seamlessly swap the front-end presentation layer from WhatsApp to carrier-grade USSD protocol in Africa.
+
+**WhatsApp is the distribution vector. KATECHON OS is the infrastructure underneath.**
 
 ---
 
@@ -18,181 +20,210 @@ Financial coordination protocol for the Global South informal economy. WhatsApp-
 
 | Layer | Technology | Detail |
 |-------|-----------|--------|
-| Runtime | Python 3.11 | 10 351 lignes, 1 fichier orchestrateur |
+| Runtime | Python 3.11 | 10,351 lines, single orchestrator file |
 | HTTP server | Flask + Waitress | 70 threads, port 5000 |
 | Database | PostgreSQL 18 | ThreadedConnectionPool maxconn=80, 17 tables |
-| Scheduler | APScheduler | 20 jobs cron/interval, timezone Africa/Douala |
-| Messaging | Meta WhatsApp Cloud API v21 | HMAC-SHA256 webhook validation |
-| OCR | Tesseract + Pillow | Vérification screenshot paiement |
-| Resilience | `@healed` decorator | 13 fonctions, auto-retry ×3 DB + réseau |
-| Tunnel | ngrok domaine fixe | URL publique permanente sans serveur |
-| Watchdog | Node.js | Auto-restart bot Python en cas de crash |
-| Sessions | 3 dicts mémoire + JSON backup | SESSION_TIMEOUT=300s, sauvegarde toutes 60s |
-| Circuit breaker | DB pool guard | 10 failures → open 60s → reset automatique |
-| Outbox | JSON persistant | Messages WhatsApp survivent au crash du bot |
+| Scheduler | APScheduler | 20 cron/interval jobs, timezone Africa/Douala |
+| Messaging | Green API | WhatsApp Business session, webhook-compatible |
+| OCR | Tesseract + OpenCV | Screenshot payment verification with dark mode support |
+| Resilience | `@healed` decorator | 13 functions, auto-retry ×3 DB + network |
+| Tunnel | ngrok fixed domain | Permanent public URL, no server required |
+| Watchdog | Node.js | Auto-restarts Python bot on crash |
+| Sessions | 3 in-memory dicts + JSON backup | SESSION_TIMEOUT=300s, saved every 60s |
+| Circuit breaker | DB pool guard | 10 failures → open 60s → automatic reset |
+| Outbox | Persistent JSON | WhatsApp messages survive bot crash |
 
 ---
 
 ## Performance Benchmarks — Stress Test v1.0
 
-**Setup :** 8 groupes × 100–150 membres = **949 membres simulés** · 70 workers concurrents · localhost · 6 scénarios
+**Setup:** 8 groups × 100–150 members = **949 simulated members** · 70 concurrent workers · localhost · 6 scenarios
 
-| Scénario | Requêtes | Succès | P50 | P95 | Max |
-|----------|----------|--------|-----|-----|-----|
-| S1 — Rafale 'statut' (heure ouverture) | 949 | **100%** | 168 ms | 2 142 ms | 2 469 ms |
-| S2 — Screenshots cotisation simultanés | 949 | **100%** | 150 ms | 2 068 ms | 2 177 ms |
-| S3 — Rate limiter burst (1 num × 15 msgs) | 15 | **100%** | 2 050 ms | 2 081 ms | 2 081 ms |
-| S4 — Pool saturation (60 conns / maxconn=80) | 60 | **100%** | 2 040 ms | 2 061 ms | 2 067 ms |
-| S5 — Doublons media_id anti-recyclage | 50 | **100%** | 2 051 ms | 2 067 ms | 2 072 ms |
-| S6 — Pic mixte réaliste (80% img / 20% txt) | 949 | **100%** | 152 ms | 2 089 ms | 2 324 ms |
-| **TOTAL** | **2 972** | **100% · 0 erreur** | **160 ms** | **2 087 ms** | **2 469 ms** |
+| Scenario | Requests | Success | P50 | P95 | Max |
+|----------|----------|---------|-----|-----|-----|
+| S1 — Status burst (opening hour) | 949 | **100%** | 168 ms | 2,142 ms | 2,469 ms |
+| S2 — Simultaneous contribution screenshots | 949 | **100%** | 150 ms | 2,068 ms | 2,177 ms |
+| S3 — Rate limiter burst (1 number × 15 msgs) | 15 | **100%** | 2,050 ms | 2,081 ms | 2,081 ms |
+| S4 — Pool saturation (60 conns / maxconn=80) | 60 | **100%** | 2,040 ms | 2,061 ms | 2,067 ms |
+| S5 — media_id duplicate anti-recycling | 50 | **100%** | 2,051 ms | 2,067 ms | 2,072 ms |
+| S6 — Realistic mixed peak (80% img / 20% txt) | 949 | **100%** | 152 ms | 2,089 ms | 2,324 ms |
+| **TOTAL** | **2,972** | **100% · 0 errors** | **160 ms** | **2,087 ms** | **2,469 ms** |
 
-**Throughput :** 232 req/s soutenu · **2 972 requêtes · zéro échec · zéro timeout**
+**Throughput:** 232 req/s sustained · **2,972 requests · zero failures · zero timeouts**
 
-> *Latence P95 mesurée sur loopback Windows (overhead TCP handshake initial par thread).
-> En production avec connexions persistantes : P50 < 100 ms attendu.*
+> *P95 latency measured on Windows loopback (initial TCP handshake overhead per thread).
+> In production with persistent connections: P50 < 100 ms expected.*
 
 ---
 
 ## Security Audits
 
-### OWASP Top 10 — 11 vulnérabilités corrigées
+### OWASP Top 10 — 11 Vulnerabilities Patched
 
-| Priorité | Vulnérabilité | Fix appliqué |
-|----------|--------------|--------------|
-| **P0** | SQL Injection — fetchall/fetchone | Paramètres bindés systématiques, jamais de f-string SQL |
-| **P0** | Webhook sans validation HMAC | X-Hub-Signature-256 validé avant tout parsing payload |
-| **P0** | Race condition double-confirm cotisation | `SELECT FOR UPDATE` PostgreSQL — verrou pessimiste natif |
-| **P0** | Screenshot recycling — zéro hash | SHA-256 + `UNIQUE INDEX` DB + délai max 24h |
-| **P0** | SSRF via URL arbitraire | Whitelist domaines Meta uniquement, toute autre URL rejetée |
-| **P1** | Broken Auth — sessions perdues au restart | `SESSION_TIMEOUT` 300s + backup JSON toutes 60s + restauration |
-| **P1** | Path traversal sur filename backup | `os.path.basename()` + regex caractères autorisés uniquement |
-| **P1** | ReDoS dans parser liste passage | Normalisation Unicode avant match, regex sans backtracking catastrophique |
-| **P1** | Command injection pg_dump | `subprocess` list args, `shell=False` partout |
-| **P1** | Bypass MontantAberrantError | Validation ±50% obligatoire, commande `FORCE` requise entre 15–50% |
-| **P1** | Absence rate limiting | 10 msgs/60s par numéro → `audit_log` automatique + drop silencieux |
+| Priority | Vulnerability | Fix Applied |
+|----------|--------------|-------------|
+| **P0** | SQL Injection — fetchall/fetchone | Systematic bind parameters, zero f-string SQL |
+| **P0** | Webhook without HMAC validation | X-Hub-Signature-256 validated before any payload parsing |
+| **P0** | Race condition double-confirm contribution | `SELECT FOR UPDATE` PostgreSQL — native pessimistic lock |
+| **P0** | Screenshot recycling — no hash | SHA-256 + `UNIQUE INDEX` DB + 24h max delay |
+| **P0** | SSRF via arbitrary URL | Whitelisted domains only, all other URLs rejected |
+| **P1** | Broken Auth — sessions lost on restart | `SESSION_TIMEOUT` 300s + JSON backup every 60s + restoration |
+| **P1** | Path traversal on backup filename | `os.path.basename()` + allowed-character regex |
+| **P1** | ReDoS in passage list parser | Unicode normalization before match, no catastrophic backtracking |
+| **P1** | Command injection pg_dump | `subprocess` list args, `shell=False` everywhere |
+| **P1** | MontantAberrantError bypass | ±50% validation mandatory, `FORCE` command required for 15–50% |
+| **P1** | Absence of rate limiting | 10 msgs/60s per number → `audit_log` auto-entry + silent drop |
 
-### NIST Cybersecurity Framework 2.0 — Score global : **82 %**
+### NIST Cybersecurity Framework 2.0 — Global Score: **82%**
 
-| Fonction | Score | Contrôles principaux |
-|----------|-------|---------------------|
-| GV — Govern | 65 % | Hiérarchie Owner / Admin / Membre, permission gating, dette bloquante |
-| ID — Identify | 88 % | 17 tables asset inventory, KYC 5-step, `requirements.txt` SBOM |
-| PR — Protect | 82 % | HMAC-SHA256, rate limiting, blacklist réseau, SHA-256, whitelist SSRF |
-| DE — Detect | 93 % | 68+ types événements `audit_log`, Trust Graph fugue model, alerte burst fraude ≥5/h |
-| RS — Respond | 80 % | Auto-ban ×3 fraudes, suspension auto 72h, 3 stades fugue + MSG_DISSUASION ANIF/COBAC |
-| RC — Recover | 84 % | `pg_dump` daily rotation 7j + vérification intégrité, outbox JSON, sessions backup, `@healed`, watchdog |
+| Function | Score | Key Controls |
+|----------|-------|-------------|
+| GV — Govern | 65% | Owner / Admin / Member hierarchy, permission gating, blocking debt |
+| ID — Identify | 88% | 17-table asset inventory, 5-step KYC, `requirements.txt` SBOM |
+| PR — Protect | 82% | HMAC-SHA256, rate limiting, network blacklist, SHA-256, SSRF whitelist |
+| DE — Detect | 93% | 68+ event types in `audit_log`, Trust Graph fugue model, burst fraud alert ≥5/h |
+| RS — Respond | 80% | Auto-ban ×3 fraud, automatic 72h suspension, 3 fugue stages + ANIF/COBAC deterrence |
+| RC — Recover | 84% | `pg_dump` daily 7-day rotation + integrity check, outbox JSON, session backup, `@healed`, watchdog |
 
 ---
 
-## 8 Security Layers — In-Code
+## 26 Security Layers — In-Code
 
-| # | Couche | Mécanisme |
-|---|--------|-----------|
-| 1 | **SHA-256 anti-recyclage** | Empreinte unique par screenshot, rejet immédiat si déjà vu ou >24h |
-| 2 | **SELECT FOR UPDATE** | Verrou pessimiste PostgreSQL sur `confirmer_cotisation` — double-confirm concurrent impossible |
-| 3 | **Rate limiting** | 10 msgs/60s par numéro → audit log automatique + drop silencieux |
-| 4 | **UNIQUE partial indexes DB** | Filet niveau base — refuse doublons même si Python contournait tout le reste |
-| 5 | **X-Hub-Signature-256 HMAC** | Chaque webhook Meta signé et validé avant lecture du corps |
-| 6 | **MontantAberrantError** | Écart >50% → refus catégorique ; 15–50% → commande FORCE obligatoire |
-| 7 | **MSG_DISSUASION ANIF/COBAC** | Référence dossier SHA-256 unique par fraude — dissuasion comportementale avant tentative |
-| 8 | **KYC + blacklist + auto-ban** | 3 tentatives fraude → bannissement réseau BADF + `blackliste=1` en DB |
+| # | Layer | Mechanism |
+|---|-------|-----------|
+| 1 | **HMAC-SHA256 Webhook Auth** | Every inbound webhook signed and validated before payload read |
+| 2 | **Parameterized SQL** | All queries use `%s` bind params — zero f-string SQL, zero injection surface |
+| 3 | **SELECT FOR UPDATE** | Pessimistic PostgreSQL lock on cashout — concurrent double-confirm impossible |
+| 4 | **SHA-256 Screenshot Anti-Replay** | Unique fingerprint per image; rejected if seen before or >24h old |
+| 5 | **UNIQUE Partial Indexes** | DB-level physical dedup on members, KYC, screenshots — Python can't bypass this |
+| 6 | **Rate Limiting** | 10 msgs/60s per number → audit log + silent drop |
+| 7 | **MontantAberrantError** | >50% deviation → hard reject; 15–50% → FORCE command required |
+| 8 | **SSRF Whitelist** | Only whatsapp.net / fbcdn.net / cdninstagram.com — all other URLs rejected |
+| 9 | **Screenshot Deduplication** | Hash check before OCR — prevents recycled proof-of-payment |
+| 10 | **KYC 5-Step Enforcement** | nom → CNI → date naissance → ville → photo — no bypass path |
+| 11 | **Auto-Ban (×3 fraud)** | 3 confirmed fraud attempts → automatic network ban + `blackliste=1` in DB |
+| 12 | **Trust Score (score_confiance)** | 0–100 reputation; decrements on suspicion; reaches 0 → banned |
+| 13 | **Trust Graph (fugue model)** | 9-feature behavioral model predicts default 7 days before the event |
+| 14 | **Burst Fraud Alert** | ≥5 fraud attempts/hour → escalation alert triggered |
+| 15 | **Behavioral Deterrence (ANIF/COBAC)** | MSG_DISSUASION with SHA-256 case reference — pre-crime deterrence |
+| 16 | **Session Timeout + Recovery** | 300s TTL; JSON backup every 60s; fully restored on restart |
+| 17 | **Outbox Persistence** | WhatsApp messages survive Python crash via `wa_outbox.jsonl` |
+| 18 | **@healed Auto-Retry** | 13 critical functions — exponential backoff ×3 on DB/network failure |
+| 19 | **DB Circuit Breaker** | 10 failures → pool open 60s → automatic reset |
+| 20 | **SAVEPOINT/ROLLBACK Isolation** | Migration failures cannot corrupt global transaction state |
+| 21 | **Immutable Audit Trail** | `audit_log` table + `audit_immutable.log` — 68+ event types, tamper-evident |
+| 22 | **Age Verification** | Minor detected → requires birth certificate (`acte_naissance`) |
+| 23 | **Phone Format Validation** | Regex normalization to E.164 — rejects malformed identifiers |
+| 24 | **Input Sanitization** | Name fields: `^[A-Za-zÀ-ÿ\s\-'\.]+$` — injection-safe, 3-char minimum |
+| 25 | **Path Traversal Guard** | `os.path.basename()` + allowlist regex on all file paths |
+| 26 | **Command Injection Guard** | `subprocess` list args, `shell=False` everywhere (pg_dump, etc.) |
 
 ---
 
 ## Trust Graph — Behavioral Credit Model
 
-Score de risque 0–100 de fugue post-bouffage. Détection **7 jours avant l'événement**.
-Premier credit bureau comportemental du Global South sur des populations jamais vues par les agences de notation classiques.
+Risk score 0–100 for post-cashout default prediction. Detection **7 days before the event**.
+First behavioral credit bureau for Global South populations never seen by traditional rating agencies.
 
-| Feature | Poids | Signal mesuré |
-|---------|-------|---------------|
-| Régularité historique | 25 % | Coefficient de variation des intervalles de cotisation |
-| Tendance récente | 20 % | Ratio cotisations 0–30j vs 30–60j |
-| Score confiance inversé | 15 % | `score_confiance` 0–100 → risque |
-| Dettes en cours | 15 % | Ratio dette IRA / capacité mensuelle estimée |
-| Profondeur d'engagement | 10 % | Ancienneté + nombre de tontines + complétude KYC |
-| Vélocité de paiement | 10 % | Délai moyen après `heure_ouverture` |
-| Signaux faibles | 5 % | Suspensions passées + tentatives de fraude |
-| Comportement post-bouffage | 20 % | Continue à cotiser après avoir reçu son bouffage ? |
-| Chute score confiance | 10 % | Chute >25 pts sur 30 jours glissants |
+| Feature | Weight | Signal Measured |
+|---------|--------|----------------|
+| Historical regularity | 25% | Coefficient of variation of contribution intervals |
+| Recent trend | 20% | Ratio contributions 0–30d vs 30–60d |
+| Inverted trust score | 15% | `score_confiance` 0–100 → risk |
+| Outstanding debt | 15% | IRA debt ratio / estimated monthly capacity |
+| Engagement depth | 10% | Seniority + number of tontines + KYC completeness |
+| Payment velocity | 10% | Average delay after `heure_ouverture` |
+| Weak signals | 5% | Past suspensions + fraud attempts |
+| Post-cashout behavior | 20% | Continued contributing after receiving cashout? |
+| Trust score drop | 10% | Drop >25 pts over 30 rolling days |
 
-**Niveaux de risque :** 🟢 0–30 Vert · 🟡 31–55 Jaune · 🟠 56–75 Orange · 🔴 76–100 Rouge → bouffage retardé automatiquement
+**Risk levels:** 🟢 0–30 Green · 🟡 31–55 Yellow · 🟠 56–75 Orange · 🔴 76–100 Red → cashout automatically delayed
 
 ---
 
 ## Codebase Stats
 
-| Métrique | Valeur |
-|----------|--------|
-| Lignes Python | **10 351** |
-| Tables PostgreSQL | **17** |
-| Jobs APScheduler | **20** (cron + interval) |
-| Types d'événements audit | **68+** |
-| Fonctions `@healed` auto-retry | **13** |
-| Endpoints Flask | **4** |
-| Commandes utilisateur reconnues | **35+** |
-| Threads Waitress | **70** |
-| Pool DB maxconn | **80** |
-| Sessions timeout | **300s** |
-| Marchés cibles | **8** |
-| Sources de revenus | **5** |
-| Durée développement | **3 mois · solo** |
+| Metric | Value |
+|--------|-------|
+| Python lines | **10,351** |
+| PostgreSQL tables | **17** |
+| APScheduler jobs | **20** (cron + interval) |
+| Audit event types | **68+** |
+| `@healed` auto-retry functions | **13** |
+| Flask endpoints | **4** |
+| Recognized user commands | **35+** |
+| Waitress threads | **70** |
+| DB pool maxconn | **80** |
+| Session timeout | **300s** |
+| Security layers | **26** |
+| Development time | **3 months · solo** |
 
 ---
 
-## Markets
+## Global South ROSCA Ecosystem
 
-| Pays / Région | Pratique locale | Nom produit |
-|---------------|----------------|-------------|
-| Cameroun · Sénégal · Côte d'Ivoire | Tontine | **Tontine OS** |
-| Nigeria | Ajo / Esusu | **Ajo OS** |
-| Ghana | Susu | **Susu OS** |
-| Kenya · Tanzanie | Chama | **Chama OS** |
-| Brésil | Consórcio | **Consórcio OS** |
-| Inde | Chit Fund | **Chit OS** |
-| Indonésie | Arisan | **Arisan OS** |
-| Philippines | Paluwagan | **Paluwagan OS** |
+The ROSCA (Rotating Savings and Credit Association) is the most widespread informal financial instrument in the developing world, coordinating the financial lives of 400–500 million unbanked people across 5 continents under dozens of local names — each deeply embedded in the cultural fabric of its region.
 
-**TAM :** $20 000 milliards (économie informelle globale) · 400–500 M personnes · $800B–$1T/an via ROSCAs · Zéro infrastructure digitale existante sur ce marché
+**West and Central Africa** — *tontine* (Cameroon, Senegal, Ivory Coast, Congo, Gabon), *njangi* (Anglophone Cameroon) — KATECHON OS deploys as **Tontine OS / Njangi OS**. This is our home market: highest density of trust networks, lowest existing infrastructure, highest willingness to coordinate via WhatsApp.
+
+**Nigeria and the West African diaspora** — *ajo* (Yoruba), *esusu* (Igbo), *adashi* (Hausa) — deploys as **Ajo OS**. Nigeria's informal economy is the largest in Africa by volume; ajo networks operate inside diaspora communities across London, Houston, and Toronto as well as Lagos.
+
+**Ghana** — *susu* — deploys as **Susu OS**. Susu collectors are a regulated profession in Ghana; KATECHON OS digitizes the coordination layer without displacing the collector role.
+
+**East Africa** — *chama* (Kenya, Tanzania, Uganda) — deploys as **Chama OS**. Chama networks in Kenya are estimated to manage KES 300B+ annually; M-Pesa provides the payment rail but zero ROSCA-native coordination infrastructure exists.
+
+**South Asia** — *chit fund* (India, legally regulated since the Chit Funds Act 1982, 50 million active participants) — deploys as **Chit OS**. India's regulated chit sector processes $5B+ annually through ~350,000 foremen — the coordination overhead is the addressable market.
+
+**Southeast Asia** — *arisan* (Indonesia, ~87% of households have participated) — deploys as **Arisan OS**. Indonesia's arisan culture is embedded at every socioeconomic level; digital coordination infrastructure is absent at the grassroots.
+
+**Philippines** — *paluwagan* — deploys as **Paluwagan OS**. Paluwagan runs inside OFW (Overseas Filipino Worker) remittance networks and barangay communities — a dual domestic + diaspora surface.
+
+**Latin America** — *consórcio* (Brazil, legally regulated, $40B+ sector managed by ~300 licensed administrators), *pandero* (Peru), *tanda* (Mexico, embedded in Mexican-American communities across the US Southwest) — deploys as **Consórcio OS**.
+
+One protocol. Every informal economy. No competitor has built cross-ROSCA infrastructure at this scope.
+
+**TAM:** $20 trillion (global informal economy) · 400–500M people · $800B–$1T/year via ROSCAs · Zero existing digital infrastructure on this market
 
 ---
 
 ## Revenue Streams
 
-| # | Source | Modèle |
-|---|--------|--------|
-| 1 | **Frais d'adhésion** | 1 000 FCFA · one-time · valable à vie réseau BADF |
-| 2 | **FMP 2%** | Prélevé automatiquement sur chaque cotisation confirmée |
-| 3 | **IRA** | 150 FCFA/jour de retard · cumulé et déduit du bouffage |
-| 4 | **Frais de réactivation** | 1 000 FCFA après suspension 72h |
-| 5 | **Frais changement numéro** | 250 FCFA (commande `CHGNUM`) |
+| # | Source | Model |
+|---|--------|-------|
+| 1 | **FMP 2%** | Automatically deducted from each confirmed contribution |
+| 2 | **IRA** | 150 FCFA/day late fee, cumulated and deducted from cashout |
+| 3 | **Reactivation fee** | 1,000 FCFA after 72h suspension |
+| 4 | **Number change fee** | 250 FCFA (CHGNUM command) |
 
-**Phase 2 :** frais sur mouvements USDC · underwriting crédit non-bancaire · assurance paramétrique
+**Phase 2:** USDC transaction fees · non-bank credit underwriting · parametric insurance
 
 ---
 
 ## Git History
 
 ```
-ec79c9d  test: stress_test — keep-alive, 232 req/s, 0 erreur sur 2 972 req
-cc7c44a  fix: NameError healed — déplacer définition avant premier usage (@5826)
-6cd8a24  fix: parser_liste_passage — normalisation robuste artefacts WhatsApp
-c7c1e0b  security: NIST CSF 2.0 — 3 gaps fermés (ID + DE + RC)  →  78% → 82%
-b4c8188  security: OWASP audit — 11 vulnérabilités corrigées + H6 sessions backup
-90915be  feat: TontineBot Pro v9.18 — KATECHON OS production release
+44ce7d8  feat: v9.18 — OpenCV OCR pipeline + regex ultra-tolérante + CI GitHub Actions
+6202390  refactor: message intro tontine en cours — version percutante
+7e8dddd  refactor: message intro tontine en cours — version courte et percutante
+c0a93fa  feat: message intro tontine en cours — dissuasion comportementale complète
+11b349e  feat: relevé FMP envoyé post-bouffage +10min au lieu de 20h fixe
+323842b  fix: _reclasser_en_dernier retourne positions avant/après — DM membre précis
 ```
 
 ---
 
 ## 5 Structural Moats
 
-1. **Trust Graph** — 24–36 mois de données comportementales irréplicables. Impossible à racheter ou copier.
-2. **2G-native** — zéro concurrent tech capable de servir ce marché. Silicon Valley ne peut pas descendre sous 4G architecturalement.
-3. **Hors licensing** — positionné hors licensing Payment Institution par design. Les concurrents passent 2–3 ans en régulation COBAC/BCEAO.
-4. **Économie asymétrique** — CAC = 0 (groupes WhatsApp existants). Infra = laptop + ngrok. Un concurrent bien financé dépense 100× plus pour le même résultat.
-5. **Founder-market fit absolu** — fondateur né dans le problème. Un VC californien ne peut pas envoyer une équipe comprendre ce marché en 6 mois.
+1. **Trust Graph** — the strongest moat. 24–36 months of irreplicable behavioral data. First behavioral credit bureau for Global South populations that traditional rating agencies have never seen. Builds only with time — impossible to buy or copy.
+
+2. **2G-native** — absolute technical barrier. Zero tech competitor capable of serving this market. Silicon Valley cannot architect below 4G. By design here.
+
+3. **Outside licensing** — positioned architecturally outside Payment Institution licensing. Potential competitors spend 2–3 years on COBAC/BCEAO approvals.
+
+4. **Asymmetric economics** — CAC = 0 (existing WhatsApp groups). Infrastructure = laptop + ngrok. A well-funded competitor copying this spends 100× more for the same result.
+
+5. **Absolute founder-market fit** — founder born into the problem, Yaoundé, Cameroon. A California VC cannot send a team to understand this market in 6 months. Not learned in an MBA.
 
 ---
 
-*BADF Ltd · Maroua, Cameroun · 2026*
+*BADF Ltd · Yaoundé, Cameroon · 2026*
