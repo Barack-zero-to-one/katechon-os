@@ -267,6 +267,18 @@ Config Tesseract mise à jour : `--psm 6 --oem 3 -c preserve_interword_spaces=1`
 
 ---
 
+### PATCH 21 — 5 bugs corrigés (code review post-sursis)
+
+| # | Bug | Fix |
+|---|-----|-----|
+| 1 | `nb_avertissements_retard` dans `membres` (global) → un membre en retard dans 2 tontines perdait son sursis dans la 2ème | Colonne déplacée dans `adhesions` (per membre/tontine) — migration `ALTER TABLE adhesions ADD COLUMN IF NOT EXISTS` |
+| 2 | `nb_avertissements_retard` jamais remis à 0 à la réactivation → sursis one-shot permanent à vie | `UPDATE adhesions SET nb_avertissements_retard=0` ajouté dans le flux de confirmation cotisation (lever suspension) |
+| 3 | `_verifier_credit_comm` : `conn.commit()` puis `wa_prive()` sans isolation — si Green API échoue, owner jamais notifié mais DB dit `Eligible` | `wa_prive` isolé dans son propre `try/except`, log warning explicite avec rappel de la commande `CREDIT_VERSE <id>` |
+| 4 | `CREDIT_VERSE` : `UPDATE` sans vérifier existence tontine → succès silencieux sur ID inexistant | `fetchone()` avant UPDATE, erreur explicite si introuvable, info si déjà versé |
+| 5 | `verifier_suspensions_retard` : `conn.commit()` par membre dans la boucle sans isolation — échec sur membre B laisse membres C/D/E non traités | `try/except` par membre avec `conn.rollback()` + `continue` pour isolation totale |
+
+---
+
 ## Ordre d'application lundi matin
 
 ### 1. Backup complet (5 min)
