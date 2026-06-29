@@ -7864,6 +7864,10 @@ def webhook_whatsapp_greenapi():
     if not wa:
         return jsonify({"status": "ok"}), 200
 
+    # ── 4b) Vérification rate limit avant download ────────────────────────
+    if not rate_limit_ok(wa):
+        return jsonify({"status": "ok"}), 200
+
     # ── 5) Précharger l'image immédiatement (avant que l'URL expire) ──────
     img_future = None
     _type_msg = (payload.get("messageData") or {}).get("typeMessage", "")
@@ -7875,12 +7879,18 @@ def webhook_whatsapp_greenapi():
                 img_future = _download_executor.submit(_greenapi_telecharger_media, _url_media)
             except Exception as e:
                 log.error(f"Download executor submit : {e}")
+                # Future pre-resolu b"" : evite le fallback sync 31s dans le MsgWorker
+                _f = concurrent.futures.Future()
+                _f.set_result(b"")
+                img_future = _f
 
     # ── 6) Soumettre le traitement au thread pool ─────────────────────────
     try:
         _msg_executor.submit(_traiter_message_greenapi, payload, wa, img_future)
     except Exception as e:
         log.error(f"Webhook Green API submit : {e}")
+        if img_future is not None:
+            img_future.cancel()
 
     return jsonify({"status": "ok"}), 200
 
@@ -7900,7 +7910,7 @@ def _greenapi_telecharger_media(url_media: str) -> bytes:
         for attempt in range(2):
             try:
                 r = requests.get(url_media, timeout=15)
-                if r.status_code == 200 and r.content:
+                if r.status_code == 200:
                     return r.content
                 if r.status_code in (403, 404):
                     log.warning(f"⚠️ Média Green API {r.status_code} — lien expiré ou introuvable")
@@ -10907,6 +10917,7 @@ if __name__ == "__main__":
             except Exception:
                 pass
         _msg_executor.shutdown(wait=False)
+        _download_executor.shutdown(wait=False)
         log.info("Bot arrêté proprement — pool DB fermé.")
 
     atexit.register(_shutdown_bot)
