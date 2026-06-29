@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KATECHON OS — Stress Test v1.0
+KATECHON OS — Stress Test v2.0
 Simule 8 groupes de tontine × 100-150 membres qui envoient
 des screenshots de cotisation en rafale.
 
@@ -15,7 +15,6 @@ Pré-requis : bot en cours d'exécution (python barack_corp_v9_18.py)
 import argparse
 import base64
 import hashlib
-import hmac
 import json
 import os
 import random
@@ -51,15 +50,8 @@ def _charger_env(chemin: str = "ENV") -> dict:
     return vars_
 
 _ENV = _charger_env()
-_APP_SECRET = _ENV.get("META_APP_SECRET", os.getenv("META_APP_SECRET", ""))
-
-
-def _signer_payload(body: bytes) -> str:
-    """Calcule X-Hub-Signature-256 pour un payload."""
-    if not _APP_SECRET:
-        return ""
-    mac = hmac.new(_APP_SECRET.encode("utf-8"), body, hashlib.sha256)
-    return f"sha256={mac.hexdigest()}"
+_GREENAPI_SECRET   = _ENV.get("GREENAPI_WEBHOOK_SECRET",   os.getenv("GREENAPI_WEBHOOK_SECRET",   ""))
+_GREENAPI_INSTANCE = _ENV.get("GREENAPI_INSTANCE_ID",      os.getenv("GREENAPI_INSTANCE_ID",      "0"))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -228,74 +220,64 @@ def generer_membres(nb_groupes: int = NB_GROUPES) -> List[Membre]:
     return membres
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONSTRUCTEURS PAYLOAD META CLOUD API
-# Format exact attendu par webhook_whatsapp_meta()
+# CONSTRUCTEURS PAYLOAD GREEN API
+# Format exact attendu par webhook_whatsapp_greenapi()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _msg_id(wa: str, extra: str = "") -> str:
     h = hashlib.md5(f"{wa}{extra}{time.time()}".encode()).hexdigest()[:16]
-    return f"wamid.{h}"
+    return f"greenapi.{h}"
+
+def _instance_data() -> dict:
+    return {
+        "idInstance": int(_GREENAPI_INSTANCE) if _GREENAPI_INSTANCE.isdigit() else 0,
+        "wid": "237600000001@c.us",
+        "typeInstance": "whatsapp",
+    }
 
 def payload_texte(wa: str, texte: str) -> dict:
     return {
-        "object": "whatsapp_business_account",
-        "entry": [{
-            "id": "WABA_STRESS_TEST",
-            "changes": [{
-                "field": "messages",
-                "value": {
-                    "messaging_product": "whatsapp",
-                    "metadata": {
-                        "display_phone_number": "237600000001",
-                        "phone_number_id": "PHONE_STRESS_TEST",
-                    },
-                    "messages": [{
-                        "from": wa,
-                        "id": _msg_id(wa, texte),
-                        "timestamp": str(int(time.time())),
-                        "type": "text",
-                        "text": {"body": texte},
-                    }],
-                },
-            }],
-        }],
+        "typeWebhook": "incomingMessageReceived",
+        "instanceData": _instance_data(),
+        "senderData": {
+            "chatId": f"{wa}@c.us",
+            "sender": f"{wa}@c.us",
+            "senderName": "StressTest",
+        },
+        "messageData": {
+            "typeMessage": "textMessage",
+            "idMessage": _msg_id(wa, texte),
+            "timestamp": int(time.time()),
+            "textMessageData": {
+                "textMessage": texte,
+            },
+        },
     }
 
-def payload_image(wa: str, media_id: str, caption: str = "") -> dict:
+def payload_image(wa: str, download_url: str, caption: str = "") -> dict:
     """
-    Payload Meta pour un message image (screenshot de cotisation).
-    Sans META_TOKEN le bot skippera le téléchargement, mais toute
+    Payload Green API pour un message image (screenshot de cotisation).
+    Sans GREENAPI_TOKEN le bot skippera le téléchargement, mais toute
     la pipeline HTTP (parsing, rate-limit, routing) est testée.
     """
     return {
-        "object": "whatsapp_business_account",
-        "entry": [{
-            "id": "WABA_STRESS_TEST",
-            "changes": [{
-                "field": "messages",
-                "value": {
-                    "messaging_product": "whatsapp",
-                    "metadata": {
-                        "display_phone_number": "237600000001",
-                        "phone_number_id": "PHONE_STRESS_TEST",
-                    },
-                    "messages": [{
-                        "from": wa,
-                        "id": _msg_id(wa, media_id),
-                        "timestamp": str(int(time.time())),
-                        "type": "image",
-                        "image": {
-                            "id": media_id,
-                            "mime_type": "image/jpeg",
-                            "sha256": hashlib.sha256(
-                                f"{wa}{media_id}".encode()
-                            ).hexdigest(),
-                            "caption": caption,
-                        },
-                    }],
-                },
-            }],
-        }],
+        "typeWebhook": "incomingMessageReceived",
+        "instanceData": _instance_data(),
+        "senderData": {
+            "chatId": f"{wa}@c.us",
+            "sender": f"{wa}@c.us",
+            "senderName": "StressTest",
+        },
+        "messageData": {
+            "typeMessage": "imageMessage",
+            "idMessage": _msg_id(wa, download_url),
+            "timestamp": int(time.time()),
+            "imageData": {
+                "downloadUrl": download_url,
+                "caption": caption,
+                "mimeType": "image/jpeg",
+            },
+        },
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -308,7 +290,6 @@ _tls = _threading.local()
 def _session() -> requests.Session:
     if not hasattr(_tls, "session"):
         s = requests.Session()
-        # Pool de connexions suffisant pour ne jamais recréer de socket
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=1,
             pool_maxsize=1,
@@ -324,16 +305,17 @@ def _session() -> requests.Session:
 
 def envoyer(url: str, payload: dict, wa: str, scenario: str) -> ResultatReq:
     debut = time.perf_counter()
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    sig  = _signer_payload(body)
-    hdrs = {"Content-Type": "application/json"}
-    if sig:
-        hdrs["X-Hub-Signature-256"] = sig
+    body  = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    hdrs  = {"Content-Type": "application/json"}
+    # Auth Green API : token dans le query string (PATCH 27)
+    webhook_url = f"{url}/webhook/whatsapp"
+    if _GREENAPI_SECRET:
+        webhook_url += f"?token={_GREENAPI_SECRET}"
     # Retry une fois sur ConnectionError (connexion keep-alive périmée)
     for tentative in range(2):
         try:
             r = _session().post(
-                f"{url}/webhook/whatsapp",
+                webhook_url,
                 data=body,
                 timeout=TIMEOUT_REQ,
                 headers=hdrs,
@@ -343,7 +325,6 @@ def envoyer(url: str, payload: dict, wa: str, scenario: str) -> ResultatReq:
                                duree_ms=duree, status_code=r.status_code)
         except requests.ConnectionError:
             if tentative == 0:
-                # Connexion keep-alive périmée — recréer la session et réessayer
                 if hasattr(_tls, "session"):
                     try:
                         _tls.session.close()
@@ -434,7 +415,7 @@ def check_sante_detail(url: str) -> Optional[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="KATECHON OS — Stress Test v1.0")
+    parser = argparse.ArgumentParser(description="KATECHON OS — Stress Test v2.0")
     parser.add_argument("--url",     default=DEFAULT_URL,   help="URL du bot")
     parser.add_argument("--workers", type=int, default=MAX_WORKERS_DEF, help="Threads max")
     parser.add_argument("--groupes", type=int, default=NB_GROUPES, help="Nombre de groupes")
@@ -448,10 +429,12 @@ def main():
 
     # ── Header ────────────────────────────────────────────────────────────────
     print("═" * 64)
-    print("  KATECHON OS — Stress Test v1.0")
+    print("  KATECHON OS — Stress Test v2.0 (Green API)")
     print(f"  {NB_G} groupes × {MEMBRES_MIN}-{MEMBRES_MAX} membres")
     print(f"  Target  : {BOT_URL}")
     print(f"  Workers : {WORKERS}")
+    if not _GREENAPI_SECRET:
+        print("  ⚠️  GREENAPI_WEBHOOK_SECRET vide — toutes les requêtes → 503")
     print("═" * 64)
 
     # ── Sanity check ──────────────────────────────────────────────────────────
@@ -507,17 +490,16 @@ def main():
 
     # ══════════════════════════════════════════════════════════════════════════
     # S2 — RAFALE SCREENSHOTS COTISATION
-    # Tous les membres envoient un screenshot (media_id unique par membre)
+    # Tous les membres envoient un screenshot (downloadUrl unique par membre)
     # Teste : pipeline image, hash SHA-256, routing
-    # Note : sans META_TOKEN, le téléchargement échoue proprement (retour "")
-    #        mais toute la couche HTTP est testée — le 200 est garanti
+    # Note : sans GREENAPI_TOKEN le dl échoue proprement — le 200 est garanti
     # ══════════════════════════════════════════════════════════════════════════
     taches_s2 = [
         (lambda m=m: envoyer(
             BOT_URL,
             payload_image(
                 m.wa,
-                f"MEDIAID_{m.seed:010d}",
+                f"https://media.green-api.com/stress/{m.seed:010d}.jpg",
                 f"Cotisation {m.tontine_nom} — {MONTANT_FCFA} FCFA"
             ),
             m.wa, "S2"
@@ -549,10 +531,8 @@ def main():
     r3 = run_scenario(
         "S3 — Rate limiter : 1 numéro × 15 messages en burst",
         taches_s3,
-        max_workers=15,   # tout en même temps
+        max_workers=15,
     )
-    # Les 15 doivent retourner 200 (le bot absorbe et filtre en interne)
-    # mais seuls les 10 premiers sont traités — on vérifie juste le 200
     rapports.append(r3)
     time.sleep(3)
 
@@ -576,21 +556,21 @@ def main():
     time.sleep(3)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # S5 — DUPLICATS SCREENSHOT (même media_id pour 50 membres différents)
+    # S5 — DUPLICATS SCREENSHOT (même downloadUrl pour 50 membres différents)
     # Anti-recyclage SHA-256 + UNIQUE INDEX doivent bloquer les doublons
     # ══════════════════════════════════════════════════════════════════════════
-    MEDIA_DUPLIQUE = "MEDIAID_DUPLICATE_STRESS_001"
+    URL_DUPLIQUEE = "https://media.green-api.com/stress/DUPLICATE_STRESS_001.jpg"
     membres_s5 = random.sample(membres, min(50, total_membres))
     taches_s5 = [
         (lambda m=m: envoyer(
             BOT_URL,
-            payload_image(m.wa, MEDIA_DUPLIQUE, "Duplicate test"),
+            payload_image(m.wa, URL_DUPLIQUEE, "Duplicate test"),
             m.wa, "S5"
         ))
         for m in membres_s5
     ]
     r5 = run_scenario(
-        "S5 — Duplicats : 50 membres, même media_id (test anti-recyclage)",
+        "S5 — Duplicats : 50 membres, même downloadUrl (test anti-recyclage)",
         taches_s5,
         max_workers=50,
     )
@@ -604,14 +584,16 @@ def main():
     taches_s6 = []
     for m in membres:
         if random.random() < 0.8:
-            # Screenshot de cotisation
             fn = (lambda m=m: envoyer(
                 BOT_URL,
-                payload_image(m.wa, f"MEDIAID_REAL_{m.seed}", "Cotisation"),
+                payload_image(
+                    m.wa,
+                    f"https://media.green-api.com/stress/real_{m.seed}.jpg",
+                    "Cotisation"
+                ),
                 m.wa, "S6"
             ))
         else:
-            # Texte "statut"
             fn = (lambda m=m: envoyer(
                 BOT_URL, payload_texte(m.wa, "statut"),
                 m.wa, "S6"
@@ -697,7 +679,7 @@ def main():
 
     print()
     print("  NOTE : S2/S5/S6 testent la pipeline HTTP screenshot.")
-    print("  Le traitement OCR interne nécessite META_TOKEN configuré.")
+    print("  Le traitement OCR réel nécessite GREENAPI_TOKEN configuré.")
     print("  Sans credentials, le bot répond 200 et skip le dl media.")
     print("═" * 64 + "\n")
 
