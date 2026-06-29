@@ -696,6 +696,10 @@ _msg_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=WAITRESS_THREADS,
     thread_name_prefix="MsgWorker",
 )
+_download_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=10,
+    thread_name_prefix="DownloadWorker",
+)
 
 # ── WA throttle — ≤ 77 msg/s vers Green API ──────────────────────────────────
 _wa_throttle_lock = threading.Lock()
@@ -7860,17 +7864,40 @@ def webhook_whatsapp_greenapi():
     if not wa:
         return jsonify({"status": "ok"}), 200
 
-    # ── 5) Soumettre au thread pool ───────────────────────────────────────
+    # ── 4b) Vérification rate limit avant download ────────────────────────
+    if not rate_limit_ok(wa):
+        return jsonify({"status": "ok"}), 200
+
+    # ── 5) Précharger l'image immédiatement (avant que l'URL expire) ──────
+    img_future = None
+    _type_msg = (payload.get("messageData") or {}).get("typeMessage", "")
+    if _type_msg in ("imageMessage", "documentMessage"):
+        _data_key  = "imageData" if _type_msg == "imageMessage" else "documentData"
+        _url_media = ((payload.get("messageData") or {}).get(_data_key) or {}).get("downloadUrl", "")
+        if _url_media:
+            try:
+                img_future = _download_executor.submit(_greenapi_telecharger_media, _url_media)
+            except Exception as e:
+                log.error(f"Download executor submit : {e}")
+                # Future pre-resolu b"" : evite le fallback sync 31s dans le MsgWorker
+                _f = concurrent.futures.Future()
+                _f.set_result(b"")
+                img_future = _f
+
+    # ── 6) Soumettre le traitement au thread pool ─────────────────────────
     try:
-        _msg_executor.submit(_traiter_message_greenapi, payload, wa)
+        _msg_executor.submit(_traiter_message_greenapi, payload, wa, img_future)
     except Exception as e:
         log.error(f"Webhook Green API submit : {e}")
+        if img_future is not None:
+            img_future.cancel()
 
     return jsonify({"status": "ok"}), 200
 
 
 def _greenapi_telecharger_media(url_media: str) -> bytes:
-    """Télécharge un média depuis l'URL Green API et retourne le contenu en bytes."""
+    """Télécharge un média depuis l'URL Green API et retourne le contenu en bytes.
+    2 tentatives max. Timeout 15s par tentative. Détecte 403/404 = lien expiré."""
     if not url_media:
         return b""
     try:
@@ -7880,15 +7907,26 @@ def _greenapi_telecharger_media(url_media: str) -> bytes:
         if _p.scheme != "https" or not any(_p.netloc.endswith(d) for d in _domaines_ok):
             log.warning(f"⚠️ URL média Green API suspecte rejetée : {_p.netloc}")
             return b""
-        r = requests.get(url_media, timeout=30)
-        if r.status_code == 200:
-            return r.content
+        for attempt in range(2):
+            try:
+                r = requests.get(url_media, timeout=15)
+                if r.status_code == 200:
+                    return r.content
+                if r.status_code in (403, 404):
+                    log.warning(f"⚠️ Média Green API {r.status_code} — lien expiré ou introuvable")
+                    return b""
+                if attempt == 0:
+                    time_module.sleep(1)
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == 0:
+                    time_module.sleep(1)
+                continue
     except Exception as e:
         log.error(f"Téléchargement média Green API : {e}")
     return b""
 
 
-def _traiter_message_greenapi(payload: dict, wa: str):
+def _traiter_message_greenapi(payload: dict, wa: str, img_future=None):
     """Parse un événement Green API et route vers la logique métier."""
     if not rate_limit_ok(wa):
         return
@@ -7908,7 +7946,13 @@ def _traiter_message_greenapi(payload: dict, wa: str):
         media_data = message_data.get(data_key) or {}
         url_media  = media_data.get("downloadUrl", "")
         caption    = media_data.get("caption", "")
-        if url_media:
+        if img_future is not None:
+            try:
+                img_bytes = img_future.result(timeout=25)
+            except Exception as e:
+                log.error(f"img_future.result() : {e}")
+                img_bytes = b""
+        elif url_media:
             img_bytes = _greenapi_telecharger_media(url_media)
         if not img_bytes and caption:
             texte = caption
@@ -10873,6 +10917,7 @@ if __name__ == "__main__":
             except Exception:
                 pass
         _msg_executor.shutdown(wait=False)
+        _download_executor.shutdown(wait=False)
         log.info("Bot arrêté proprement — pool DB fermé.")
 
     atexit.register(_shutdown_bot)
