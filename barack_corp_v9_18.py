@@ -3161,6 +3161,16 @@ def _wa_send_groupe(group_id: str, body: str) -> bool:
     _outbox_enqueue("send_group", {"group_id": group_id, "body": body})
     return False
 
+def _wa_send_group_chatid(group_chatid: str, body: str) -> bool:
+    """Poste dans le canal WhatsApp groupe via JID @g.us.
+    Distinct de _wa_send_groupe (broadcast DM individuel)."""
+    _throttle_wa()
+    payload = {"chatId": group_chatid, "message": body[:4096]}
+    if _wa_request("sendMessage", payload):
+        return True
+    _outbox_enqueue("send", {"to": group_chatid, "body": body})
+    return False
+
 
 def wa_kick_membre(group_id: str, wa_membre: str) -> bool:
     """
@@ -6987,7 +6997,7 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                 release_conn(conn)
 
             _t.sleep(2)
-            _wa_send_groupe(group_id,
+            _wa_send_group_chatid(group_id,
                 f"🏛️ *{tontine['nom']} — TontineBot Pro*\n\n"
                 f"🛡️ *CADRE JURIDIQUE ET SÉCURITÉ ANTIFRAUDE*\n\n"
                 f"Pour le confort et la protection absolue des fonds de nos membres honnêtes, "
@@ -7025,7 +7035,7 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
         # Tontine nouvelle (0 membres, cycle 1) → flux normal KYC/adhésion
         release_conn(conn)
         _t.sleep(2)
-        _wa_send_groupe(group_id, msg_intro_groupe(
+        _wa_send_group_chatid(group_id, msg_intro_groupe(
             nom_tontine     = tontine["nom"],
             montant         = tontine["montant_place"],
             heure_bouffage  = tontine.get("heure_bouffage",  "17:00") or "17:00",
@@ -7035,7 +7045,7 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
             numero_collecte = admin.get("numero_collecte", "") if admin else "",
         ))
         _t.sleep(2)
-        _wa_send_groupe(group_id, msg_kyc_groupe(tontine["nom"]))
+        _wa_send_group_chatid(group_id, msg_kyc_groupe(tontine["nom"]))
 
         if admin:
             _t.sleep(1)
@@ -7053,7 +7063,7 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
         "L'administrateur recoit les instructions en message prive.\n\n"
         "_TontineBot Pro - BADF Ltd_"
     )
-    _wa_send_groupe(group_id, msg_grp)
+    _wa_send_group_chatid(group_id, msg_grp)
 
     wa_owner(
         "NOUVEAU GROUPE DETECTE\n\n"
@@ -7746,6 +7756,68 @@ def webhook_whatsapp_verify():
     return jsonify({"status": "ok", "bot": "TontineBot Pro"}), 200
 
 
+def _greenapi_get_group_members(group_chatid: str, exclude: str = "") -> list:
+    """Green API getGroupData → liste de numéros normalisés (+237XXXXXXXXX)."""
+    if not GREENAPI_INSTANCE_ID or not GREENAPI_TOKEN:
+        return []
+    url = (
+        f"{GREENAPI_BASE}/waInstance{GREENAPI_INSTANCE_ID}"
+        f"/getGroupData/{GREENAPI_TOKEN}"
+    )
+    try:
+        r = requests.post(url, json={"groupId": group_chatid}, timeout=15)
+        if r.status_code != 200:
+            log.warning(f"getGroupData → {r.status_code}")
+            return []
+        participants = r.json().get("participants", [])
+        result = []
+        for p in participants:
+            pid = p.get("id", "") if isinstance(p, dict) else str(p)
+            if pid and pid != exclude and pid.endswith("@c.us"):
+                num = normaliser_numero(pid.split("@")[0])
+                if num:
+                    result.append(num)
+        return result
+    except Exception as e:
+        log.error(f"getGroupData : {e}")
+        return []
+
+
+def _traiter_groupe_participants(payload: dict):
+    """
+    Dispatch incomingGroupParticipantsUpdate.
+    Seul cas traité : ajout du bot → _bot_ajoute_groupe().
+    """
+    if payload.get("typeParticipantsUpdate") != "add":
+        return
+
+    instance_data = payload.get("instanceData") or {}
+    bot_wid       = instance_data.get("wid", "")        # ex: 237XXXXXXXXXX@c.us
+    group_data    = payload.get("groupData") or {}
+    group_id      = group_data.get("groupId", "")        # ex: 120363XXXX@g.us
+    group_name    = group_data.get("groupName", "")
+
+    if not group_id or not bot_wid:
+        return
+
+    raw_parts = group_data.get("participants", [])
+    added_ids = [
+        (p.get("id", "") if isinstance(p, dict) else str(p))
+        for p in raw_parts
+    ]
+
+    if bot_wid not in added_ids:
+        return  # C'est quelqu'un d'autre qui a été ajouté — pas le bot
+
+    members = _greenapi_get_group_members(group_id, exclude=bot_wid)
+    log.info(f"[GROUPE] Bot ajouté → {group_name!r} ({group_id}) — {len(members)} membres")
+
+    try:
+        _msg_executor.submit(_bot_ajoute_groupe, group_id, group_name, members)
+    except Exception as e:
+        log.error(f"_bot_ajoute_groupe dispatch : {e}")
+
+
 @app.route("/webhook/whatsapp", methods=["POST"])
 def webhook_whatsapp_greenapi():
     """
@@ -7770,8 +7842,13 @@ def webhook_whatsapp_greenapi():
     except Exception:
         return jsonify({"status": "bad_json"}), 400
 
-    # ── 3) Filtrer — on traite uniquement les messages entrants ───────────
+    # ── 3) Router par type d'événement ──────────────────────────────────
     type_webhook = payload.get("typeWebhook", "")
+
+    if type_webhook == "incomingGroupParticipantsUpdate":
+        _traiter_groupe_participants(payload)
+        return jsonify({"status": "ok"}), 200
+
     if type_webhook not in ("incomingMessageReceived", "incomingAPIMessageReceived"):
         return jsonify({"status": "ignored"}), 200
 
