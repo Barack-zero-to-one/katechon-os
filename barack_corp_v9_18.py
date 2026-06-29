@@ -1951,6 +1951,7 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
         )
         texte_brut = texte
         texte      = texte.upper()
+        texte      = texte.replace("_", " ")  # artefact OCR WhatsApp ("2000 _\nFCFA")
 
         result = {
             "ok":        True,
@@ -1989,17 +1990,18 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
         #        OU bloc brut 4-10 chiffres
         # Couvert : "5000", "5 000", "5.000", "1 000 000", "10.500.000"
         _NBR = r"(\d{1,3}(?:[\s\.  ]\d{3})*|\d{4,10})"
+        _DEC = r"(\d{3,7})[.,]\d{1,2}"
         _DEV = r"(?:FCFA|XAF|CFA|FRS|F\b)"
         patterns_montant = [
-            r"(?:MONTANT\s+TRANSACTION|MONTANT\s+BRUT)\s*[:\-=]?\s*" + _NBR,  # priorité : "Montant Transaction: 5 000"
-            _NBR + r"\s*" + _DEV,                                   # "5 000 FCFA"
-            _DEV + r"\s*:?\s*" + _NBR,                              # "XAF: 5000"
-            r"(?:MONTANT|AMOUNT|SOMME|TOTAL)\s*[:\-=]?\s*" + _NBR,  # "MONTANT: 5 000"
+            r"(?:MONTANT\W{0,10}TRANSACTION|MONTANT\s+BRUT)\s*[:\-=]?\s*" + _DEC,
+            r"(?:MONTANT\W{0,10}TRANSACTION|MONTANT\s+BRUT)\s*[:\-=]?\s*" + _NBR,
+            _NBR + r"\s*" + _DEV,
+            _DEC + r"\s*" + _DEV,
+            _DEV + r"\s*:?\s*" + _NBR,
+            r"(?:MONTANT|AMOUNT|SOMME|TOTAL)\s*[:\-=]?\s*" + _NBR,
         ]
         for pat in patterns_montant:
-            m = re.search(pat, texte)
-            if m:
-                # Garder uniquement les chiffres (espaces, points, NBSP supprimés)
+            for m in re.finditer(pat, texte):
                 val_str = re.sub(r"[^\d]", "", m.group(1))
                 try:
                     val = int(val_str)
@@ -2008,6 +2010,8 @@ def lire_screenshot_mobile_money(image_bytes: bytes) -> dict:
                         break
                 except ValueError:
                     continue
+            if result["montant"]:
+                break
 
         # ── Extraction date ───────────────────────────────────────────────
         # ISO (2026-06-17) ou DD/MM/YYYY — cherche les deux formats
