@@ -529,6 +529,11 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
         membre_id = nickname_cache[nick_key]
         if not membre_id:
             nb_non_lies += 1
+        else:
+            q(conn, """UPDATE membres
+                       SET nom_complet=%s, kyc_nom=%s
+                       WHERE id=%s AND nom_complet LIKE 'Membre\\_%%'""",
+              (item["nickname"], item["nickname"], membre_id))
 
         # Enregistrer la ligne de passage
         q(conn, """
@@ -3396,6 +3401,20 @@ def _finaliser_nom(wa: str, nom: str):
         conn.commit()
     finally:
         release_conn(conn)
+    try:
+        conn2 = get_conn()
+        q(conn2, """
+            UPDATE liste_passage lp
+            SET membre_id = m.id
+            FROM membres m
+            JOIN adhesions a ON a.membre_id = m.id AND a.tontine_id = lp.tontine_id
+            WHERE m.whatsapp = %s
+              AND lp.membre_id IS NULL
+              AND UPPER(lp.nickname) LIKE UPPER(%s)
+        """, (wa_norm, f"%{nom}%"))
+        conn2.commit()
+    finally:
+        release_conn(conn2)
     with _sessions_lock:
         _sessions_kyc.pop(wa_norm, None)
     log_audit("NOM_COLLECTE", f"{nom} | onboarding sans KYC", wa_norm)
@@ -3507,6 +3526,17 @@ MENU_MEMBRE_TXT = (
 )
 
 
+def _get_nickname_from_liste(conn, membre_id: int) -> str:
+    """Retourne le nickname depuis liste_passage si membre deja lie. Sinon None."""
+    if not membre_id:
+        return None
+    row = fetchone(conn,
+        "SELECT nickname FROM liste_passage WHERE membre_id=%s "
+        "AND statut='En_attente' LIMIT 1",
+        (membre_id,))
+    return row["nickname"] if row else None
+
+
 def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
     wa     = normaliser_numero(wa)
     texte  = texte.strip()
@@ -3545,7 +3575,16 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
             finally:
                 release_conn(conn_new)
             if inserted:
-                _demarrer_collecte_nom(wa)
+                conn_check = get_conn()
+                try:
+                    m_row = fetchone(conn_check, "SELECT id FROM membres WHERE whatsapp=%s", (wa,))
+                    nick = _get_nickname_from_liste(conn_check, m_row["id"] if m_row else None)
+                finally:
+                    release_conn(conn_check)
+                if nick:
+                    _finaliser_nom(wa, nick)
+                else:
+                    _demarrer_collecte_nom(wa)
             return ""
         if membre["statut_global"] == "En_attente_kyc":
             conn_mig = get_conn()
@@ -3554,7 +3593,15 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
                 conn_mig.commit()
             finally:
                 release_conn(conn_mig)
-            _demarrer_collecte_nom(wa)
+            conn_check2 = get_conn()
+            try:
+                nick2 = _get_nickname_from_liste(conn_check2, membre["id"])
+            finally:
+                release_conn(conn_check2)
+            if nick2:
+                _finaliser_nom(wa, nick2)
+            else:
+                _demarrer_collecte_nom(wa)
             return ""
         if membre["statut_global"] == "Banni":
             return msg_dissuasion(wa)
