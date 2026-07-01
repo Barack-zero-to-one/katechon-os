@@ -7935,6 +7935,20 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
     if not rate_limit_ok(wa):
         return
 
+    if not group_id and wa != OWNER_WA:
+        _conn_ck = get_conn()
+        try:
+            _connu = fetchone(_conn_ck,
+                """SELECT 1 FROM membres WHERE whatsapp=%s
+                   UNION ALL
+                   SELECT 1 FROM admins_groupe WHERE whatsapp=%s
+                   LIMIT 1""",
+                (wa, wa))
+        finally:
+            release_conn(_conn_ck)
+        if not _connu:
+            return
+
     message_data = payload.get("messageData") or {}
     type_message = message_data.get("typeMessage", "")
 
