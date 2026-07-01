@@ -2663,37 +2663,6 @@ def _verifier_fin_cycle(conn, tontine_id: int):
         f"En attente de décision admin."
     )
 
-    # Membres sans KYC → rappel au groupe + DM individuel
-    membres_sans_kyc = fetchall(conn, """
-        SELECT m.whatsapp, m.nom_complet
-        FROM membres m
-        JOIN adhesions a ON a.membre_id = m.id
-        WHERE a.tontine_id=%s AND a.statut='Actif' AND m.kyc_complet=0
-    """, (tontine_id,))
-
-    if membres_sans_kyc:
-        noms_kyc = "\n".join(f"  • {m['nom_complet']}" for m in membres_sans_kyc)
-        if tontine.get("whatsapp_groupe"):
-            wa_groupe(tontine["whatsapp_groupe"],
-                f"📋 *VÉRIFICATION D'IDENTITÉ REQUISE — {tontine['nom']}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Pour participer au prochain cycle, ces membres doivent "
-                f"compléter leur KYC :\n\n"
-                f"{noms_kyc}\n\n"
-                f"📲 Tapez *menu* en DM à TontineBot Pro.\n"
-                f"Le processus prend moins de 2 minutes.\n\n"
-                f"_TontineBot Pro — BADF Ltd_"
-            )
-        for m in membres_sans_kyc:
-            wa_prive(m["whatsapp"],
-                f"📋 *KYC REQUIS — {tontine['nom']}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Le cycle vient de se terminer. Pour continuer au prochain cycle, "
-                f"vous devez compléter votre vérification d'identité.\n\n"
-                f"📲 Tapez *menu* pour démarrer votre KYC (moins de 2 minutes).\n\n"
-                f"_TontineBot Pro — BADF Ltd_"
-            )
-
     # Score confiance × nombre d'or pour membres ayant honoré tout le cycle
     conn2 = get_conn()
     try:
@@ -4733,7 +4702,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         lines = [
             f"🔍 *HISTORIQUE — {m['nom_complet']}*",
             f"📱 {num} | Score: {m['score_confiance']}/100",
-            f"Statut: {m['statut_global']} | KYC: {'✅' if m['kyc_complet'] else '❌'}",
+            f"Statut: {m['statut_global']}",
             f"Bouffages: {m['nb_bouffages']} | Caution bloquée: {caution:,} FCFA\n",
             "*Tontines :*"
         ]
@@ -8574,7 +8543,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
     try:
         membre = fetchone(conn, """
             SELECT id, nom_complet, score_confiance, statut_global,
-                   tentatives_fraude, kyc_complet, date_inscription
+                   tentatives_fraude, date_inscription
             FROM membres WHERE id=%s
         """, (membre_id,))
         tontine = fetchone(conn,
@@ -8684,14 +8653,13 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             signaux.append(f"Dettes IRA importantes : {dette_montant:,} FCFA")
 
         # ── Feature 5 : Profondeur d'engagement (poids 10, inversé) ─────────
-        # Plus un membre est engagé (ancien, KYC, multi-tontines), plus le risque baisse.
+        # Plus un membre est engagé (ancien, multi-tontines), plus le risque baisse.
         nb_tontines = fetchone(conn, """
             SELECT COUNT(DISTINCT tontine_id) AS n FROM adhesions
             WHERE membre_id=%s AND statut IN ('Actif','Pause')
         """, (membre_id,))["n"]
 
         anciennete_jours = (datetime.now() - membre["date_inscription"]).days if membre["date_inscription"] else 0
-        kyc = membre["kyc_complet"] or 0
 
         engagement_score = 0
         if nb_tontines == 1 and anciennete_jours < 30:
@@ -8700,9 +8668,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             signaux.append(f"Membre récent (un seul groupe, {anciennete_jours} jours)")
         elif nb_tontines == 1:
             engagement_score = 5
-        elif kyc == 0:
-            engagement_score = 7
-            signaux.append("KYC non complété")
+        # nb_tontines >= 2 → membre engagé sur plusieurs tontines → 0 risque
         features["faible_engagement"] = engagement_score
         score += engagement_score
 
