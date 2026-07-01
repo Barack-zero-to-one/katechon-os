@@ -9769,74 +9769,6 @@ def detecter_fugitifs():
 # RAPPORT OWNER — 21H
 # ══════════════════════════════════════════════════════════════════════════
 
-@healed()
-def rapport_owner_21h():
-    """Rapport financier complet envoyé au owner à 21h."""
-    conn     = get_conn()
-    tontines = fetchall(conn, "SELECT * FROM tontines WHERE statut='Active'")
-    lignes   = [
-        f"💼 *RAPPORT FINANCIER OWNER — {datetime.now().strftime('%d/%m/%Y')}*\n"
-        f"TontineBot Pro — BADF Ltd\n{'━'*30}"
-    ]
-    total_fmp_global = 0
-    total_ira_global = 0
-
-    for t in tontines:
-        fmp_t = fetchone(conn, """
-            SELECT COALESCE(SUM(frais_fmp),0) v FROM transactions
-            WHERE tontine_id=%s AND statut='Confirmee' AND date_heure::date=CURRENT_DATE
-        """, (t["id"],))["v"]
-        ira_t = fetchone(conn, """
-            SELECT COALESCE(SUM(frais_ira),0) v FROM transactions
-            WHERE tontine_id=%s AND statut='Confirmee' AND date_heure::date=CURRENT_DATE
-        """, (t["id"],))["v"]
-        nb_p  = fetchone(conn, """
-            SELECT COUNT(DISTINCT membre_id) n FROM transactions
-            WHERE tontine_id=%s AND type_transaction='Cotisation'
-              AND statut='Confirmee' AND date_heure::date=CURRENT_DATE
-        """, (t["id"],))["n"]
-        nb_a  = fetchone(conn,
-            "SELECT COUNT(*) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
-            (t["id"],))["n"]
-        total_fmp_global += fmp_t
-        total_ira_global += ira_t
-        lignes.append(
-            f"\n🏦 *{t['nom']}*\n"
-            f"   Cotisants : {nb_p}/{nb_a}\n"
-            f"   FMP : {fmp_t:,} FCFA  |  IRA : {ira_t:,} FCFA"
-        )
-
-    # ── Dettes BADF par admin ──────────────────────────────────────────────
-    dettes_admins = fetchall(conn, """
-        SELECT admin_wa,
-               SUM(montant) AS total_du,
-               COUNT(*) AS nb
-        FROM dettes_badf
-        WHERE statut='Due' AND date_creation::date = CURRENT_DATE
-        GROUP BY admin_wa
-    """)
-    total_badf_du  = sum(d["total_du"] for d in dettes_admins) if dettes_admins else 0
-    total_badf_recu = fetchone(conn, """
-        SELECT COALESCE(SUM(montant),0) v FROM dettes_badf
-        WHERE statut='Payee' AND date_paiement::date=CURRENT_DATE
-    """)["v"]
-
-    if dettes_admins:
-        lignes.append(f"\n{'━'*30}\n💳 *DETTES BADF DU JOUR (admins)*\n")
-        for d in dettes_admins:
-            lignes.append(f"  {d['admin_wa']} : *{d['total_du']:,} FCFA* ⏳ en attente")
-
-    lignes.append(
-        f"\n{'━'*30}\n"
-        f"💰 *TOTAL FMP  : {total_fmp_global:,} FCFA*\n"
-        f"⏰ *TOTAL IRA  : {total_ira_global:,} FCFA*\n"
-        f"🏆 *REVENUS J  : {total_fmp_global + total_ira_global:,} FCFA*\n\n"
-        f"💳 *DÛ BADF    : {total_badf_du:,} FCFA* (en attente)\n"
-        f"✅ *REÇU BADF  : {total_badf_recu:,} FCFA* (viré ce jour)\n\n"
-        f"_TontineBot Pro — BADF Ltd_"
-    )
-    release_conn(conn)
-    wa_owner("\n".join(lignes))
 
 
 
@@ -10822,7 +10754,6 @@ def demarrer_scheduler():
     # ── Jobs fixes ────────────────────────────────────────────────────────
     scheduler.add_job(rapport_groupes_20h,             "cron", hour=20, minute=0,  id="rapport_groupes")
     scheduler.add_job(envoyer_releve_fmp_post_bouffage,"cron", minute="*",         id="fmp_post_bouffage")
-    scheduler.add_job(rapport_owner_21h,            "cron", hour=HEURE_RAPPORT_OWNER, minute=0, id="rapport_owner")
     scheduler.add_job(verifier_suspensions_retard,  "cron", minute=30, id="suspensions")
     scheduler.add_job(detecter_fugitifs,            "cron", hour=8,  minute=33, id="anti_fugue")
     scheduler.add_job(backup_postgresql,            "cron", hour=HEURE_BACKUP, minute=0, id="backup")
