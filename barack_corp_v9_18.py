@@ -9837,12 +9837,16 @@ def envoyer_releve_fmp_post_bouffage():
     release_conn(conn)
 
 
-def rapport_groupes_20h():
-    """Rapport de fin de journée dans chaque groupe."""
+def rapport_groupes_fin_journee():
+    """Rapport de fin de journée dans chaque groupe, à heure_limite+1h de chaque tontine."""
     conn     = get_conn()
     tontines = fetchall(conn, "SELECT * FROM tontines WHERE statut='Active'")
+    heure_now = datetime.now().hour
     for t in tontines:
         if not _est_jour_cotisation(t):
+            continue
+        h_limite = int((t["heure_limite"] or "18:00").split(":")[0])
+        if (h_limite + 1) % 24 != heure_now:
             continue
         nb_a    = fetchone(conn,
             "SELECT COUNT(*) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
@@ -10783,7 +10787,7 @@ def demarrer_scheduler():
     scheduler.add_job(notifier_prochain_bouffage, "cron", minute=9, id="bouffage")
 
     # ── Jobs fixes ────────────────────────────────────────────────────────
-    scheduler.add_job(rapport_groupes_20h,             "cron", hour=20, minute=0,  id="rapport_groupes")
+    scheduler.add_job(rapport_groupes_fin_journee,      "cron", minute=0,           id="rapport_groupes")
     scheduler.add_job(envoyer_releve_fmp_post_bouffage,"cron", minute="*",         id="fmp_post_bouffage")
     scheduler.add_job(verifier_suspensions_retard,  "cron", minute=30, id="suspensions")
     scheduler.add_job(detecter_fugitifs,            "cron", hour=8,  minute=33, id="anti_fugue")
