@@ -8,7 +8,7 @@
 
 ## What is KATECHON OS
 
-Financial coordination protocol for the Global South informal economy. WhatsApp-native, 2G-compatible, built to serve ROSCAs — the $800B–$1T/year rotating savings networks (tontines, chit funds, esusu, arisan, consórcio) that coordinate the financial lives of 400–500 million unbanked people across 5 continents. A single Python process orchestrates KYC onboarding, multi-layer fraud detection, behavioral credit scoring (Trust Graph), automated payout scheduling, screenshot OCR payment verification, and full financial accounting — zero external fintech dependency, zero licensing requirement, deployable on a laptop.
+Financial coordination protocol for the Global South informal economy. WhatsApp-native, 2G-compatible, built to serve ROSCAs — the $800B–$1T/year rotating savings networks (tontines, chit funds, esusu, arisan, consórcio) that coordinate the financial lives of 400–500 million unbanked people across 5 continents. A single Python process orchestrates instant zero-friction onboarding, multi-layer fraud detection, behavioral credit scoring (Trust Graph), automated payout scheduling, screenshot OCR payment verification, and full financial accounting — zero external fintech dependency, zero licensing requirement, deployable on a laptop.
 
 WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distribution. It is the tactical layer to aggregate the unbanked masses and map the initial Trust Graph. However, we are built for programmatic resilience. Our 5-layer decoupled architecture allows us to seamlessly swap the front-end presentation layer from WhatsApp to carrier-grade USSD protocol in Africa.
 
@@ -79,7 +79,7 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 | Function | Score | Key Controls |
 |----------|-------|-------------|
 | GV — Govern | 65% | Owner / Admin / Member hierarchy, permission gating, blocking debt |
-| ID — Identify | 88% | 17-table asset inventory, 5-step KYC, `requirements.txt` SBOM |
+| ID — Identify | 88% | 17-table asset inventory, name-only instant onboarding, `requirements.txt` SBOM |
 | PR — Protect | 82% | HMAC-SHA256, rate limiting, network blacklist, SHA-256, SSRF whitelist |
 | DE — Detect | 93% | 68+ event types in `audit_log`, Trust Graph fugue model, burst fraud alert ≥5/h |
 | RS — Respond | 80% | Auto-ban ×3 fraud, automatic 72h suspension, 3 fugue stages + ANIF/COBAC deterrence |
@@ -95,12 +95,12 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 | 2 | **Parameterized SQL** | All queries use `%s` bind params — zero f-string SQL, zero injection surface |
 | 3 | **SELECT FOR UPDATE** | Pessimistic PostgreSQL lock on cashout — concurrent double-confirm impossible |
 | 4 | **SHA-256 Screenshot Anti-Replay** | Unique fingerprint per image; rejected if seen before or >24h old |
-| 5 | **UNIQUE Partial Indexes** | DB-level physical dedup on members, KYC, screenshots — Python can't bypass this |
+| 5 | **UNIQUE Partial Indexes** | DB-level physical dedup on members, screenshots — Python can't bypass this |
 | 6 | **Rate Limiting** | 10 msgs/60s per number → audit log + silent drop |
 | 7 | **MontantAberrantError** | >50% deviation → hard reject; 15–50% → FORCE command required |
 | 8 | **SSRF Whitelist** | Only whatsapp.net / fbcdn.net / cdninstagram.com — all other URLs rejected |
 | 9 | **Screenshot Deduplication** | Hash check before OCR — prevents recycled proof-of-payment |
-| 10 | **KYC 5-Step Enforcement** | nom → CNI → date naissance → ville → photo — no bypass path |
+| 10 | **Zero-Friction Onboarding** | Name-only registration — instant menu access, zero document friction |
 | 11 | **Auto-Ban (×3 fraud)** | 3 confirmed fraud attempts → automatic network ban + `blackliste=1` in DB |
 | 12 | **Trust Score (score_confiance)** | 0–100 reputation; decrements on suspicion; reaches 0 → banned |
 | 13 | **Trust Graph (fugue model)** | 9-feature behavioral model predicts default 7 days before the event |
@@ -112,7 +112,7 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 | 19 | **DB Circuit Breaker** | 10 failures → pool open 60s → automatic reset |
 | 20 | **SAVEPOINT/ROLLBACK Isolation** | Migration failures cannot corrupt global transaction state |
 | 21 | **Immutable Audit Trail** | `audit_log` table + `audit_immutable.log` — 68+ event types, tamper-evident |
-| 22 | **Age Verification** | Minor detected → requires birth certificate (`acte_naissance`) |
+| 22 | **Cross-Tontine Reputation Propagation** | Trust Graph flag in one ROSCA decrements `score_confiance` globally — bad actors can't reset reputation by switching groups |
 | 23 | **Phone Format Validation** | Regex normalization to E.164 — rejects malformed identifiers |
 | 24 | **Input Sanitization** | Name fields: `^[A-Za-zÀ-ÿ\s\-'\.]+$` — injection-safe, 3-char minimum |
 | 25 | **Path Traversal Guard** | `os.path.basename()` + allowlist regex on all file paths |
@@ -127,17 +127,18 @@ First behavioral credit bureau for Global South populations never seen by tradit
 
 | Feature | Weight | Signal Measured |
 |---------|--------|----------------|
-| Historical regularity | 25% | Coefficient of variation of contribution intervals |
-| Recent trend | 20% | Ratio contributions 0–30d vs 30–60d |
-| Inverted trust score | 15% | `score_confiance` 0–100 → risk |
-| Outstanding debt | 15% | IRA debt ratio / estimated monthly capacity |
-| Engagement depth | 10% | Seniority + number of tontines + KYC completeness |
-| Payment velocity | 10% | Average delay after `heure_ouverture` |
-| Weak signals | 5% | Past suspensions + fraud attempts |
-| Post-cashout behavior | 20% | Continued contributing after receiving cashout? |
-| Trust score drop | 10% | Drop >25 pts over 30 rolling days |
+| Historical regularity | 25 | Coefficient of variation of contribution intervals |
+| Recent trend | 20 | Ratio contributions 0–30d vs 30–60d |
+| Inverted trust score | 15 | `score_confiance` 0–100 → risk |
+| Outstanding debt | 15 | IRA debt ratio / estimated monthly capacity |
+| Engagement depth | 10 | Seniority + number of active tontines |
+| Payment velocity | 10 | Average delay after `heure_ouverture` |
+| Weak signals | 5 | Past suspensions + fraud attempts |
+| Post-cashout behavior | 20 | Continued contributing after receiving cashout? |
+| Trust score drop | 10 | Drop >25 pts over 30 rolling days |
+| Cycle position | 15 | Late position in rotation = higher flight risk (structural, non-manipulable) |
 
-**Risk levels:** 🟢 0–30 Green · 🟡 31–55 Yellow · 🟠 56–75 Orange · 🔴 76–100 Red → cashout automatically delayed
+**Risk levels:** 🟢 0–30 Green · 🟡 31–55 Yellow · 🟠 56–75 Orange · 🔴 76–100 Red → admin alerted with full evidence, no automatic block
 
 ---
 
