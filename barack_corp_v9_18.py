@@ -3288,34 +3288,6 @@ def _demarrer_collecte_nom(wa: str):
     )
 
 
-def demarrer_kyc(wa: str):
-    """
-    Lance le processus KYC pour un nouveau membre.
-    Le flux s'adapte selon l'âge :
-      Adulte (≥18 ans) : Nom → Naissance → CNI → Ville  (4 étapes)
-      Mineur  (<18 ans) : Nom → Naissance → Ville        (3 étapes)
-    La détection adulte/mineur se fait à l'étape 2 (date de naissance).
-    """
-    with _sessions_lock:
-        _sessions_kyc[wa] = {"etape": 0, "data": {}, "mineur": None, "ts": time_module.time()}
-    wa_prive(wa,
-        "📋 *VÉRIFICATION D'IDENTITÉ — BADF Ltd*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Avant d'activer votre compte Barack Corp, nous devons confirmer "
-        "votre identité conformément aux exigences *CEMAC/ANIF*.\n\n"
-        "🔒 *Sécurité garantie :*\n"
-        "• Chiffrement SHA-256 irréversible\n"
-        "• Données jamais partagées avec des tiers\n"
-        "• Archivage légal 7 ans\n\n"
-        "Ce processus prend *moins de 3 minutes*.\n"
-        "Vous pouvez taper *STOP* à tout moment pour interrompre.\n\n"
-        "─────────────────────────────────────────\n"
-        "✏️ *ÉTAPE 1 — Votre nom complet*\n\n"
-        "Entrez votre *prénom et nom* exactement comme ils apparaissent "
-        "sur votre pièce d'identité :"
-    )
-
-
 def traiter_kyc(wa: str, texte: str, est_media: bool = False) -> bool:
     """
     Traite chaque étape du KYC adaptatif.
@@ -3372,85 +3344,6 @@ def _finaliser_nom(wa: str, nom: str):
         f"✅ Bonjour *{nom}* !\n\n"
         f"{MSG_BIENVENUE_DM}\n\n"
         "Tapez *menu* pour voir vos options."
-    )
-
-
-def _finaliser_kyc(wa: str, data: dict, mineur: bool = False):
-    """
-    Finalise le KYC et inscrit le membre en base.
-    Adapté adulte (CNI) ou mineur (acte de naissance).
-    """
-    nom       = data["kyc_nom"]
-    naissance = data["kyc_naissance"]
-    ville     = data["kyc_ville"]
-    age       = data.get("kyc_age", 0)
-    cni       = data.get("kyc_cni", "")  # vide pour les mineurs
-
-    # Hash différent selon adulte/mineur pour l'unicité
-    if mineur:
-        kyc_hash = hashlib.sha256(
-            f"MINEUR:{nom}{wa}{naissance}{ville}".encode()
-        ).hexdigest()
-    else:
-        kyc_hash = hashlib.sha256(
-            f"ADULTE:{nom}{wa}{cni}{naissance}".encode()
-        ).hexdigest()
-
-    conn   = get_conn()
-    membre = fetchone(conn, "SELECT * FROM membres WHERE whatsapp=%s", (wa,))
-
-    if membre:
-        q(conn, """UPDATE membres SET
-                   nom_complet=%s, kyc_hash=%s, kyc_complet=1, kyc_etape=5,
-                   kyc_nom=%s, kyc_cni=%s, kyc_naissance=%s, kyc_ville=%s,
-                   kyc_photo_recu=1, kyc_mineur=%s, statut_global='Actif'
-                   WHERE whatsapp=%s""",
-          (nom, kyc_hash, nom, cni or None, naissance, ville,
-           1 if mineur else 0, wa))
-    else:
-        q(conn, """INSERT INTO membres
-                   (nom_complet, kyc_hash, whatsapp, kyc_complet, kyc_etape,
-                    kyc_nom, kyc_cni, kyc_naissance, kyc_ville,
-                    kyc_photo_recu, kyc_mineur, adhesion_payee)
-                   VALUES (%s,%s,%s,1,5,%s,%s,%s,%s,1,%s,1)""",
-          (nom, kyc_hash, wa, nom, cni or None, naissance, ville,
-           1 if mineur else 0))
-    conn.commit()
-    release_conn(conn)
-
-    _sessions_kyc.pop(wa, None)
-
-    type_doc = "Acte de naissance" if mineur else "CNI"
-    ref_doc  = f"Acte — {naissance}" if mineur else f"CNI : {cni}"
-    statut_m = "👶 Mineur" if mineur else "👤 Adulte"
-
-    log_audit("KYC_COMPLET",
-              f"{nom} | {statut_m} | {ref_doc} | {ville}", wa)
-
-    wa_prive(wa,
-        f"🎉 *IDENTITÉ VÉRIFIÉE — BADF Ltd*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ *Dossier KYC enregistré avec succès !*\n\n"
-        f"👤 Nom : *{nom}*\n"
-        f"🎂 Naissance : *{naissance}* ({age} ans)\n"
-        f"📄 Document : *{type_doc}*\n"
-        f"🏙️ Ville : *{ville}*\n"
-        f"🔐 Hash SHA-256 : `{kyc_hash[:20]}...`\n\n"
-        f"─────────────────────────────────────────\n"
-        f"🔒 *Vos données sont archivées de façon irréversible.*\n"
-        f"Ce dossier fait foi en cas de litige et peut être "
-        f"communiqué aux autorités compétentes.\n\n"
-        f"📲 Tapez *menu* pour accéder à vos tontines."
-    )
-
-    # Alerte admin avec type membre
-    wa_admin(
-        f"✅ *NOUVEAU MEMBRE KYC — {statut_m}*\n"
-        f"👤 {nom} | {wa}\n"
-        f"🎂 {naissance} ({age} ans)\n"
-        f"📄 {ref_doc}\n"
-        f"🏙️ {ville}\n"
-        f"🔐 {kyc_hash[:20]}..."
     )
 
 
