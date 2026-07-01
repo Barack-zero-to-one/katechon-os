@@ -8194,8 +8194,6 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
                 f"_TontineBot Pro — BADF Ltd_"
             )
 
-            enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"])
-
         # Récupérer l'admin
         admin = fetchone(conn,
             "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
@@ -8220,6 +8218,8 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
                 f"Contactez votre admin.\n\n"
                 f"_TontineBot Pro — BADF Ltd_")
             return
+
+        enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"])
 
         # Message places multiples si applicable
         places_info = ""
