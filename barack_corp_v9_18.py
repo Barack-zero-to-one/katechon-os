@@ -7859,8 +7859,11 @@ def webhook_whatsapp_greenapi():
 
     # ── 4) Extraire l'émetteur ────────────────────────────────────────────
     sender_data  = payload.get("senderData") or {}
-    chat_id      = sender_data.get("chatId", "")   # ex: 237693969773@c.us
-    wa_brut      = chat_id.split("@")[0]            # ex: 237693969773
+    chat_id      = sender_data.get("chatId", "")
+    sender       = sender_data.get("sender", "")
+    is_group     = "@g.us" in chat_id
+    wa_brut      = (sender if is_group else chat_id).split("@")[0]
+    group_id     = chat_id if is_group else ""
     wa           = normaliser_numero(wa_brut)
     if not wa:
         return jsonify({"status": "ok"}), 200
@@ -7887,7 +7890,7 @@ def webhook_whatsapp_greenapi():
 
     # ── 6) Soumettre le traitement au thread pool ─────────────────────────
     try:
-        _msg_executor.submit(_traiter_message_greenapi, payload, wa, img_future)
+        _msg_executor.submit(_traiter_message_greenapi, payload, wa, img_future, group_id)
     except Exception as e:
         log.error(f"Webhook Green API submit : {e}")
         if img_future is not None:
@@ -7927,7 +7930,7 @@ def _greenapi_telecharger_media(url_media: str) -> bytes:
     return b""
 
 
-def _traiter_message_greenapi(payload: dict, wa: str, img_future=None):
+def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id: str = ""):
     """Parse un événement Green API et route vers la logique métier."""
     if not rate_limit_ok(wa):
         return
@@ -7968,7 +7971,10 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None):
 
     if est_image and img_bytes:
         try:
-            _traiter_screenshot_adhesion_dm(wa, img_bytes)
+            if group_id:
+                _traiter_screenshot_cotisation_bytes(wa, img_bytes, caption, group_id)
+            else:
+                _traiter_screenshot_adhesion_dm(wa, img_bytes)
         except Exception as e:
             log.error(f"Erreur image Green API : {e}")
         return
@@ -8013,13 +8019,23 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
         return
 
     # Récupérer l'adhesion avec nombre_places
-    adhesion = fetchone(conn, """
-        SELECT a.tontine_id, a.nombre_places, t.nom, t.montant_place
-        FROM adhesions a
-        JOIN tontines t ON t.id = a.tontine_id
-        WHERE a.membre_id=%s AND a.statut='Actif' AND t.statut='Active'
-        LIMIT 1
-    """, (membre["id"],))
+    if group_id:
+        adhesion = fetchone(conn, """
+            SELECT a.tontine_id, a.nombre_places, t.nom, t.montant_place
+            FROM adhesions a
+            JOIN tontines t ON t.id = a.tontine_id
+            WHERE a.membre_id=%s AND a.statut='Actif' AND t.statut='Active'
+              AND t.whatsapp_groupe=%s
+            LIMIT 1
+        """, (membre["id"], group_id))
+    else:
+        adhesion = fetchone(conn, """
+            SELECT a.tontine_id, a.nombre_places, t.nom, t.montant_place
+            FROM adhesions a
+            JOIN tontines t ON t.id = a.tontine_id
+            WHERE a.membre_id=%s AND a.statut='Actif' AND t.statut='Active'
+            LIMIT 1
+        """, (membre["id"],))
 
     if not adhesion:
         release_conn(conn)
