@@ -1230,6 +1230,13 @@ def init_db():
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS jour_mois INTEGER NOT NULL DEFAULT 1 CHECK(jour_mois BETWEEN 1 AND 28)",
         "ALTER TABLE adhesions ADD COLUMN IF NOT EXISTS nb_avertissements_retard INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS credit_comm_statut TEXT NOT NULL DEFAULT 'Non_eligible'",
+        # ── Trust Graph cross-tontine (PATCH 41) ──────────────────────────
+        "ALTER TABLE alertes_fugue DROP CONSTRAINT IF EXISTS alertes_fugue_type_alerte_check",
+        """ALTER TABLE alertes_fugue ADD CONSTRAINT alertes_fugue_type_alerte_check
+           CHECK(type_alerte IN (
+               'Avertissement_1','Avertissement_2','Blocage','Interception_caution',
+               'TrustGraph_orange','TrustGraph_rouge'
+           ))""",
     ]:
         try:
             c.execute("SAVEPOINT mig")
@@ -8594,6 +8601,37 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
         features["chute_score"] = chute_score
         score += chute_score
 
+        # ── Feature 10 : Position dans le cycle (poids 15) ──────────────────
+        # Signal structurel — le membre ne contrôle pas sa position dans la rotation.
+        # Plus il passe tard, plus la tentation est forte (N-1 paiements vus avant lui).
+        passage_pos = fetchone(conn, """
+            SELECT lp.ordre,
+                   (SELECT COUNT(*) FROM liste_passage
+                    WHERE tontine_id=%s AND cycle=%s) AS total
+            FROM liste_passage lp
+            WHERE lp.membre_id=%s AND lp.tontine_id=%s
+              AND lp.cycle = %s
+            LIMIT 1
+        """, (tontine_id, tontine["cycle_actuel"], membre_id, tontine_id, tontine["cycle_actuel"]))
+
+        if passage_pos and passage_pos["total"] and passage_pos["total"] > 0:
+            rang_relatif = passage_pos["ordre"] / passage_pos["total"]
+            if rang_relatif >= 0.75:
+                position_score = 15
+                signaux.append(
+                    f"Position tardive : {passage_pos['ordre']}/{passage_pos['total']} "
+                    f"({rang_relatif*100:.0f}% du cycle)"
+                )
+            elif rang_relatif >= 0.5:
+                position_score = 8
+                signaux.append(
+                    f"Milieu de cycle : {passage_pos['ordre']}/{passage_pos['total']}"
+                )
+            else:
+                position_score = 0
+            features["position_cycle"] = position_score
+            score += position_score
+
         # ── Normalisation et niveau final ───────────────────────────────────
         score = min(100, max(0, round(score)))
 
@@ -8685,6 +8723,24 @@ def alerter_risques_bouffage_imminent():
                 "signaux":        score_dict["signaux"],
                 "recommandation": score_dict["recommandation"],
             })
+
+            # Propagation cross-tontine — pénalité unique sur score_confiance global
+            # Permet à Feature 3 de répercuter le risque dans les autres tontines du membre
+            type_alerte_tg = f"TrustGraph_{score_dict['niveau']}"
+            deja_penalise = fetchone(conn, """
+                SELECT id FROM alertes_fugue
+                WHERE membre_id=%s AND tontine_id=%s AND type_alerte=%s AND traite=0
+            """, (p["membre_id"], p["tontine_id"], type_alerte_tg))
+
+            if not deja_penalise:
+                delta = -15 if score_dict["niveau"] == "rouge" else -7
+                _update_score_confiance(conn, p["membre_id"], delta=delta,
+                    raison=f"Trust Graph {score_dict['niveau']} J-{jours_avant} — {p['nom_tontine']}")
+                q(conn, """INSERT INTO alertes_fugue
+                           (membre_id, tontine_id, type_alerte, jours_retard, montant_du)
+                           VALUES (%s, %s, %s, %s, 0) ON CONFLICT DO NOTHING""",
+                  (p["membre_id"], p["tontine_id"], type_alerte_tg, jours_avant))
+                conn.commit()
 
         # Envoyer un seul DM groupé par admin
         for admin_wa, alertes in alertes_par_admin.items():
@@ -8986,6 +9042,25 @@ def notifier_prochain_bouffage():
                       f"{passage['nom_complet']} | {t['nom']} | {alerte_suspect}",
                       passage["whatsapp"])
             continue
+
+        # ── Trust Graph — alerte admin au moment du bouffage ─────────────────
+        score_trust = calculer_score_risque_fugue(conn, passage["mbr_id"], t["id"])
+        if score_trust["niveau"] in ("orange", "rouge"):
+            emoji_tg = "🔴" if score_trust["niveau"] == "rouge" else "🟠"
+            signaux_txt = "\n".join(f"  • {s}" for s in score_trust["signaux"])
+            wa_admins_tontine(t["id"],
+                f"{emoji_tg} *ALERTE TRUST GRAPH — BOUFFAGE IMMINENT — {t['nom']}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Bénéficiaire : *{passage['nom_complet']}*\n"
+                f"Score fugue  : *{score_trust['score']}/100* {emoji_tg}\n\n"
+                f"Signaux :\n{signaux_txt}\n\n"
+                f"👉 *{score_trust['recommandation']}*\n\n"
+                f"Le bouffage se déclenche normalement. C'est vous qui décidez.\n\n"
+                f"_TontineBot Pro — BADF Ltd_"
+            )
+            log_audit("BOUFFAGE_TRUST_ALERTE",
+                      f"{passage['nom_complet']} | Score:{score_trust['score']} | {t['nom']}",
+                      passage.get("whatsapp", ""))
 
         # Calcul financier
         nb_membres   = fetchone(conn,
