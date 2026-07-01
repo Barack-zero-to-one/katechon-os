@@ -1693,7 +1693,8 @@ def calculer_frais(montant_brut: int, heure: time,
         limite = time(h, m)
     except Exception:
         limite = HEURE_LIMITE_DEF
-    ira = MONTANT_IRA if heure.hour > limite.hour else 0
+    grace = (datetime.combine(_date.today(), limite) + timedelta(minutes=5)).time()
+    ira = MONTANT_IRA if heure >= grace else 0
     return {
         "frais_fmp":   fmp,
         "frais_ira":   ira,
@@ -8380,7 +8381,7 @@ def traiter_bouffages_suspects_expires():
 
             log_audit("BOUFFAGE_SUSPECT_TRAITE",
                       f"{p['nom_complet']} | {p['tontine_nom']} | "
-                      f"Dettes:{total_dettes:,} | Redistribué:{solde_redistribue:,}",
+                      f"Dettes:{total_dettes:,} | Redistribué:{solde_membre:,}",
                       p["whatsapp"])
 
     except Exception as e:
@@ -9281,7 +9282,7 @@ def notifier_prochain_bouffage():
             f"sur votre Mobile Money dans les prochaines heures.\n\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
-        wa_prive(passage["wa"], bordereau)
+        wa_prive(passage["whatsapp"], bordereau)
 
         # Annonce dans le groupe (sans montant — discrétion)
         if t.get("whatsapp_groupe"):
