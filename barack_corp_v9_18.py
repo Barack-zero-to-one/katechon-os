@@ -7865,6 +7865,8 @@ def webhook_whatsapp_greenapi():
     group_id     = chat_id if is_group else ""
     wa           = normaliser_numero(wa_brut)
     if not wa:
+        if is_group and not sender:
+            log.warning(f"Green API groupe sans sender : chatId={chat_id!r}")
         return jsonify({"status": "ok"}), 200
 
     # ── 4b) Vérification rate limit avant download ────────────────────────
@@ -7931,21 +7933,8 @@ def _greenapi_telecharger_media(url_media: str) -> bytes:
 
 def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id: str = ""):
     """Parse un événement Green API et route vers la logique métier."""
-    if not rate_limit_ok(wa):
-        return
-
-    if not group_id and wa != OWNER_WA:
-        _conn_ck = get_conn()
-        try:
-            _connu = fetchone(_conn_ck,
-                """SELECT 1 FROM membres WHERE whatsapp=%s
-                   UNION ALL
-                   SELECT 1 FROM admins_groupe WHERE whatsapp=%s
-                   LIMIT 1""",
-                (wa, wa))
-        finally:
-            release_conn(_conn_ck)
-        if not _connu:
+    if not group_id and not est_owner(wa):
+        if not get_membre_by_wa(wa) and not est_admin(wa):
             return
 
     message_data = payload.get("messageData") or {}
@@ -7992,7 +7981,10 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
             log.error(f"Erreur image Green API : {e}")
         return
 
-    if wa == OWNER_WA:
+    if group_id:
+        return
+
+    if est_owner(wa):
         rep = traiter_menu_owner(wa, texte)
         if rep:
             wa_prive(wa, rep)
@@ -8015,254 +8007,263 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
     Hash SHA-256 anti-recyclage + enregistrement cotisation.
     """
     conn   = get_conn()
-    membre = fetchone(conn,
-        "SELECT id, nom_complet, statut_global FROM membres WHERE whatsapp=%s", (wa,))
+    try:
+        membre = fetchone(conn,
+            "SELECT id, nom_complet, statut_global FROM membres WHERE whatsapp=%s", (wa,))
 
-    if not membre:
-        release_conn(conn)
-        wa_prive(wa,
-            f"❓ Vous n'êtes pas encore enregistré.\n\n"
-            f"Tapez *menu* pour commencer votre inscription.\n\n"
-            f"_TontineBot Pro — BADF Ltd_")
-        return
+        if not membre:
+            wa_prive(wa,
+                f"❓ Vous n'êtes pas encore enregistré.\n\n"
+                f"Tapez *menu* pour commencer votre inscription.\n\n"
+                f"_TontineBot Pro — BADF Ltd_")
+            return
 
-    if membre["statut_global"] in ("Suspendu_global", "Banni"):
-        release_conn(conn)
-        wa_prive(wa, f"🚫 Compte *{membre['statut_global']}*. Contactez votre admin.")
-        return
+        if membre["statut_global"] in ("Suspendu_global", "Banni"):
+            wa_prive(wa, f"🚫 Compte *{membre['statut_global']}*. Contactez votre admin.")
+            return
 
-    # Récupérer l'adhesion avec nombre_places
-    if group_id:
-        adhesion = fetchone(conn, """
-            SELECT a.tontine_id, a.nombre_places, t.nom, t.montant_place
-            FROM adhesions a
-            JOIN tontines t ON t.id = a.tontine_id
-            WHERE a.membre_id=%s AND a.statut='Actif' AND t.statut='Active'
-              AND t.whatsapp_groupe=%s
-            LIMIT 1
-        """, (membre["id"], group_id))
-    else:
-        adhesion = fetchone(conn, """
-            SELECT a.tontine_id, a.nombre_places, t.nom, t.montant_place
-            FROM adhesions a
-            JOIN tontines t ON t.id = a.tontine_id
-            WHERE a.membre_id=%s AND a.statut='Actif' AND t.statut='Active'
-            LIMIT 1
-        """, (membre["id"],))
+        # Anti-recyclage SHA-256 — avant le lookup adhesion (sécurité couche 1)
+        img_hash = hash_screenshot(image_bytes)
+        if screenshot_deja_utilise(conn, img_hash):
+            log_audit("SCREENSHOT_RECYCLE",
+                      f"Membre:{membre['id']} Hash:{img_hash[:16]}", wa)
+            incrementer_tentatives_fraude(membre["id"], "Screenshot recyclé")
+            return
 
-    if not adhesion:
-        release_conn(conn)
-        return
+        # Récupérer l'adhesion avec nombre_places
+        if group_id:
+            adhesion = fetchone(conn, """
+                SELECT a.tontine_id, a.nombre_places, t.nom, t.montant_place
+                FROM adhesions a
+                JOIN tontines t ON t.id = a.tontine_id
+                WHERE a.membre_id=%s AND a.statut='Actif' AND t.statut='Active'
+                  AND t.whatsapp_groupe=%s
+                LIMIT 1
+            """, (membre["id"], group_id))
+        else:
+            adhesion = fetchone(conn, """
+                SELECT a.tontine_id, a.nombre_places, t.nom, t.montant_place
+                FROM adhesions a
+                JOIN tontines t ON t.id = a.tontine_id
+                WHERE a.membre_id=%s AND a.statut='Actif' AND t.statut='Active'
+                LIMIT 1
+            """, (membre["id"],))
 
-    # Calcul du montant attendu selon les places
-    nb_places       = adhesion["nombre_places"] or 1
-    montant_attendu = adhesion["montant_place"] * nb_places
+        if not adhesion:
+            if group_id:
+                if membre["statut_global"] in ("En_attente_kyc", "En_attente_paiement"):
+                    wa_prive(wa,
+                        "📸 *Frais d'inscription*\n\n"
+                        "Pour activer votre compte, envoyez votre reçu de "
+                        "*2 000 FCFA* en *message privé* au bot (pas dans le groupe).\n\n"
+                        "_TontineBot Pro — BADF Ltd_")
+                else:
+                    wa_prive(wa,
+                        "⚠️ *Reçu reçu — tontine non configurée*\n\n"
+                        "Votre groupe n'est pas encore lié à une tontine active.\n"
+                        "Contactez votre admin.\n\n"
+                        "_TontineBot Pro — BADF Ltd_")
+            return
 
-    # ── Lecture automatique du screenshot (OCR local Tesseract) ───────────
-    lecture = lire_screenshot_mobile_money(image_bytes)
-    fraude_visuelle = False
+        # Calcul du montant attendu selon les places
+        nb_places       = adhesion["nombre_places"] or 1
+        montant_attendu = adhesion["montant_place"] * nb_places
 
-    if lecture.get("ok"):
-        montant_lu  = lecture.get("montant")
-        confiance   = lecture.get("confiance", "faible")
-        operateur   = lecture.get("operateur", "Inconnu")
-        ref_lu      = lecture.get("reference", "")
+        # ── Lecture automatique du screenshot (OCR local Tesseract) ───────────
+        lecture = lire_screenshot_mobile_money(image_bytes)
+        fraude_visuelle = False
 
-        # Vérification montant : comparaison avec montant attendu
-        if montant_lu and montant_attendu:
-            ecart = abs(montant_lu - montant_attendu)
-            ecart_pct = ecart / montant_attendu * 100
+        if lecture.get("ok"):
+            montant_lu  = lecture.get("montant")
+            confiance   = lecture.get("confiance", "faible")
+            operateur   = lecture.get("operateur", "Inconnu")
+            ref_lu      = lecture.get("reference", "")
 
-            if ecart_pct > 10:
-                # Montant ne correspond pas — suspect
-                fraude_visuelle = True
-                incrementer_tentatives_fraude(
-                    membre["id"],
-                    f"Montant lu {montant_lu:,} FCFA ≠ attendu {montant_attendu:,} FCFA"
-                )
+            # Vérification montant : comparaison avec montant attendu
+            if montant_lu and montant_attendu:
+                ecart = abs(montant_lu - montant_attendu)
+                ecart_pct = ecart / montant_attendu * 100
+
+                if ecart_pct > 10:
+                    # Montant ne correspond pas — suspect
+                    fraude_visuelle = True
+                    incrementer_tentatives_fraude(
+                        membre["id"],
+                        f"Montant lu {montant_lu:,} FCFA ≠ attendu {montant_attendu:,} FCFA"
+                    )
+                    admin_alerte = fetchone(conn,
+                        "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
+                        (adhesion["tontine_id"],))
+                    if admin_alerte:
+                        wa_prive(admin_alerte["whatsapp"],
+                            f"🚨 *ALERTE MONTANT SUSPECT — {adhesion['nom']}*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                            f"Membre    : *{membre['nom_complet']}*\n"
+                            f"Lu sur image : *{montant_lu:,} FCFA* ({operateur})\n"
+                            f"Attendu      : *{montant_attendu:,} FCFA*\n"
+                            f"Écart        : *{ecart_pct:.0f}%*\n\n"
+                            f"⚠️ Le montant du screenshot ne correspond pas.\n"
+                            f"Vérifiez avant de confirmer — possible screenshot modifié.\n\n"
+                            f"_TontineBot Pro — BADF Ltd_"
+                        )
+                    log_audit("MONTANT_SUSPECT",
+                              f"Membre:{membre['id']} Lu:{montant_lu} Attendu:{montant_attendu}",
+                              wa)
+
+            # Confiance faible → alerte admin
+            if confiance == "faible" and not fraude_visuelle:
                 admin_alerte = fetchone(conn,
                     "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
                     (adhesion["tontine_id"],))
                 if admin_alerte:
                     wa_prive(admin_alerte["whatsapp"],
-                        f"🚨 *ALERTE MONTANT SUSPECT — {adhesion['nom']}*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"Membre    : *{membre['nom_complet']}*\n"
-                        f"Lu sur image : *{montant_lu:,} FCFA* ({operateur})\n"
-                        f"Attendu      : *{montant_attendu:,} FCFA*\n"
-                        f"Écart        : *{ecart_pct:.0f}%*\n\n"
-                        f"⚠️ Le montant du screenshot ne correspond pas.\n"
-                        f"Vérifiez avant de confirmer — possible screenshot modifié.\n\n"
+                        f"⚠️ *SCREENSHOT DOUTEUX — {adhesion['nom']}*\n\n"
+                        f"Membre : *{membre['nom_complet']}*\n"
+                        f"L'image soumise est *floue ou tronquée*.\n"
+                        f"Vérifiez attentivement avant de confirmer.\n\n"
                         f"_TontineBot Pro — BADF Ltd_"
                     )
-                log_audit("MONTANT_SUSPECT",
-                          f"Membre:{membre['id']} Lu:{montant_lu} Attendu:{montant_attendu}",
-                          wa)
-
-        # Confiance faible → alerte admin
-        if confiance == "faible" and not fraude_visuelle:
+                log_audit("SCREENSHOT_DOUTEUX",
+                          f"Membre:{membre['id']} Confiance:{confiance}", wa)
+        else:
+            # OCR a échoué entièrement → on demande à l'admin de confirmer le montant
+            operateur = "Inconnu"
+            ref_lu    = ""
+            # Alerter l'admin pour confirmation manuelle du montant
             admin_alerte = fetchone(conn,
                 "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
                 (adhesion["tontine_id"],))
             if admin_alerte:
                 wa_prive(admin_alerte["whatsapp"],
-                    f"⚠️ *SCREENSHOT DOUTEUX — {adhesion['nom']}*\n\n"
-                    f"Membre : *{membre['nom_complet']}*\n"
-                    f"L'image soumise est *floue ou tronquée*.\n"
-                    f"Vérifiez attentivement avant de confirmer.\n\n"
+                    f"📸 *SCREENSHOT REÇU — confirmation manuelle*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"Tontine    : *{adhesion['nom']}*\n"
+                    f"Membre     : *{membre['nom_complet']}*\n"
+                    f"Montant attendu : *{montant_attendu:,} FCFA*\n\n"
+                    f"⚠️ Le bot n'a pas pu lire automatiquement ce reçu.\n"
+                    f"Vérifiez sur votre téléphone que vous avez bien reçu le paiement, "
+                    f"puis traitez via le menu admin :\n\n"
+                    f"  1. Tapez *admin {adhesion['nom']}*\n"
+                    f"  2. Tapez *15* (Cotisations en attente)\n"
+                    f"  3. Répondez *OUI* si reçu, *NON [raison]* sinon\n\n"
                     f"_TontineBot Pro — BADF Ltd_"
                 )
-            log_audit("SCREENSHOT_DOUTEUX",
-                      f"Membre:{membre['id']} Confiance:{confiance}", wa)
-    else:
-        # OCR a échoué entièrement → on demande à l'admin de confirmer le montant
-        operateur = "Inconnu"
-        ref_lu    = ""
-        # Alerter l'admin pour confirmation manuelle du montant
-        admin_alerte = fetchone(conn,
-            "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
-            (adhesion["tontine_id"],))
-        if admin_alerte:
-            wa_prive(admin_alerte["whatsapp"],
-                f"📸 *SCREENSHOT REÇU — confirmation manuelle*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Tontine    : *{adhesion['nom']}*\n"
-                f"Membre     : *{membre['nom_complet']}*\n"
-                f"Montant attendu : *{montant_attendu:,} FCFA*\n\n"
-                f"⚠️ Le bot n'a pas pu lire automatiquement ce reçu.\n"
-                f"Vérifiez sur votre téléphone que vous avez bien reçu le paiement, "
-                f"puis traitez via le menu admin :\n\n"
-                f"  1. Tapez *admin {adhesion['nom']}*\n"
-                f"  2. Tapez *15* (Cotisations en attente)\n"
-                f"  3. Répondez *OUI* si reçu, *NON [raison]* sinon\n\n"
+            log_audit("OCR_ECHEC_MANUAL",
+                      f"Membre:{membre['id']} Tontine:{adhesion['tontine_id']}", wa)
+
+        # ── Limite : 1 screenshot par membre par période ─────────────────────
+        # Détecte les soumissions multiples le même jour (Photoshop suspect)
+        nb_aujourd_hui = fetchone(conn, """
+            SELECT COUNT(*) n FROM cotisations_manuelles
+            WHERE membre_id=%s AND tontine_id=%s
+              AND date_soumission::date = CURRENT_DATE
+        """, (membre["id"], adhesion["tontine_id"]))["n"]
+
+        if nb_aujourd_hui >= 1:
+            # Déjà soumis aujourd'hui — suspect
+            incrementer_tentatives_fraude(
+                membre["id"],
+                f"Soumission multiple screenshot — {nb_aujourd_hui+1}ème tentative aujourd'hui"
+            )
+            # Alerte immédiate à l'admin
+            admin_alerte = fetchone(conn,
+                "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
+                (adhesion["tontine_id"],))
+            if admin_alerte:
+                wa_prive(admin_alerte["whatsapp"],
+                    f"⚠️ *ALERTE FRAUDE POSSIBLE — {adhesion['nom']}*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"*{membre['nom_complet']}* vient de soumettre un *{nb_aujourd_hui+1}ème screenshot "
+                    f"aujourd'hui*.\n\n"
+                    f"Ses soumissions du jour :\n"
+                    f"  Déjà soumis  : *{nb_aujourd_hui}* screenshot(s)\n"
+                    f"  Nouveau      : *1* (en attente)\n\n"
+                    f"⚠️ Vérifiez attentivement avant de confirmer.\n"
+                    f"Un screenshot modifié (Photoshop) peut ressembler à un vrai.\n\n"
+                    f"_TontineBot Pro — BADF Ltd_"
+                )
+            log_audit("SCREENSHOT_MULTIPLE",
+                      f"Membre:{membre['id']} | {nb_aujourd_hui+1}ème soumission aujourd'hui", wa)
+
+            # Ne pas bloquer — l'admin décide — mais informer le membre
+            wa_prive(wa,
+                f"⚠️ *Attention — {adhesion['nom']}*\n\n"
+                f"Vous avez déjà soumis un screenshot aujourd'hui.\n"
+                f"Votre nouveau reçu a été transmis à l'admin pour vérification.\n\n"
                 f"_TontineBot Pro — BADF Ltd_"
             )
-        log_audit("OCR_ECHEC_MANUAL",
-                  f"Membre:{membre['id']} Tontine:{adhesion['tontine_id']}", wa)
 
-    # ── Limite : 1 screenshot par membre par période ─────────────────────
-    # Détecte les soumissions multiples le même jour (Photoshop suspect)
-    nb_aujourd_hui = fetchone(conn, """
-        SELECT COUNT(*) n FROM cotisations_manuelles
-        WHERE membre_id=%s AND tontine_id=%s
-          AND date_soumission::date = CURRENT_DATE
-    """, (membre["id"], adhesion["tontine_id"]))["n"]
+            enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"])
 
-    if nb_aujourd_hui >= 1:
-        # Déjà soumis aujourd'hui — suspect
-        incrementer_tentatives_fraude(
-            membre["id"],
-            f"Soumission multiple screenshot — {nb_aujourd_hui+1}ème tentative aujourd'hui"
-        )
-        # Alerte immédiate à l'admin
-        admin_alerte = fetchone(conn,
+        # Récupérer l'admin
+        admin = fetchone(conn,
             "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
             (adhesion["tontine_id"],))
-        if admin_alerte:
-            wa_prive(admin_alerte["whatsapp"],
-                f"⚠️ *ALERTE FRAUDE POSSIBLE — {adhesion['nom']}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"*{membre['nom_complet']}* vient de soumettre un *{nb_aujourd_hui+1}ème screenshot "
-                f"aujourd'hui*.\n\n"
-                f"Ses soumissions du jour :\n"
-                f"  Déjà soumis  : *{nb_aujourd_hui}* screenshot(s)\n"
-                f"  Nouveau      : *1* (en attente)\n\n"
-                f"⚠️ Vérifiez attentivement avant de confirmer.\n"
-                f"Un screenshot modifié (Photoshop) peut ressembler à un vrai.\n\n"
-                f"_TontineBot Pro — BADF Ltd_"
-            )
-        log_audit("SCREENSHOT_MULTIPLE",
-                  f"Membre:{membre['id']} | {nb_aujourd_hui+1}ème soumission aujourd'hui", wa)
+        admin_wa = admin["whatsapp"] if admin else OWNER_WA
 
-        # Ne pas bloquer — l'admin décide — mais informer le membre
+        # Enregistrer la cotisation avec le bon montant
+        try:
+            cotis_id = enregistrer_cotisation_manuelle(
+                conn,
+                membre_id       = membre["id"],
+                tontine_id      = adhesion["tontine_id"],
+                montant         = montant_attendu,
+                screenshot_hash = img_hash,
+                admin_wa        = admin_wa
+            )
+        except Exception as e:
+            log.error(f"❌ enregistrer_cotisation_manuelle échec pour {wa}: {e}")
+            wa_prive(wa,
+                f"⚠️ *Erreur technique — {adhesion['nom']}*\n\n"
+                f"Votre reçu a été reçu mais n'a pas pu être enregistré.\n"
+                f"Contactez votre admin.\n\n"
+                f"_TontineBot Pro — BADF Ltd_")
+            return
+
+        # Message places multiples si applicable
+        places_info = ""
+        if nb_places > 1:
+            places_info = (
+                f"\n📋 *{nb_places} places* × {adhesion['montant_place']:,} FCFA "
+                f"= *{montant_attendu:,} FCFA*"
+            )
+
+        # Accusé au membre
         wa_prive(wa,
-            f"⚠️ *Attention — {adhesion['nom']}*\n\n"
-            f"Vous avez déjà soumis un screenshot aujourd'hui.\n"
-            f"Votre nouveau reçu a été transmis à l'admin pour vérification.\n\n"
+            f"📸 *Reçu enregistré — {adhesion['nom']}*\n\n"
+            f"Bonjour *{membre['nom_complet']}*,{places_info}\n\n"
+            f"Votre reçu de *{montant_attendu:,} FCFA* a été transmis "
+            f"à votre admin.\n\nVous serez notifié dès validation.\n\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
 
-    # Anti-recyclage SHA-256
-    img_hash = hash_screenshot(image_bytes)
-    if screenshot_deja_utilise(conn, img_hash):
+        # Notifier l'admin
+        places_txt  = f" ({nb_places} places)" if nb_places > 1 else ""
+        vision_txt  = ""
+        if lecture.get("ok") and lecture.get("montant"):
+            vision_txt = (
+                f"📱 Lu sur image : *{lecture['montant']:,} FCFA* "
+                f"({lecture.get('operateur','?')}) "
+                f"— confiance *{lecture.get('confiance','?')}*\n"
+            )
+        alerte_txt = "🚨 *MONTANT SUSPECT — vérifiez avant de confirmer*\n\n" if fraude_visuelle else ""
+
+        wa_prive(admin_wa,
+            f"🔔 *COTISATION — {adhesion['nom']}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{alerte_txt}"
+            f"Membre  : *{membre['nom_complet']}*{places_txt}\n"
+            f"Attendu : *{montant_attendu:,} FCFA*\n"
+            f"{vision_txt}"
+            f"Réf     : *#{cotis_id}*\n\n"
+            f"Menu admin → option *15* pour confirmer.\n\n"
+            f"_TontineBot Pro — BADF Ltd_"
+        )
+        log_audit("SCREENSHOT_RECU",
+                  f"Membre:{membre['id']} Places:{nb_places} "
+                  f"Montant:{montant_attendu} Cotis#{cotis_id}", wa)
+    finally:
         release_conn(conn)
-        # Silence radio — log seulement, pas de message au fraudeur
-        log_audit("SCREENSHOT_RECYCLE",
-                  f"Membre:{membre['id']} Hash:{img_hash[:16]}", wa)
-        incrementer_tentatives_fraude(membre["id"], "Screenshot recyclé")
-        return
-
-    enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"])
-
-    # Récupérer l'admin
-    admin = fetchone(conn,
-        "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
-        (adhesion["tontine_id"],))
-    admin_wa = admin["whatsapp"] if admin else OWNER_WA
-
-    # Enregistrer la cotisation avec le bon montant
-    try:
-        cotis_id = enregistrer_cotisation_manuelle(
-            conn,
-            membre_id       = membre["id"],
-            tontine_id      = adhesion["tontine_id"],
-            montant         = montant_attendu,
-            screenshot_hash = img_hash,
-            admin_wa        = admin_wa
-        )
-    except Exception as e:
-        release_conn(conn)
-        log.error(f"❌ enregistrer_cotisation_manuelle échec pour {wa}: {e}")
-        wa_prive(wa,
-            f"⚠️ *Erreur technique — {adhesion['nom']}*\n\n"
-            f"Votre reçu a été reçu mais n'a pas pu être enregistré.\n"
-            f"Contactez votre admin.\n\n"
-            f"_TontineBot Pro — BADF Ltd_")
-        return
-    release_conn(conn)
-
-    # Message places multiples si applicable
-    places_info = ""
-    if nb_places > 1:
-        places_info = (
-            f"\n📋 *{nb_places} places* × {adhesion['montant_place']:,} FCFA "
-            f"= *{montant_attendu:,} FCFA*"
-        )
-
-    # Accusé au membre
-    wa_prive(wa,
-        f"📸 *Reçu enregistré — {adhesion['nom']}*\n\n"
-        f"Bonjour *{membre['nom_complet']}*,{places_info}\n\n"
-        f"Votre reçu de *{montant_attendu:,} FCFA* a été transmis "
-        f"à votre admin.\n\nVous serez notifié dès validation.\n\n"
-        f"_TontineBot Pro — BADF Ltd_"
-    )
-
-    # Notifier l'admin
-    places_txt  = f" ({nb_places} places)" if nb_places > 1 else ""
-    vision_txt  = ""
-    if lecture.get("ok") and lecture.get("montant"):
-        vision_txt = (
-            f"📱 Lu sur image : *{lecture['montant']:,} FCFA* "
-            f"({lecture.get('operateur','?')}) "
-            f"— confiance *{lecture.get('confiance','?')}*\n"
-        )
-    alerte_txt = "🚨 *MONTANT SUSPECT — vérifiez avant de confirmer*\n\n" if fraude_visuelle else ""
-
-    wa_prive(admin_wa,
-        f"🔔 *COTISATION — {adhesion['nom']}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{alerte_txt}"
-        f"Membre  : *{membre['nom_complet']}*{places_txt}\n"
-        f"Attendu : *{montant_attendu:,} FCFA*\n"
-        f"{vision_txt}"
-        f"Réf     : *#{cotis_id}*\n\n"
-        f"Menu admin → option *15* pour confirmer.\n\n"
-        f"_TontineBot Pro — BADF Ltd_"
-    )
-    log_audit("SCREENSHOT_RECU",
-              f"Membre:{membre['id']} Places:{nb_places} "
-              f"Montant:{montant_attendu} Cotis#{cotis_id}", wa)
 
 
 # ══════════════════════════════════════════════════════════════════════════
