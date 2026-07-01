@@ -458,6 +458,7 @@ def parser_liste_passage(texte: str) -> list:
         # Ex: "01- Nicole 30/10/24" ou "01— Nicole 30/10/24" (normalisé avant match)
         m = re.match(
             r"^(\d{1,3})\s*[-]\s*([A-Za-zÀ-ÿ\s\-'\.]+?)\s+"
+            r"(?:(\+?\d{9,15})\s+)?"
             r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})\s*$",
             ligne
         )
@@ -466,20 +467,22 @@ def parser_liste_passage(texte: str) -> list:
 
         ordre     = int(m.group(1))
         nickname  = m.group(2).strip()
-        jour      = int(m.group(3))
-        mois      = int(m.group(4))
-        annee_raw = int(m.group(5))
+        wa_brut   = m.group(3)  # None si absent
+        jour      = int(m.group(4))
+        mois      = int(m.group(5))
+        annee_raw = int(m.group(6))
         annee     = 2000 + annee_raw if annee_raw < 100 else annee_raw
 
         try:
             date_bouffage = _date(annee, mois, jour).isoformat()
         except ValueError:
-            date_bouffage = None  # Date invalide → on garde None
+            date_bouffage = None
 
         resultats.append({
-            "ordre":        ordre,
-            "nickname":     nickname,
-            "date_bouffage": date_bouffage
+            "ordre":         ordre,
+            "nickname":      nickname,
+            "date_bouffage": date_bouffage,
+            "whatsapp":      normaliser_numero(wa_brut) if wa_brut else None,
         })
 
     return resultats
@@ -512,21 +515,66 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
 
     # Mapper nickname → membre_id (cache pour éviter les doublons de requêtes)
     nickname_cache = {}
+    wa_cache       = {}  # wa_normalisé → membre_id pour les pré-enregistrements
 
     for item in liste:
-        nick_key = item["nickname"].upper().strip()
+        nick_key  = item["nickname"].upper().strip()
+        wa_membre = item.get("whatsapp")  # None si non fourni dans la liste
+        membre_id = None
 
-        if nick_key not in nickname_cache:
-            membre = fetchone(conn, """
-                SELECT m.id FROM membres m
-                JOIN adhesions a ON a.membre_id = m.id
-                WHERE a.tontine_id=%s AND a.statut='Actif'
-                  AND UPPER(m.nom_complet) LIKE UPPER(%s)
-                LIMIT 1
-            """, (tontine_id, f"%{item['nickname']}%"))
-            nickname_cache[nick_key] = membre["id"] if membre else None
+        # ── Pré-enregistrement par numéro (priorité sur le match par nom) ──
+        if wa_membre:
+            if wa_membre not in wa_cache:
+                existing = fetchone(conn,
+                    "SELECT id FROM membres WHERE whatsapp=%s", (wa_membre,))
+                if existing:
+                    wa_cache[wa_membre] = existing["id"]
+                else:
+                    kyc_hash_pre = hashlib.sha256(
+                        f"PRE{wa_membre}".encode()).hexdigest()
+                    q(conn, """
+                        INSERT INTO membres
+                            (nom_complet, kyc_nom, kyc_hash, whatsapp,
+                             adhesion_payee, statut_global)
+                        VALUES (%s,%s,%s,%s,1,'Actif')
+                        ON CONFLICT (whatsapp) DO UPDATE SET
+                            nom_complet = CASE
+                                WHEN membres.nom_complet LIKE 'Membre\\_%%'
+                                THEN EXCLUDED.nom_complet
+                                ELSE membres.nom_complet END,
+                            kyc_nom = CASE
+                                WHEN membres.kyc_nom IS NULL
+                                THEN EXCLUDED.kyc_nom
+                                ELSE membres.kyc_nom END
+                    """, (item["nickname"], item["nickname"],
+                          kyc_hash_pre, wa_membre))
+                    row = fetchone(conn,
+                        "SELECT id FROM membres WHERE whatsapp=%s", (wa_membre,))
+                    wa_cache[wa_membre] = row["id"] if row else None
+            membre_id = wa_cache.get(wa_membre)
 
-        membre_id = nickname_cache[nick_key]
+            if membre_id:
+                q(conn, """
+                    INSERT INTO adhesions (membre_id, tontine_id, nombre_places)
+                    VALUES (%s,%s,1)
+                    ON CONFLICT (membre_id, tontine_id)
+                    DO UPDATE SET statut='Actif'
+                """, (membre_id, tontine_id))
+                nickname_cache[nick_key] = membre_id
+
+        # ── Fallback : match par nickname ────────────────────────────────────
+        if membre_id is None:
+            if nick_key not in nickname_cache:
+                membre = fetchone(conn, """
+                    SELECT m.id FROM membres m
+                    JOIN adhesions a ON a.membre_id = m.id
+                    WHERE a.tontine_id=%s AND a.statut='Actif'
+                      AND UPPER(m.nom_complet) LIKE UPPER(%s)
+                    LIMIT 1
+                """, (tontine_id, f"%{item['nickname']}%"))
+                nickname_cache[nick_key] = membre["id"] if membre else None
+            membre_id = nickname_cache[nick_key]
+
         if not membre_id:
             nb_non_lies += 1
 
@@ -3412,8 +3460,18 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
                 """, (f"Membre_{wa[-4:]}", kyc_hash_new, wa))
                 inserted = cur_new.rowcount > 0
                 conn_new.commit()
+                membre_row = fetchone(conn_new,
+                    "SELECT nom_complet FROM membres WHERE whatsapp=%s", (wa,))
             finally:
                 release_conn(conn_new)
+            nom_existant = membre_row["nom_complet"] if membre_row else None
+            if nom_existant and not nom_existant.startswith("Membre_"):
+                wa_prive(wa,
+                    f"👋 Bienvenue *{nom_existant}* !\n\n"
+                    f"Votre compte a été configuré par votre admin.\n"
+                    f"Tapez *menu* pour voir vos options.\n\n"
+                    f"_TontineBot Pro — BADF Ltd_")
+                return ""
             if inserted:
                 _demarrer_collecte_nom(wa)
             return ""
