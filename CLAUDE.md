@@ -97,7 +97,7 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 5. **X-Hub-Signature-256 HMAC** — chaque webhook Meta est signé. Signature invalide → rejeté avant même de lire le message.
 6. **MontantAberrantError** — écart > 50% → refus catégorique. 15–50% → commande FORCE obligatoire. 5–15% → warning. Anti-faute de frappe et anti-arnaque.
 7. **Ingénierie sociale ANIF/COBAC** — MSG_DISSUASION avec référence dossier SHA-256 unique. Dissuasion comportementale avant même la tentative de fraude.
-8. **KYC + blacklist + auto-ban** — 3 tentatives de fraude → bannissement automatique réseau BADF + `blackliste=1` en DB.
+8. **Blacklist + auto-ban** — 3 tentatives de fraude → bannissement automatique réseau BADF + `blackliste=1` en DB.
 
 ---
 
@@ -139,7 +139,7 @@ Score 0–100 de risque de fugue post-bouffage. Identification 7 jours avant l'�
 | 2. Tendance récente | 20 | Ratio cotisations 0–30j vs 30–60j |
 | 3. Score confiance inversé | 15 | score_confiance 0–100 → risque |
 | 4. Dettes en cours | 15 | Ratio dette IRA / capacité mensuelle |
-| 5. Profondeur d'engagement | 10 | Ancienneté + nb tontines + KYC |
+| 5. Profondeur d'engagement | 10 | Ancienneté + nb tontines actives |
 | 6. Vélocité paiement | 10 | Délai moyen après heure_ouverture |
 | 7. Signaux faibles | 5 | Suspensions passées + tentatives fraude |
 | 8. Comportement post-bouffage | 20 | A-t-il continué à cotiser après son dernier bouffage ? |

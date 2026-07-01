@@ -2664,37 +2664,6 @@ def _verifier_fin_cycle(conn, tontine_id: int):
         f"En attente de décision admin."
     )
 
-    # Membres sans KYC → rappel au groupe + DM individuel
-    membres_sans_kyc = fetchall(conn, """
-        SELECT m.whatsapp, m.nom_complet
-        FROM membres m
-        JOIN adhesions a ON a.membre_id = m.id
-        WHERE a.tontine_id=%s AND a.statut='Actif' AND m.kyc_complet=0
-    """, (tontine_id,))
-
-    if membres_sans_kyc:
-        noms_kyc = "\n".join(f"  • {m['nom_complet']}" for m in membres_sans_kyc)
-        if tontine.get("whatsapp_groupe"):
-            wa_groupe(tontine["whatsapp_groupe"],
-                f"📋 *VÉRIFICATION D'IDENTITÉ REQUISE — {tontine['nom']}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Pour participer au prochain cycle, ces membres doivent "
-                f"compléter leur KYC :\n\n"
-                f"{noms_kyc}\n\n"
-                f"📲 Tapez *menu* en DM à TontineBot Pro.\n"
-                f"Le processus prend moins de 2 minutes.\n\n"
-                f"_TontineBot Pro — BADF Ltd_"
-            )
-        for m in membres_sans_kyc:
-            wa_prive(m["whatsapp"],
-                f"📋 *KYC REQUIS — {tontine['nom']}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Le cycle vient de se terminer. Pour continuer au prochain cycle, "
-                f"vous devez compléter votre vérification d'identité.\n\n"
-                f"📲 Tapez *menu* pour démarrer votre KYC (moins de 2 minutes).\n\n"
-                f"_TontineBot Pro — BADF Ltd_"
-            )
-
     # Score confiance × nombre d'or pour membres ayant honoré tout le cycle
     conn2 = get_conn()
     try:
@@ -3309,31 +3278,14 @@ def _calculer_age(date_str: str) -> int:
         return -1
 
 
-def demarrer_kyc(wa: str):
-    """
-    Lance le processus KYC pour un nouveau membre.
-    Le flux s'adapte selon l'âge :
-      Adulte (≥18 ans) : Nom → Naissance → CNI → Ville  (4 étapes)
-      Mineur  (<18 ans) : Nom → Naissance → Ville        (3 étapes)
-    La détection adulte/mineur se fait à l'étape 2 (date de naissance).
-    """
+def _demarrer_collecte_nom(wa: str):
+    """Collecte uniquement le prenom/surnom. Non bloquant — membre deja Actif."""
     with _sessions_lock:
-        _sessions_kyc[wa] = {"etape": 0, "data": {}, "mineur": None, "ts": time_module.time()}
+        _sessions_kyc[wa] = {"etape": 0, "data": {}, "ts": time_module.time()}
     wa_prive(wa,
-        "📋 *VÉRIFICATION D'IDENTITÉ — BADF Ltd*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Avant d'activer votre compte Barack Corp, nous devons confirmer "
-        "votre identité conformément aux exigences *CEMAC/ANIF*.\n\n"
-        "🔒 *Sécurité garantie :*\n"
-        "• Chiffrement SHA-256 irréversible\n"
-        "• Données jamais partagées avec des tiers\n"
-        "• Archivage légal 7 ans\n\n"
-        "Ce processus prend *moins de 3 minutes*.\n"
-        "Vous pouvez taper *STOP* à tout moment pour interrompre.\n\n"
-        "─────────────────────────────────────────\n"
-        "✏️ *ÉTAPE 1 — Votre nom complet*\n\n"
-        "Entrez votre *prénom et nom* exactement comme ils apparaissent "
-        "sur votre pièce d'identité :"
+        "👋 Bienvenue sur *TontineBot Pro* — BADF Ltd\n\n"
+        "Une seule question pour personnaliser votre espace :\n\n"
+        "Quel est votre *prénom ou surnom* ?"
     )
 
 
@@ -3359,213 +3311,40 @@ def traiter_kyc(wa: str, texte: str, est_media: bool = False) -> bool:
             "Tapez *menu* quand vous serez prêt à reprendre.")
         return True
 
-    # ══ ÉTAPE 0 : NOM COMPLET ════════════════════════════════════════════
+    # ══ ÉTAPE 0 : PRÉNOM / SURNOM (seule étape) ═════════════════════════
     if etape == 0:
         nom = texte.strip()
-        if len(nom) < 3 or not re.match(r"^[A-Za-zÀ-ÿ\s\-'\.]+$", nom):
+        nom = re.sub(r"[^A-Za-zÀ-ÿ\s\-'\.]", "", nom).strip()
+        if len(nom) < 2:
             wa_prive(wa,
-                "❌ Nom invalide.\n"
-                "Entrez votre *prénom et nom* avec lettres uniquement.\n"
-                "Exemple : *Jean-Pierre MBARGA*")
+                "❌ Prénom invalide.\n"
+                "Entrez votre *prénom ou surnom* (lettres uniquement).\n"
+                "Exemple : *Nicole* ou *Jean-Pierre*")
             return True
-        sess["data"]["kyc_nom"] = nom.upper()
-        sess["etape"] = 1
-        wa_prive(wa,
-            f"✅ Nom enregistré : *{nom.upper()}*\n\n"
-            "─────────────────────────────────────────\n"
-            "✏️ *ÉTAPE 2 — Date de naissance*\n\n"
-            "Entrez votre date de naissance au format *JJ/MM/AAAA*\n\n"
-            "Exemples :\n"
-            "• *15/03/1990* _(adulte)_\n"
-            "• *22/07/2010* _(mineur)_\n\n"
-            "ℹ️ _Cette date détermine le type de pièce d'identité requis._"
-        )
-
-    # ══ ÉTAPE 1 : DATE DE NAISSANCE → DÉTECTION ADULTE/MINEUR ═══════════
-    elif etape == 1:
-        date_str = texte.strip()
-        if not re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", date_str):
-            wa_prive(wa,
-                "❌ Format incorrect.\n"
-                "Entrez la date au format *JJ/MM/AAAA*\n"
-                "Exemple : *15/03/1990*")
-            return True
-        age = _calculer_age(date_str)
-        if age < 0 or age > 120:
-            wa_prive(wa,
-                "❌ Date de naissance invalide.\n"
-                "Vérifiez le format : *JJ/MM/AAAA*")
-            return True
-
-        sess["data"]["kyc_naissance"] = date_str
-        sess["data"]["kyc_age"]       = age
-        mineur = age < 18
-        sess["mineur"] = mineur
-
-        if not mineur:
-            # ── ADULTE → demander CNI ─────────────────────────────────────
-            sess["etape"] = 2
-            wa_prive(wa,
-                f"✅ Date : *{date_str}* ({age} ans)\n\n"
-                "─────────────────────────────────────────\n"
-                "✏️ *ÉTAPE 3 — Numéro de CNI*\n\n"
-                "Entrez le *numéro de votre Carte Nationale d'Identité* "
-                "exactement comme il y est inscrit.\n\n"
-                "⚠️ _Votre CNI est liée à votre numéro Mobile Money "
-                "auprès de MTN/Orange. Toute incohérence est détectée "
-                "automatiquement._"
-            )
-        else:
-            # ── MINEUR → pas de CNI, sauter vers ville ───────────────────
-            sess["etape"] = 10  # étape 10 = ville (mineur)
-            wa_prive(wa,
-                f"✅ Date : *{date_str}* ({age} ans)\n\n"
-                "📌 *Membre mineur détecté.*\n"
-                "Pour les membres de moins de 18 ans, "
-                "l'acte de naissance remplace la CNI.\n\n"
-                "─────────────────────────────────────────\n"
-                "✏️ *ÉTAPE 3 — Ville de résidence*\n\n"
-                "Entrez votre *ville de résidence actuelle* :"
-            )
-
-    # ══ ÉTAPE 2 (adulte) : CNI ═══════════════════════════════════════════
-    elif etape == 2:
-        cni = re.sub(r"[\s\-\.]", "", texte.upper())
-        if len(cni) < 5:
-            wa_prive(wa,
-                "❌ Numéro CNI trop court.\n"
-                "Entrez le numéro *complet* de votre CNI.")
-            return True
-        # Vérifier doublon CNI
-        conn    = get_conn()
-        doublon = fetchone(conn,
-            "SELECT id, whatsapp FROM membres WHERE kyc_cni=%s", (cni,))
-        release_conn(conn)
-        if doublon:
-            incrementer_tentatives_fraude(
-                doublon["id"],
-                f"Tentative doublon CNI {cni} depuis {wa}"
-            )
-            log_audit("DOUBLON_CNI", f"CNI {cni} déjà enregistrée", wa)
-            wa_prive(wa,
-                "🚨 *CNI DÉJÀ ENREGISTRÉE*\n\n"
-                "Cette carte d'identité est déjà associée à un compte "
-                "Barack Corp actif.\n\n"
-                "Si vous pensez qu'il s'agit d'une erreur, contactez "
-                "un admin immédiatement.\n\n"
-                "⚠️ _Toute tentative d'usurpation d'identité est "
-                "journalisée et transmissible à la justice._"
-            )
-            _sessions_kyc.pop(wa, None)
-            return True
-        sess["data"]["kyc_cni"] = cni
-        sess["etape"] = 3
-        wa_prive(wa,
-            f"✅ CNI enregistrée.\n\n"
-            "─────────────────────────────────────────\n"
-            "✏️ *ÉTAPE 4 — Ville de résidence*\n\n"
-            "Entrez votre *ville de résidence actuelle* :"
-        )
-
-    # ══ ÉTAPE 3 (adulte) : VILLE — dernière étape ════════════════════════
-    elif etape == 3:
-        ville = texte.strip().title()
-        if len(ville) < 2:
-            wa_prive(wa, "❌ Ville invalide. Entrez le nom de votre ville.")
-            return True
-        sess["data"]["kyc_ville"] = ville
-        _finaliser_kyc(wa, sess["data"], mineur=False)
-
-
-    # ══ ÉTAPE 10 (mineur) : VILLE ════════════════════════════════════════
-    elif etape == 10:
-        ville = texte.strip().title()
-        if len(ville) < 2:
-            wa_prive(wa, "❌ Ville invalide. Entrez le nom de votre ville.")
-            return True
-        sess["data"]["kyc_ville"] = ville
-        _finaliser_kyc(wa, sess["data"], mineur=True)
-
+        sess["data"]["kyc_nom"] = nom
+        _finaliser_nom(wa, nom)
 
     return True
 
 
-def _finaliser_kyc(wa: str, data: dict, mineur: bool = False):
-    """
-    Finalise le KYC et inscrit le membre en base.
-    Adapté adulte (CNI) ou mineur (acte de naissance).
-    """
-    nom       = data["kyc_nom"]
-    naissance = data["kyc_naissance"]
-    ville     = data["kyc_ville"]
-    age       = data.get("kyc_age", 0)
-    cni       = data.get("kyc_cni", "")  # vide pour les mineurs
-
-    # Hash différent selon adulte/mineur pour l'unicité
-    if mineur:
-        kyc_hash = hashlib.sha256(
-            f"MINEUR:{nom}{wa}{naissance}{ville}".encode()
-        ).hexdigest()
-    else:
-        kyc_hash = hashlib.sha256(
-            f"ADULTE:{nom}{wa}{cni}{naissance}".encode()
-        ).hexdigest()
-
-    conn   = get_conn()
-    membre = fetchone(conn, "SELECT * FROM membres WHERE whatsapp=%s", (wa,))
-
-    if membre:
-        q(conn, """UPDATE membres SET
-                   nom_complet=%s, kyc_hash=%s, kyc_complet=1, kyc_etape=5,
-                   kyc_nom=%s, kyc_cni=%s, kyc_naissance=%s, kyc_ville=%s,
-                   kyc_photo_recu=1, kyc_mineur=%s, statut_global='Actif'
-                   WHERE whatsapp=%s""",
-          (nom, kyc_hash, nom, cni or None, naissance, ville,
-           1 if mineur else 0, wa))
-    else:
-        q(conn, """INSERT INTO membres
-                   (nom_complet, kyc_hash, whatsapp, kyc_complet, kyc_etape,
-                    kyc_nom, kyc_cni, kyc_naissance, kyc_ville,
-                    kyc_photo_recu, kyc_mineur, adhesion_payee)
-                   VALUES (%s,%s,%s,1,5,%s,%s,%s,%s,1,%s,1)""",
-          (nom, kyc_hash, wa, nom, cni or None, naissance, ville,
-           1 if mineur else 0))
-    conn.commit()
-    release_conn(conn)
-
-    _sessions_kyc.pop(wa, None)
-
-    type_doc = "Acte de naissance" if mineur else "CNI"
-    ref_doc  = f"Acte — {naissance}" if mineur else f"CNI : {cni}"
-    statut_m = "👶 Mineur" if mineur else "👤 Adulte"
-
-    log_audit("KYC_COMPLET",
-              f"{nom} | {statut_m} | {ref_doc} | {ville}", wa)
-
-    wa_prive(wa,
-        f"🎉 *IDENTITÉ VÉRIFIÉE — BADF Ltd*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ *Dossier KYC enregistré avec succès !*\n\n"
-        f"👤 Nom : *{nom}*\n"
-        f"🎂 Naissance : *{naissance}* ({age} ans)\n"
-        f"📄 Document : *{type_doc}*\n"
-        f"🏙️ Ville : *{ville}*\n"
-        f"🔐 Hash SHA-256 : `{kyc_hash[:20]}...`\n\n"
-        f"─────────────────────────────────────────\n"
-        f"🔒 *Vos données sont archivées de façon irréversible.*\n"
-        f"Ce dossier fait foi en cas de litige et peut être "
-        f"communiqué aux autorités compétentes.\n\n"
-        f"📲 Tapez *menu* pour accéder à vos tontines."
-    )
-
-    # Alerte admin avec type membre
-    wa_admin(
-        f"✅ *NOUVEAU MEMBRE KYC — {statut_m}*\n"
-        f"👤 {nom} | {wa}\n"
-        f"🎂 {naissance} ({age} ans)\n"
-        f"📄 {ref_doc}\n"
-        f"🏙️ {ville}\n"
-        f"🔐 {kyc_hash[:20]}..."
+def _finaliser_nom(wa: str, nom: str):
+    """Enregistre le nom et active le membre. Fin du flux d'accueil sans KYC."""
+    wa_norm = normaliser_numero(wa)
+    conn = get_conn()
+    try:
+        q(conn, """UPDATE membres
+                   SET nom_complet=%s, kyc_nom=%s, statut_global='Actif'
+                   WHERE whatsapp=%s""", (nom, nom, wa_norm))
+        conn.commit()
+    finally:
+        release_conn(conn)
+    with _sessions_lock:
+        _sessions_kyc.pop(wa_norm, None)
+    log_audit("NOM_COLLECTE", f"{nom} | onboarding sans KYC", wa_norm)
+    wa_prive(wa_norm,
+        f"✅ Bonjour *{nom}* !\n\n"
+        f"{MSG_BIENVENUE_DM}\n\n"
+        "Tapez *menu* pour voir vos options."
     )
 
 
@@ -3621,7 +3400,7 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
                 cur_new = q(conn_new, """
                     INSERT INTO membres
                         (nom_complet, kyc_hash, whatsapp, adhesion_payee, statut_global, kyc_etape)
-                    VALUES (%s,%s,%s,1,'En_attente_kyc',0)
+                    VALUES (%s,%s,%s,1,'Actif',0)
                     ON CONFLICT (whatsapp) DO NOTHING
                 """, (f"Membre_{wa[-4:]}", kyc_hash_new, wa))
                 inserted = cur_new.rowcount > 0
@@ -3629,10 +3408,16 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
             finally:
                 release_conn(conn_new)
             if inserted:
-                demarrer_kyc(wa)
+                _demarrer_collecte_nom(wa)
             return ""
         if membre["statut_global"] == "En_attente_kyc":
-            demarrer_kyc(wa)
+            conn_mig = get_conn()
+            try:
+                q(conn_mig, "UPDATE membres SET statut_global='Actif' WHERE whatsapp=%s", (wa,))
+                conn_mig.commit()
+            finally:
+                release_conn(conn_mig)
+            _demarrer_collecte_nom(wa)
             return ""
         if membre["statut_global"] == "Banni":
             return msg_dissuasion(wa)
@@ -4734,7 +4519,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         lines = [
             f"🔍 *HISTORIQUE — {m['nom_complet']}*",
             f"📱 {num} | Score: {m['score_confiance']}/100",
-            f"Statut: {m['statut_global']} | KYC: {'✅' if m['kyc_complet'] else '❌'}",
+            f"Statut: {m['statut_global']}",
             f"Bouffages: {m['nb_bouffages']} | Caution bloquée: {caution:,} FCFA\n",
             "*Tontines :*"
         ]
@@ -8575,7 +8360,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
     try:
         membre = fetchone(conn, """
             SELECT id, nom_complet, score_confiance, statut_global,
-                   tentatives_fraude, kyc_complet, date_inscription
+                   tentatives_fraude, date_inscription
             FROM membres WHERE id=%s
         """, (membre_id,))
         tontine = fetchone(conn,
@@ -8685,14 +8470,13 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             signaux.append(f"Dettes IRA importantes : {dette_montant:,} FCFA")
 
         # ── Feature 5 : Profondeur d'engagement (poids 10, inversé) ─────────
-        # Plus un membre est engagé (ancien, KYC, multi-tontines), plus le risque baisse.
+        # Plus un membre est engagé (ancien, multi-tontines), plus le risque baisse.
         nb_tontines = fetchone(conn, """
             SELECT COUNT(DISTINCT tontine_id) AS n FROM adhesions
             WHERE membre_id=%s AND statut IN ('Actif','Pause')
         """, (membre_id,))["n"]
 
         anciennete_jours = (datetime.now() - membre["date_inscription"]).days if membre["date_inscription"] else 0
-        kyc = membre["kyc_complet"] or 0
 
         engagement_score = 0
         if nb_tontines == 1 and anciennete_jours < 30:
@@ -8701,9 +8485,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             signaux.append(f"Membre récent (un seul groupe, {anciennete_jours} jours)")
         elif nb_tontines == 1:
             engagement_score = 5
-        elif kyc == 0:
-            engagement_score = 7
-            signaux.append("KYC non complété")
+        # nb_tontines >= 2 → membre engagé sur plusieurs tontines → 0 risque
         features["faible_engagement"] = engagement_score
         score += engagement_score
 
