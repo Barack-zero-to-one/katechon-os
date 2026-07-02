@@ -10191,6 +10191,20 @@ def dashboard_data():
             ira_total = cur.fetchone()[0]
 
             cur.execute("""
+                SELECT COALESCE(SUM(montant_brut), 0)
+                FROM transactions
+                WHERE date_heure::date = CURRENT_DATE AND statut = 'Confirmee'
+            """)
+            gmv_jour = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COALESCE(SUM(montant_brut), 0)
+                FROM transactions
+                WHERE statut = 'Confirmee'
+            """)
+            gmv_total = cur.fetchone()[0]
+
+            cur.execute("""
                 SELECT type_event, details, date_heure
                 FROM audit_log
                 ORDER BY date_heure DESC
@@ -10212,6 +10226,8 @@ def dashboard_data():
                 "cotis_attente": cotis_attente,
                 "bouffages":    bouffages,
                 "ira_total":    ira_total,
+                "gmv_jour":     gmv_jour,
+                "gmv_total":    gmv_total,
                 "activite":     activite,
             })
         finally:
@@ -10300,7 +10316,9 @@ td{padding:4px 6px 4px 0;border-bottom:1px solid #0d0d0d}
 <div id="refresh-bar">Auto-refresh 10s &nbsp;|&nbsp; <span id="s-last">&#8212;</span></div>
 
 <script>
-function fcfa(n){return Number(n).toLocaleString('fr-FR')+' FCFA';}
+var USD=550;
+function usd(n){return'($'+Math.round(Number(n)/USD).toLocaleString('en-US')+')';}  
+function money(n){return Number(n).toLocaleString('fr-FR')+' FCFA '+'<span class="gray" style="font-size:11px">'+usd(n)+'</span>';}
 function render(d){
   document.getElementById('s-uptime').textContent=d.uptime;
   document.getElementById('s-ts').textContent=d.ts;
@@ -10314,20 +10332,22 @@ function render(d){
     var h='<table><tr><th>Nom</th><th>Membres</th><th>Mise</th><th>Cycle</th><th>⏰</th></tr>';
     tt.forEach(function(t){
       h+='<tr><td class="white">'+t.nom+'</td><td class="green">'+t.nb_membres+'</td>'
-        +'<td class="amber">'+Number(t.montant_place).toLocaleString('fr-FR')+'</td>'
+        +'<td class="amber">'+Number(t.montant_place).toLocaleString('fr-FR')+' FCFA <span class="gray" style="font-size:10px">'+usd(t.montant_place)+'</span></td>'
         +'<td class="gray">#'+t.cycle_actuel+'</td>'
         +'<td class="gray">'+(t.heure_bouffage||'&#8212;')+'</td></tr>';
     });
     document.getElementById('p-tontines').innerHTML=h+'</table>';
   }
 
-  // Revenus
+  // Revenus + GMV
   var r=d.revenus;
   document.getElementById('p-revenus').innerHTML=
-    '<div class="rev-row"><span class="gray">FMP 2% collect&#233;</span><span class="green">'+fcfa(r.fmp)+'</span></div>'
-   +'<div class="rev-row"><span class="gray">Adh&#233;sions</span><span class="green">'+fcfa(r.adhesions)+'</span></div>'
-   +'<div class="rev-row"><span class="gray">IRA (retards)</span><span class="amber">'+fcfa(r.ira)+'</span></div>'
-   +'<div class="rev-row"><span class="white">TOTAL JOUR</span><span class="white">'+fcfa(r.total)+'</span></div>';
+    '<div class="rev-row" style="border-bottom:1px solid #1a1a00;padding-bottom:8px;margin-bottom:4px"><span style="color:#ffd700;font-size:11px;letter-spacing:1px">GMV JOUR</span><span style="color:#ffd700;font-weight:700">'+money(d.gmv_jour)+'</span></div>'
+   +'<div class="rev-row" style="margin-bottom:8px"><span style="color:#888;font-size:11px">GMV TOTAL</span><span style="color:#aaa">'+money(d.gmv_total)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">FMP 2% collect&#233;</span><span class="green">'+money(r.fmp)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">Adh&#233;sions</span><span class="green">'+money(r.adhesions)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">IRA (retards)</span><span class="amber">'+money(r.ira)+'</span></div>'
+   +'<div class="rev-row"><span class="white">REVENUS JOUR</span><span class="white">'+money(r.total)+'</span></div>';
 
   // Membres
   var m=d.membres;
