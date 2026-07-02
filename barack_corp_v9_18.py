@@ -150,7 +150,7 @@ BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 GREENAPI_INSTANCE_ID    = os.getenv("GREENAPI_INSTANCE_ID",    "")  # Ex: 1234567890
 GREENAPI_TOKEN          = os.getenv("GREENAPI_TOKEN",          "")  # API token Green API
 GREENAPI_WEBHOOK_SECRET = os.getenv("GREENAPI_WEBHOOK_SECRET", "")  # Token secret webhook (256 bits)
-GREENAPI_BASE           = "https://api.green-api.com"
+GREENAPI_BASE           = os.getenv("GREENAPI_BASE", "https://api.green-api.com")
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────
 GROUPE_ADMIN = "Admin Barack Corp"
@@ -3401,6 +3401,7 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
     if texte_lower in ("menu", "bonjour", "aide", "hello", "hi", "salut", "help", "start"):
         _sessions_membre[wa] = {"etape": "menu", "data": {}, "ts": time_module.time()}
         if not membre:
+            membre_row = None
             conn_new = get_conn()
             try:
                 kyc_hash_new = hashlib.sha256(f"NEW{wa}".encode()).hexdigest()
@@ -3410,10 +3411,12 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
                     VALUES (%s,%s,%s,1,'Actif',0)
                     ON CONFLICT (whatsapp) DO NOTHING
                 """, (f"Membre_{wa[-4:]}", kyc_hash_new, wa))
-                inserted = cur_new.rowcount > 0
                 conn_new.commit()
-                membre_row = fetchone(conn_new,
-                    "SELECT nom_complet FROM membres WHERE whatsapp=%s", (wa,))
+                try:
+                    membre_row = fetchone(conn_new,
+                        "SELECT nom_complet FROM membres WHERE whatsapp=%s", (wa,))
+                except Exception:
+                    pass
             finally:
                 release_conn(conn_new)
             nom_existant = membre_row["nom_complet"] if membre_row else None
@@ -3424,8 +3427,8 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
                     f"Tapez *menu* pour voir vos options.\n\n"
                     f"_TontineBot Pro — BADF Ltd_")
                 return ""
-            if inserted:
-                _demarrer_collecte_nom(wa)
+            # Couvre inserted=True ET inserted=False (conflit sur Membre_XXXX existant)
+            _demarrer_collecte_nom(wa)
             return ""
         if membre["statut_global"] == "En_attente_kyc":
             conn_mig = get_conn()
@@ -6721,34 +6724,42 @@ def webhook_whatsapp_groupe():
 # ÉVÉNEMENTS GROUPE — bot ajouté / membre quitte
 # ══════════════════════════════════════════════════════════════════════════
 
+def _est_nom_valide(name: str) -> bool:
+    """Vérifie qu'un nom d'affichage WhatsApp est un vrai prénom (pas un numéro, pas vide).
+    re.search au lieu de re.match pour tolérer les emojis en préfixe (🔥Nicole → valide)."""
+    if not name or len(name) < 2:
+        return False
+    if name.replace("+", "").isdigit():
+        return False
+    return bool(re.search(r"[A-Za-zÀ-ÿ]", name))
+
+
 def _auto_inscrire_participants(conn, tontine_id: int, participants: list) -> int:
     """Auto-inscrit une liste de participants dans une tontine sans KYC ni frais.
     Accepte list[str] (phones) ou list[tuple[str,str]] (phone, pushname).
     Retourne le nombre de nouveaux membres créés."""
     inscrits = 0
     bot_wa   = normaliser_numero(OWNER_WA)
-    for p in participants:
-        if isinstance(p, tuple):
-            p_norm, pushname = normaliser_numero(p[0]), (p[1] or "").strip()
-        else:
-            p_norm, pushname = normaliser_numero(p), ""
 
+    # Phase 1 — Résolution des pushnames AVANT toute opération DB.
+    # Les appels HTTP getContactInfo (timeout=8s) sont faits ici, conn reste idle.
+    pushnames: dict = {}
+    for p in participants:
+        p_norm   = normaliser_numero(p[0] if isinstance(p, tuple) else p)
+        pushname = (p[1] or "").strip() if isinstance(p, tuple) else ""
         if not p_norm or p_norm == bot_wa:
             continue
-
-        # Pushname vide → appel getContactInfo (best-effort)
         if not pushname:
             pushname = _greenapi_get_pushname(p_norm)
+        pushnames[p_norm] = pushname
 
-        nom_valide = bool(
-            pushname
-            and len(pushname) >= 2
-            and not pushname.replace("+", "").isdigit()
-            and re.match(r"[A-Za-zÀ-ÿ]", pushname)
-        )
+    # Phase 2 — Opérations DB (toutes les mutations groupées après la phase réseau)
+    for p_norm, pushname in pushnames.items():
+        nom_valide  = _est_nom_valide(pushname)
         nom_complet = pushname if nom_valide else f"Membre_{p_norm[-4:]}"
 
-        membre = fetchone(conn, "SELECT id FROM membres WHERE whatsapp=%s", (p_norm,))
+        membre = fetchone(conn,
+            "SELECT id, statut_global FROM membres WHERE whatsapp=%s", (p_norm,))
         if not membre:
             kyc_hash = hashlib.sha256(f"AUTO:{p_norm}{tontine_id}".encode()).hexdigest()
             cur = q(conn, """INSERT INTO membres
@@ -6764,9 +6775,10 @@ def _auto_inscrire_participants(conn, tontine_id: int, participants: list) -> in
                 q(conn, """UPDATE membres SET nom_complet=%s, kyc_nom=%s
                            WHERE id=%s AND nom_complet LIKE 'Membre\\_%%'""",
                   (nom_complet, nom_complet, membre_id))
-            q(conn,
-              "UPDATE membres SET adhesion_payee=1, statut_global='Actif' WHERE id=%s",
-              (membre_id,))
+            if membre["statut_global"] not in ("Banni", "Suspendu_global"):
+                q(conn,
+                  "UPDATE membres SET adhesion_payee=1, statut_global='Actif' WHERE id=%s",
+                  (membre_id,))
         deja = fetchone(conn,
             "SELECT id FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
             (membre_id, tontine_id))
@@ -7780,22 +7792,21 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
 
     # ── Capture passive du pushname ──────────────────────────────────────────
     sender_name = (payload.get("senderData") or {}).get("senderName", "").strip()
-    if (sender_name
-            and len(sender_name) >= 2
-            and not sender_name.replace("+", "").isdigit()
-            and re.match(r"[A-Za-zÀ-ÿ]", sender_name)):
-        try:
-            conn_pn = get_conn()
+    if _est_nom_valide(sender_name):
+        m_pn = get_membre_by_wa(wa)
+        if m_pn and (m_pn.get("nom_complet") or "").startswith("Membre_"):
             try:
-                q(conn_pn,
-                  "UPDATE membres SET nom_complet=%s, kyc_nom=%s "
-                  "WHERE whatsapp=%s AND nom_complet LIKE 'Membre\\_%%'",
-                  (sender_name, sender_name, wa))
-                conn_pn.commit()
-            finally:
-                release_conn(conn_pn)
-        except Exception:
-            pass
+                conn_pn = get_conn()
+                try:
+                    q(conn_pn,
+                      "UPDATE membres SET nom_complet=%s, kyc_nom=%s "
+                      "WHERE whatsapp=%s AND nom_complet LIKE 'Membre\\_%%'",
+                      (sender_name, sender_name, wa))
+                    conn_pn.commit()
+                finally:
+                    release_conn(conn_pn)
+            except Exception:
+                pass
 
     message_data = payload.get("messageData") or {}
     type_message = message_data.get("typeMessage", "")
