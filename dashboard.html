@@ -16,10 +16,6 @@ body{background:#060606;color:#00ff88;font-family:'JetBrains Mono','Courier New'
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{color:#555;font-weight:400;text-align:left;padding:3px 6px 3px 0;font-size:11px}
 td{padding:4px 6px 4px 0;border-bottom:1px solid #0d0d0d}
-.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.stat-box{border:1px solid #111;padding:10px;text-align:center}
-.stat-val{font-size:28px;font-weight:700;line-height:1}
-.stat-lbl{font-size:10px;color:#555;margin-top:4px;letter-spacing:1px}
 .green{color:#00ff88}.amber{color:#ffa500}.red{color:#ff4444}.gray{color:#555}.white{color:#eee}
 .rev-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #0d0d0d}
 .rev-row:last-child{border-bottom:none;border-top:1px solid #1a1a1a;margin-top:4px;padding-top:8px;font-weight:700}
@@ -113,20 +109,20 @@ function render(d){
 
   // Projection revenus BADF
   var pj=d.projection,h2='';
-  if(!pj.par_tontine||pj.par_tontine.length===0){
+  if(!pj||!pj.par_tontine||pj.par_tontine.length===0){
     h2='<span class="gray">Aucune tontine active</span>';
   }else{
     pj.par_tontine.forEach(function(p){
       h2+='<div class="rev-row">'
          +'<span class="gray">'+esc(p.nom)
-         +'<span style="font-size:10px;margin-left:6px;color:#333">'+p.nb_membres+'/'+p.capacite_max+'</span></span>'
+         +'<span style="font-size:10px;margin-left:6px;color:#333">'+p.nb_places+'/'+p.capacite_max+'</span></span>'
          +'<span class="green" style="font-size:11px">'+money(p.fmp_jour)+'/j</span>'
          +'</div>';
     });
     h2+='<div style="border-top:1px solid #1a1a1a;padding-top:2px;margin-top:2px"></div>'
-       +'<div class="rev-row"><span class="gray">FMP collect&#233; total</span><span class="green">'+money(pj.fmp_reel)+'</span></div>'
+       +'<div class="rev-row"><span class="gray">FMP collect&#233; total</span><span class="green">'+money(d.fmp_total)+'</span></div>'
        +'<div class="rev-row"><span class="gray">FMP/jour actuel</span><span class="green">'+money(pj.fmp_jour)+'</span></div>'
-       +(pj.ira_du>0?'<div class="rev-row"><span class="amber">IRA d&#251; r&#233;seau</span><span class="amber">'+money(pj.ira_du)+'</span></div>':'')
+       +(d.ira_total>0?'<div class="rev-row"><span class="amber">IRA d&#251; r&#233;seau</span><span class="amber">'+money(d.ira_total)+'</span></div>':'')
        +'<div class="rev-row"><span class="white">Projection 30 jours</span><span class="white">'+money(pj.fmp_30j)+'</span></div>';
   }
   document.getElementById('p-membres').innerHTML=h2;

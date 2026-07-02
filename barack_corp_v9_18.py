@@ -10156,49 +10156,55 @@ def dashboard_data():
             cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
 
             cur.execute("""
-                SELECT t.nom, t.montant_place,
-                       t.cycle_actuel, t.heure_bouffage,
-                       COUNT(a.id) FILTER (WHERE a.statut='Actif') AS nb_membres
+                SELECT t.nom, t.montant_place, t.capacite_max,
+                       t.cycle_actuel, t.heure_bouffage, t.type_tontine,
+                       COALESCE(a_agg.nb_membres, 0) AS nb_membres,
+                       COALESCE(a_agg.nb_places,  0) AS nb_places,
+                       COALESCE(tx_agg.fmp_reel,  0) AS fmp_reel,
+                       COALESCE(di_agg.ira_du,    0) AS ira_du
                 FROM tontines t
-                LEFT JOIN adhesions a ON a.tontine_id = t.id
+                LEFT JOIN (
+                    SELECT tontine_id,
+                           COUNT(*) AS nb_membres,
+                           SUM(nombre_places) AS nb_places
+                    FROM adhesions WHERE statut = 'Actif'
+                    GROUP BY tontine_id
+                ) a_agg ON a_agg.tontine_id = t.id
+                LEFT JOIN (
+                    SELECT tontine_id,
+                           COALESCE(SUM(frais_fmp), 0) AS fmp_reel
+                    FROM transactions WHERE statut = 'Confirmee'
+                    GROUP BY tontine_id
+                ) tx_agg ON tx_agg.tontine_id = t.id
+                LEFT JOIN (
+                    SELECT tontine_id,
+                           COALESCE(SUM(montant), 0) AS ira_du
+                    FROM dettes_ira WHERE statut = 'Due'
+                    GROUP BY tontine_id
+                ) di_agg ON di_agg.tontine_id = t.id
                 WHERE t.statut = 'Active'
-                GROUP BY t.id
-                ORDER BY t.nom
-            """)
-            cols     = [d[0] for d in cur.description]
-            tontines = [dict(zip(cols, row)) for row in cur.fetchall()]
-
-            cur.execute("""
-                SELECT
-                    t.nom,
-                    t.montant_place,
-                    t.capacite_max,
-                    (SELECT COUNT(*)
-                     FROM adhesions a WHERE a.tontine_id=t.id AND a.statut='Actif') AS nb_membres,
-                    (SELECT COALESCE(SUM(a2.nombre_places),0)
-                     FROM adhesions a2 WHERE a2.tontine_id=t.id AND a2.statut='Actif') AS nb_places,
-                    (SELECT COALESCE(SUM(tx.frais_fmp),0)
-                     FROM transactions tx WHERE tx.tontine_id=t.id AND tx.statut='Confirmee') AS fmp_reel,
-                    (SELECT COALESCE(SUM(di.montant),0)
-                     FROM dettes_ira di WHERE di.tontine_id=t.id AND di.statut='Due') AS ira_du
-                FROM tontines t
-                WHERE t.statut='Active'
                 ORDER BY t.nom
             """)
             _proj_rows = cur.fetchall()
-            _proj_list, _fmp_reel_tot, _fmp_jour_tot, _ira_du_tot = [], 0.0, 0.0, 0.0
+            tontines   = []
+            _proj_list, _fmp_jour_tot, _f30j_tot = [], 0, 0
+            _FREQ_MULT = {'Journaliere': 30, 'Hebdomadaire': 30/7, 'Mensuelle': 1}
             for _r in _proj_rows:
-                _nom, _mp, _cap, _nb_m, _nb_p, _fmp_r, _ira = _r
-                _fj = float(_nb_p) * float(_mp) * 0.02
-                _fmp_reel_tot += float(_fmp_r)
+                _nom, _mp, _cap, _cycle, _heure, _type, _nb_m, _nb_p, _fmp_r, _ira = _r
+                _fj   = int(float(_nb_p) * float(_mp) * 0.02)
+                _mult = _FREQ_MULT.get(_type or 'Journaliere', 30)
+                _f30j = int(_fj * _mult)
                 _fmp_jour_tot += _fj
-                _ira_du_tot   += float(_ira)
+                _f30j_tot     += _f30j
+                tontines.append({"nom": _nom, "montant_place": float(_mp),
+                    "cycle_actuel": int(_cycle or 0),
+                    "heure_bouffage": _heure, "nb_membres": int(_nb_m)})
                 _proj_list.append({"nom": _nom, "nb_membres": int(_nb_m),
-                    "capacite_max": int(_cap), "fmp_jour": _fj,
-                    "fmp_reel": float(_fmp_r), "ira_du": float(_ira)})
-            projection = {"par_tontine": _proj_list, "fmp_reel": _fmp_reel_tot,
-                          "fmp_jour": _fmp_jour_tot, "fmp_30j": _fmp_jour_tot * 30,
-                          "ira_du": _ira_du_tot}
+                    "nb_places": int(_nb_p), "capacite_max": int(_cap),
+                    "fmp_jour": _fj, "fmp_reel": float(_fmp_r),
+                    "ira_du": float(_ira)})
+            projection = {"par_tontine": _proj_list,
+                          "fmp_jour": _fmp_jour_tot, "fmp_30j": _f30j_tot}
 
             cur.execute("""
                 SELECT
@@ -10207,7 +10213,8 @@ def dashboard_data():
                                                        AND date_heure::date = CURRENT_DATE), 0),
                     COALESCE(SUM(frais_ira)    FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
                     COALESCE(SUM(montant_brut) FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(montant_brut), 0)
+                    COALESCE(SUM(montant_brut), 0),
+                    COALESCE(SUM(frais_fmp), 0)
                 FROM transactions
                 WHERE statut = 'Confirmee'
             """)
@@ -10215,6 +10222,7 @@ def dashboard_data():
             revenus   = {"fmp": r[0], "adhesions": r[1], "ira": r[2], "total": r[0]+r[1]+r[2]}
             gmv_jour  = r[3]
             gmv_total = r[4]
+            fmp_total = r[5]
 
             cur.execute("SELECT COUNT(*) FROM cotisations_manuelles WHERE statut='En_attente'")
             cotis_attente = cur.fetchone()[0]
@@ -10258,6 +10266,7 @@ def dashboard_data():
                 "ira_total":    ira_total,
                 "gmv_jour":     gmv_jour,
                 "gmv_total":    gmv_total,
+                "fmp_total":    fmp_total,
                 "activite":     activite,
             })
             resp.headers["Cache-Control"] = "no-store"
@@ -10291,7 +10300,9 @@ def dashboard():
                 status=401
             )
         session["dash_ok"] = True
-    return Response(_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
+    resp = Response(_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # ══════════════════════════════════════════════════════════════════════════
