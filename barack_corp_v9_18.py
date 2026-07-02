@@ -10169,14 +10169,36 @@ def dashboard_data():
             tontines = [dict(zip(cols, row)) for row in cur.fetchall()]
 
             cur.execute("""
-                SELECT COUNT(*) AS total,
-                       COUNT(*) FILTER (WHERE statut_global='Actif')          AS actifs,
-                       COUNT(*) FILTER (WHERE statut_global = 'Suspendu_global') AS suspendus,
-                       COUNT(*) FILTER (WHERE statut_global='Banni')          AS bannis
-                FROM membres
+                SELECT
+                    t.nom,
+                    t.montant_place,
+                    t.capacite_max,
+                    (SELECT COUNT(*)
+                     FROM adhesions a WHERE a.tontine_id=t.id AND a.statut='Actif') AS nb_membres,
+                    (SELECT COALESCE(SUM(a2.nombre_places),0)
+                     FROM adhesions a2 WHERE a2.tontine_id=t.id AND a2.statut='Actif') AS nb_places,
+                    (SELECT COALESCE(SUM(tx.frais_fmp),0)
+                     FROM transactions tx WHERE tx.tontine_id=t.id AND tx.statut='Confirmee') AS fmp_reel,
+                    (SELECT COALESCE(SUM(di.montant),0)
+                     FROM dettes_ira di WHERE di.tontine_id=t.id AND di.statut='Due') AS ira_du
+                FROM tontines t
+                WHERE t.statut='Active'
+                ORDER BY t.nom
             """)
-            r = cur.fetchone()
-            membres = {"total": r[0], "actifs": r[1], "suspendus": r[2], "bannis": r[3]}
+            _proj_rows = cur.fetchall()
+            _proj_list, _fmp_reel_tot, _fmp_jour_tot, _ira_du_tot = [], 0.0, 0.0, 0.0
+            for _r in _proj_rows:
+                _nom, _mp, _cap, _nb_m, _nb_p, _fmp_r, _ira = _r
+                _fj = float(_nb_p) * float(_mp) * 0.02
+                _fmp_reel_tot += float(_fmp_r)
+                _fmp_jour_tot += _fj
+                _ira_du_tot   += float(_ira)
+                _proj_list.append({"nom": _nom, "nb_membres": int(_nb_m),
+                    "capacite_max": int(_cap), "fmp_jour": _fj,
+                    "fmp_reel": float(_fmp_r), "ira_du": float(_ira)})
+            projection = {"par_tontine": _proj_list, "fmp_reel": _fmp_reel_tot,
+                          "fmp_jour": _fmp_jour_tot, "fmp_30j": _fmp_jour_tot * 30,
+                          "ira_du": _ira_du_tot}
 
             cur.execute("""
                 SELECT
@@ -10229,7 +10251,7 @@ def dashboard_data():
                 "uptime":       uptime,
                 "ts":           datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
                 "tontines":     tontines,
-                "membres":      membres,
+                "projection":   projection,
                 "revenus":      revenus,
                 "cotis_attente": cotis_attente,
                 "bouffages":    bouffages,
