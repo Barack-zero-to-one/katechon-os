@@ -10374,7 +10374,7 @@ function render(d){
   // Alertes
   var ca=d.cotis_attente, ira=d.ira_total, alerts='';
   if(ca>0) alerts+='<div class="alert alert-warn">&#9888; '+ca+' cotisation(s) en attente de confirmation admin</div>';
-  if(ira>0) alerts+='<div class="alert alert-warn">&#8987; IRA dû total : '+fcfa(ira)+'</div>';
+  if(ira>0) alerts+='<div class="alert alert-warn">&#8987; IRA dû total : '+money(ira)+'</div>';
   if(alerts==='') alerts='<div class="alert alert-ok">&#10003; Aucune alerte active</div>';
   document.getElementById('p-alertes').innerHTML=alerts;
 
@@ -10386,7 +10386,7 @@ function render(d){
     var h6='';
     bfs.forEach(function(b){
       h6+='<div class="brow"><span class="white">'+b.nom+'</span>'
-         +'<span><span class="gray" style="font-size:10px">'+b.tontine+'</span>&nbsp;&nbsp;<span class="amber">'+Number(b.montant).toLocaleString('fr-FR')+' FCFA</span></span></div>';
+         +'<span><span class="gray" style="font-size:10px">'+b.tontine+'</span>&nbsp;&nbsp;<span class="amber">'+money(b.montant)+'</span></span></div>';
     });
     document.getElementById('p-bouffages').innerHTML=h6;
   }
