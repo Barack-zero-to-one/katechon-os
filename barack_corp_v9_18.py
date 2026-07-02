@@ -92,7 +92,7 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, session
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -769,6 +769,7 @@ def init_pool():
         keepalives_interval=10,
         keepalives_count=5,
         application_name="TontineBotPro_v9.18",
+        options="-c timezone=Africa/Douala",
     )
     log.info(f"✅ Pool PostgreSQL initialisé (10–80 connexions) | {PG_HOST}:{PG_PORT}/{PG_DB}")
 
@@ -6060,7 +6061,19 @@ def _verifier_liberation_caution(conn, membre_id: int, tontine_id: int):
 # ══════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
-_BOT_START = datetime.now()
+app.secret_key  = os.getenv("FLASK_SECRET_KEY", "badf_local_dev_secret_2026")
+_DASH_TOKEN     = os.getenv("DASHBOARD_TOKEN",  "badf_dash_2026")
+_BOT_START_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_start")
+try:
+    with open(_BOT_START_FILE) as _f:
+        _BOT_START = datetime.fromisoformat(_f.read().strip())
+except Exception:
+    _BOT_START = datetime.now()
+    try:
+        with open(_BOT_START_FILE, "w") as _f:
+            _f.write(_BOT_START.isoformat())
+    except Exception:
+        pass
 
 @app.after_request
 def _add_security_headers(response):
@@ -10129,6 +10142,8 @@ def verifier_dettes_badf_impayees():
 @app.route("/dashboard/data", methods=["GET"])
 def dashboard_data():
     """Données temps réel pour le dashboard — JSON."""
+    if not session.get("dash_ok"):
+        return jsonify({"error": "unauthorized"}), 401
     try:
         conn = get_conn()
         try:
@@ -10138,6 +10153,7 @@ def dashboard_data():
             uptime = f"{h}h {m:02d}m {s:02d}s"
 
             cur = conn.cursor()
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
 
             cur.execute("""
                 SELECT t.nom, t.type_tontine, t.montant_place,
@@ -10155,7 +10171,7 @@ def dashboard_data():
             cur.execute("""
                 SELECT COUNT(*) AS total,
                        COUNT(*) FILTER (WHERE statut_global='Actif')          AS actifs,
-                       COUNT(*) FILTER (WHERE statut_global LIKE 'Suspendu%') AS suspendus,
+                       COUNT(*) FILTER (WHERE statut_global = 'Suspendu_global') AS suspendus,
                        COUNT(*) FILTER (WHERE statut_global='Banni')          AS bannis
                 FROM membres
             """)
@@ -10163,14 +10179,20 @@ def dashboard_data():
             membres = {"total": r[0], "actifs": r[1], "suspendus": r[2], "bannis": r[3]}
 
             cur.execute("""
-                SELECT COALESCE(SUM(frais_fmp), 0) AS fmp,
-                       COALESCE(SUM(montant_brut) FILTER (WHERE type_transaction='Adhesion'), 0) AS adhesions,
-                       COALESCE(SUM(frais_ira), 0) AS ira
+                SELECT
+                    COALESCE(SUM(frais_fmp)    FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
+                    COALESCE(SUM(montant_brut) FILTER (WHERE type_transaction = 'Adhesion'
+                                                       AND date_heure::date = CURRENT_DATE), 0),
+                    COALESCE(SUM(frais_ira)    FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
+                    COALESCE(SUM(montant_brut) FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
+                    COALESCE(SUM(montant_brut), 0)
                 FROM transactions
-                WHERE date_heure::date = CURRENT_DATE AND statut = 'Confirmee'
+                WHERE statut = 'Confirmee'
             """)
-            r = cur.fetchone()
-            revenus = {"fmp": r[0], "adhesions": r[1], "ira": r[2], "total": r[0]+r[1]+r[2]}
+            r         = cur.fetchone()
+            revenus   = {"fmp": r[0], "adhesions": r[1], "ira": r[2], "total": r[0]+r[1]+r[2]}
+            gmv_jour  = r[3]
+            gmv_total = r[4]
 
             cur.execute("SELECT COUNT(*) FROM cotisations_manuelles WHERE statut='En_attente'")
             cotis_attente = cur.fetchone()[0]
@@ -10189,20 +10211,6 @@ def dashboard_data():
 
             cur.execute("SELECT COALESCE(SUM(montant), 0) FROM dettes_ira WHERE statut='Due'")
             ira_total = cur.fetchone()[0]
-
-            cur.execute("""
-                SELECT COALESCE(SUM(montant_brut), 0)
-                FROM transactions
-                WHERE date_heure::date = CURRENT_DATE AND statut = 'Confirmee'
-            """)
-            gmv_jour = cur.fetchone()[0]
-
-            cur.execute("""
-                SELECT COALESCE(SUM(montant_brut), 0)
-                FROM transactions
-                WHERE statut = 'Confirmee'
-            """)
-            gmv_total = cur.fetchone()[0]
 
             cur.execute("""
                 SELECT type_event, details, date_heure
@@ -10319,6 +10327,7 @@ td{padding:4px 6px 4px 0;border-bottom:1px solid #0d0d0d}
 var USD=550;
 function usd(n){return'($'+Math.round(Number(n)/USD).toLocaleString('en-US')+')';}  
 function money(n){return Number(n).toLocaleString('fr-FR')+' FCFA '+'<span class="gray" style="font-size:11px">'+usd(n)+'</span>';}
+function esc(s){var e=document.createElement('div');e.textContent=String(s||'');return e.innerHTML;}
 function render(d){
   document.getElementById('s-uptime').textContent=d.uptime;
   document.getElementById('s-ts').textContent=d.ts;
@@ -10331,7 +10340,7 @@ function render(d){
   }else{
     var h='<table><tr><th>Nom</th><th>Membres</th><th>Mise</th><th>Cycle</th><th>⏰</th></tr>';
     tt.forEach(function(t){
-      h+='<tr><td class="white">'+t.nom+'</td><td class="green">'+t.nb_membres+'</td>'
+      h+='<tr><td class="white">'+esc(t.nom)+'</td><td class="green">'+t.nb_membres+'</td>'
         +'<td class="amber">'+Number(t.montant_place).toLocaleString('fr-FR')+' FCFA <span class="gray" style="font-size:10px">'+usd(t.montant_place)+'</span></td>'
         +'<td class="gray">#'+t.cycle_actuel+'</td>'
         +'<td class="gray">'+(t.heure_bouffage||'&#8212;')+'</td></tr>';
@@ -10365,8 +10374,8 @@ function render(d){
     var h4='';
     acts.forEach(function(a){
       h4+='<div class="feed-item"><span class="feed-ts">'+a.ts+'</span>'
-         +'<span class="feed-type">'+a.type+'</span>'
-         +'<span class="feed-detail">'+(a.details||'')+'</span></div>';
+         +'<span class="feed-type">'+esc(a.type)+'</span>'
+         +'<span class="feed-detail">'+esc(a.details)+'</span></div>';
     });
     document.getElementById('p-activite').innerHTML=h4;
   }
@@ -10385,27 +10394,31 @@ function render(d){
   }else{
     var h6='';
     bfs.forEach(function(b){
-      h6+='<div class="brow"><span class="white">'+b.nom+'</span>'
-         +'<span><span class="gray" style="font-size:10px">'+b.tontine+'</span>&nbsp;&nbsp;<span class="amber">'+money(b.montant)+'</span></span></div>';
+      h6+='<div class="brow"><span class="white">'+esc(b.nom)+'</span>'
+         +'<span><span class="gray" style="font-size:10px">'+esc(b.tontine)+'</span>&nbsp;&nbsp;<span class="amber">'+money(b.montant)+'</span></span></div>';
     });
     document.getElementById('p-bouffages').innerHTML=h6;
   }
 }
 
+var _seq=0;
 function load(){
+  var mySeq=++_seq;
   fetch('/dashboard/data')
     .then(function(r){return r.json();})
     .then(function(d){
+      if(mySeq!==_seq)return;
       if(d.error){
         document.getElementById('s-db').textContent='&#9679; ERR';
         document.getElementById('s-db').style.color='#ff4444';
         return;
       }
       document.getElementById('s-db').textContent='&#9679; OK';
-      document.getElementById('s-db').style.color='#060606';
+      document.getElementById('s-db').style.color='';
       render(d);
     })
     .catch(function(){
+      if(mySeq!==_seq)return;
       document.getElementById('s-status').textContent='&#9679; OFFLINE';
       document.getElementById('s-status').style.color='#ff4444';
     });
@@ -10420,8 +10433,20 @@ setInterval(load,10000);
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
     """Dashboard local temps réel — Bloomberg terminal UI."""
-    from flask import Response as _R
-    return _R(_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
+    tok = request.args.get("token", "")
+    if not session.get("dash_ok"):
+        if tok != _DASH_TOKEN:
+            return Response(
+                '<html><body style="background:#060606;color:#ff4444;'
+                'font-family:monospace;padding:40px">'
+                '<h2>&#9679; ACC&#200;S REFUS&#201;</h2>'
+                '<p>Ajoutez <code>?token=DASHBOARD_TOKEN</code> '
+                '\u00e0 l\'URL.</p></body></html>',
+                content_type="text/html; charset=utf-8",
+                status=401
+            )
+        session["dash_ok"] = True
+    return Response(_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
 
 
 # ══════════════════════════════════════════════════════════════════════════
