@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>KATECHON OS — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#060606;color:#00ff88;font-family:'JetBrains Mono','Courier New',monospace;font-size:13px;min-height:100vh}
+#statusbar{background:#00ff88;color:#060606;padding:6px 16px;display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:12px;letter-spacing:1px}
+#statusbar .right{display:flex;gap:20px;align-items:center}
+.tag{background:#060606;color:#00ff88;padding:1px 7px;font-size:11px}
+.grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:#111}
+.panel{background:#060606;padding:14px 16px;min-height:200px}
+.panel-title{color:#ffa500;font-weight:700;font-size:11px;letter-spacing:2px;text-transform:uppercase;border-bottom:1px solid #2a1800;padding-bottom:6px;margin-bottom:10px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{color:#555;font-weight:400;text-align:left;padding:3px 6px 3px 0;font-size:11px}
+td{padding:4px 6px 4px 0;border-bottom:1px solid #0d0d0d}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat-box{border:1px solid #111;padding:10px;text-align:center}
+.stat-val{font-size:28px;font-weight:700;line-height:1}
+.stat-lbl{font-size:10px;color:#555;margin-top:4px;letter-spacing:1px}
+.green{color:#00ff88}.amber{color:#ffa500}.red{color:#ff4444}.gray{color:#555}.white{color:#eee}
+.rev-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #0d0d0d}
+.rev-row:last-child{border-bottom:none;border-top:1px solid #1a1a1a;margin-top:4px;padding-top:8px;font-weight:700}
+.feed-item{padding:3px 0;border-bottom:1px solid #0a0a0a;display:flex;gap:8px;overflow:hidden}
+.feed-ts{color:#333;min-width:62px;font-size:11px;flex-shrink:0}
+.feed-type{color:#ffa500;min-width:140px;font-size:11px;flex-shrink:0}
+.feed-detail{color:#666;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.alert{padding:6px 10px;margin-bottom:5px;border-left:3px solid}
+.alert-warn{border-color:#ffa500;background:#0d0800}
+.alert-crit{border-color:#ff4444;background:#0d0000}
+.alert-ok{border-color:#00ff88;background:#000d07}
+.brow{padding:5px 0;border-bottom:1px solid #0d0d0d;display:flex;justify-content:space-between}
+#refresh-bar{background:#060606;padding:4px 16px;font-size:10px;color:#222;text-align:right;border-top:1px solid #0d0d0d}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.pulse{animation:pulse 2s infinite}
+</style>
+</head>
+<body>
+<div id="statusbar">
+  <span>&#x2B21; KATECHON OS &nbsp;|&nbsp; TontineBot Pro v9.18 &nbsp;|&nbsp; BADF Ltd &mdash; Cameroun</span>
+  <div class="right">
+    <span>BOT <span id="s-status" class="tag pulse">&#9679;&nbsp;ONLINE</span></span>
+    <span>UPTIME <span id="s-uptime" class="tag">&#8212;</span></span>
+    <span>DB <span id="s-db" class="tag">&#9679;&nbsp;OK</span></span>
+    <span id="s-ts" style="color:#060606;font-size:11px">&#8212;</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <div class="panel-title">&#9656; Tontines actives</div>
+    <div id="p-tontines"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Flux financier &mdash; aujourd&#x2019;hui</div>
+    <div id="p-revenus"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Membres r&#233;seau</div>
+    <div class="stats" id="p-membres"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Activit&#233; temps r&#233;el</div>
+    <div id="p-activite"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Alertes</div>
+    <div id="p-alertes"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Bouffages en attente</div>
+    <div id="p-bouffages"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+</div>
+<div id="refresh-bar">Auto-refresh 10s &nbsp;|&nbsp; <span id="s-last">&#8212;</span></div>
+
+<script>
+var USD=550;
+function usd(n){return'($'+Math.round(Number(n)/USD).toLocaleString('en-US')+')';}  
+function money(n){return Number(n).toLocaleString('fr-FR')+' FCFA '+'<span class="gray" style="font-size:11px">'+usd(n)+'</span>';}
+function esc(s){var e=document.createElement('div');e.textContent=String(s||'');return e.innerHTML;}
+function render(d){
+  document.getElementById('s-uptime').textContent=d.uptime;
+  document.getElementById('s-ts').textContent=d.ts;
+  document.getElementById('s-last').textContent='Dernier refresh : '+d.ts;
+
+  // Tontines
+  var tt=d.tontines;
+  if(!tt||tt.length===0){
+    document.getElementById('p-tontines').innerHTML='<span class="gray">Aucune tontine active</span>';
+  }else{
+    var h='<table><tr><th>Nom</th><th>Membres</th><th>Mise</th><th>Cycle</th><th>HEURE</th></tr>';
+    tt.forEach(function(t){
+      h+='<tr><td class="white">'+esc(t.nom)+'</td><td class="green">'+t.nb_membres+'</td>'
+        +'<td class="amber">'+Number(t.montant_place).toLocaleString('fr-FR')+' FCFA <span class="gray" style="font-size:10px">'+usd(t.montant_place)+'</span></td>'
+        +'<td class="gray">#'+t.cycle_actuel+'</td>'
+        +'<td class="gray">'+(t.heure_bouffage?esc(t.heure_bouffage):'&#8212;')+'</td></tr>';
+    });
+    document.getElementById('p-tontines').innerHTML=h+'</table>';
+  }
+
+  // Revenus + GMV
+  var r=d.revenus;
+  document.getElementById('p-revenus').innerHTML=
+    '<div class="rev-row" style="border-bottom:1px solid #1a1a00;padding-bottom:8px;margin-bottom:4px"><span style="color:#ffd700;font-size:11px;letter-spacing:1px">GMV JOUR</span><span style="color:#ffd700;font-weight:700">'+money(d.gmv_jour)+'</span></div>'
+   +'<div class="rev-row" style="margin-bottom:8px"><span style="color:#888;font-size:11px">GMV TOTAL</span><span style="color:#aaa">'+money(d.gmv_total)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">FMP 2% collect&#233;</span><span class="green">'+money(r.fmp)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">Adh&#233;sions</span><span class="green">'+money(r.adhesions)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">IRA (retards)</span><span class="amber">'+money(r.ira)+'</span></div>'
+   +'<div class="rev-row"><span class="white">REVENUS JOUR</span><span class="white">'+money(r.total)+'</span></div>';
+
+  // Membres
+  var m=d.membres;
+  document.getElementById('p-membres').innerHTML=
+    '<div class="stat-box"><div class="stat-val white">'+m.total+'</div><div class="stat-lbl">TOTAL</div></div>'
+   +'<div class="stat-box"><div class="stat-val green">'+m.actifs+'</div><div class="stat-lbl">ACTIFS</div></div>'
+   +'<div class="stat-box"><div class="stat-val amber">'+m.suspendus+'</div><div class="stat-lbl">SUSPENDUS</div></div>'
+   +'<div class="stat-box"><div class="stat-val red">'+m.bannis+'</div><div class="stat-lbl">BANNIS</div></div>';
+
+  // Activité
+  var acts=d.activite;
+  if(!acts||acts.length===0){
+    document.getElementById('p-activite').innerHTML='<span class="gray">Aucune activit&#233; r&#233;cente</span>';
+  }else{
+    var h4='';
+    acts.forEach(function(a){
+      h4+='<div class="feed-item"><span class="feed-ts">'+a.ts+'</span>'
+         +'<span class="feed-type">'+esc(a.type)+'</span>'
+         +'<span class="feed-detail">'+esc(a.details)+'</span></div>';
+    });
+    document.getElementById('p-activite').innerHTML=h4;
+  }
+
+  // Alertes
+  var ca=d.cotis_attente, ira=d.ira_total, alerts='';
+  if(ca>0) alerts+='<div class="alert alert-warn">&#9888; '+ca+' cotisation(s) en attente de confirmation admin</div>';
+  if(ira>0) alerts+='<div class="alert alert-warn">&#8987; IRA dû total : '+money(ira)+'</div>';
+  if(alerts==='') alerts='<div class="alert alert-ok">&#10003; Aucune alerte active</div>';
+  document.getElementById('p-alertes').innerHTML=alerts;
+
+  // Bouffages
+  var bfs=d.bouffages;
+  if(!bfs||bfs.length===0){
+    document.getElementById('p-bouffages').innerHTML='<span class="gray">Aucun bouffage en attente</span>';
+  }else{
+    var h6='';
+    bfs.forEach(function(b){
+      h6+='<div class="brow"><span class="white">'+esc(b.nom)+'</span>'
+         +'<span><span class="gray" style="font-size:10px">'+esc(b.tontine)+'</span>&nbsp;&nbsp;<span class="amber">'+money(b.montant)+'</span></span></div>';
+    });
+    document.getElementById('p-bouffages').innerHTML=h6;
+  }
+}
+
+var _seq=0;
+function load(){
+  var mySeq=++_seq;
+  fetch('/dashboard/data')
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(mySeq!==_seq)return;
+      if(d.error){
+        document.getElementById('s-db').textContent='&#9679; ERR';
+        document.getElementById('s-db').style.color='#ff4444';
+        return;
+      }
+      document.getElementById('s-db').textContent='&#9679; OK';
+      document.getElementById('s-db').style.color='';
+      render(d);
+    })
+    .catch(function(){
+      if(mySeq!==_seq)return;
+      document.getElementById('s-status').textContent='&#9679; OFFLINE';
+      document.getElementById('s-status').style.color='#ff4444';
+    });
+}
+load();
+setInterval(load,10000);
+</script>
+</body>
+</html>
