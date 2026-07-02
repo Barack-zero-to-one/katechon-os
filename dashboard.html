@@ -58,8 +58,8 @@ td{padding:4px 6px 4px 0;border-bottom:1px solid #0d0d0d}
     <div id="p-revenus"><span class="gray">Chargement&#8230;</span></div>
   </div>
   <div class="panel">
-    <div class="panel-title">&#9656; Membres r&#233;seau</div>
-    <div class="stats" id="p-membres"></div>
+    <div class="panel-title">&#9656; Projection revenus BADF</div>
+    <div id="p-membres"></div>
   </div>
   <div class="panel">
     <div class="panel-title">&#9656; Activit&#233; temps r&#233;el</div>
@@ -111,13 +111,25 @@ function render(d){
    +'<div class="rev-row"><span class="gray">IRA (retards)</span><span class="amber">'+money(r.ira)+'</span></div>'
    +'<div class="rev-row"><span class="white">REVENUS JOUR</span><span class="white">'+money(r.total)+'</span></div>';
 
-  // Membres
-  var m=d.membres;
-  document.getElementById('p-membres').innerHTML=
-    '<div class="stat-box"><div class="stat-val white">'+m.total+'</div><div class="stat-lbl">TOTAL</div></div>'
-   +'<div class="stat-box"><div class="stat-val green">'+m.actifs+'</div><div class="stat-lbl">ACTIFS</div></div>'
-   +'<div class="stat-box"><div class="stat-val amber">'+m.suspendus+'</div><div class="stat-lbl">SUSPENDUS</div></div>'
-   +'<div class="stat-box"><div class="stat-val red">'+m.bannis+'</div><div class="stat-lbl">BANNIS</div></div>';
+  // Projection revenus BADF
+  var pj=d.projection,h2='';
+  if(!pj.par_tontine||pj.par_tontine.length===0){
+    h2='<span class="gray">Aucune tontine active</span>';
+  }else{
+    pj.par_tontine.forEach(function(p){
+      h2+='<div class="rev-row">'
+         +'<span class="gray">'+esc(p.nom)
+         +'<span style="font-size:10px;margin-left:6px;color:#333">'+p.nb_membres+'/'+p.capacite_max+'</span></span>'
+         +'<span class="green" style="font-size:11px">'+money(p.fmp_jour)+'/j</span>'
+         +'</div>';
+    });
+    h2+='<div style="border-top:1px solid #1a1a1a;padding-top:2px;margin-top:2px"></div>'
+       +'<div class="rev-row"><span class="gray">FMP collect&#233; total</span><span class="green">'+money(pj.fmp_reel)+'</span></div>'
+       +'<div class="rev-row"><span class="gray">FMP/jour actuel</span><span class="green">'+money(pj.fmp_jour)+'</span></div>'
+       +(pj.ira_du>0?'<div class="rev-row"><span class="amber">IRA d&#251; r&#233;seau</span><span class="amber">'+money(pj.ira_du)+'</span></div>':'')
+       +'<div class="rev-row"><span class="white">Projection 30 jours</span><span class="white">'+money(pj.fmp_30j)+'</span></div>';
+  }
+  document.getElementById('p-membres').innerHTML=h2;
 
   // Activité
   var acts=d.activite;
