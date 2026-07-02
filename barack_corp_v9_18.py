@@ -6060,6 +6060,7 @@ def _verifier_liberation_caution(conn, membre_id: int, tontine_id: int):
 # ══════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
+_BOT_START = datetime.now()
 
 @app.after_request
 def _add_security_headers(response):
@@ -10119,6 +10120,308 @@ def verifier_dettes_badf_impayees():
         wa_owner(f"🚨 Erreur vérification dettes BADF : {str(e)[:100]}")
     finally:
         release_conn(conn)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# DASHBOARD LOCAL — http://localhost:5000/dashboard
+# ══════════════════════════════════════════════════════════════════════════
+
+@app.route("/dashboard/data", methods=["GET"])
+def dashboard_data():
+    """Données temps réel pour le dashboard — JSON."""
+    try:
+        conn = get_conn()
+        try:
+            delta = datetime.now() - _BOT_START
+            h, rem = divmod(int(delta.total_seconds()), 3600)
+            m, s   = divmod(rem, 60)
+            uptime = f"{h}h {m:02d}m {s:02d}s"
+
+            cur = conn.cursor()
+
+            cur.execute("""
+                SELECT t.nom, t.type_tontine, t.montant_place,
+                       t.cycle_actuel, t.heure_bouffage,
+                       COUNT(a.id) FILTER (WHERE a.statut='Actif') AS nb_membres
+                FROM tontines t
+                LEFT JOIN adhesions a ON a.tontine_id = t.id
+                WHERE t.statut = 'Active'
+                GROUP BY t.id
+                ORDER BY t.nom
+            """)
+            cols     = [d[0] for d in cur.description]
+            tontines = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE statut_global='Actif')          AS actifs,
+                       COUNT(*) FILTER (WHERE statut_global LIKE 'Suspendu%') AS suspendus,
+                       COUNT(*) FILTER (WHERE statut_global='Banni')          AS bannis
+                FROM membres
+            """)
+            r = cur.fetchone()
+            membres = {"total": r[0], "actifs": r[1], "suspendus": r[2], "bannis": r[3]}
+
+            cur.execute("""
+                SELECT COALESCE(SUM(frais_fmp), 0) AS fmp,
+                       COALESCE(SUM(montant_brut) FILTER (WHERE type_transaction='Adhesion'), 0) AS adhesions,
+                       COALESCE(SUM(frais_ira), 0) AS ira
+                FROM transactions
+                WHERE date_heure::date = CURRENT_DATE AND statut = 'Confirmee'
+            """)
+            r = cur.fetchone()
+            revenus = {"fmp": r[0], "adhesions": r[1], "ira": r[2], "total": r[0]+r[1]+r[2]}
+
+            cur.execute("SELECT COUNT(*) FROM cotisations_manuelles WHERE statut='En_attente'")
+            cotis_attente = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT m.nom_complet, bm.montant_net, t.nom AS tontine
+                FROM bouffages_manuels bm
+                JOIN membres m  ON m.id  = bm.membre_id
+                JOIN tontines t ON t.id  = bm.tontine_id
+                WHERE bm.statut = 'En_attente'
+                ORDER BY bm.date_declenchement DESC
+                LIMIT 5
+            """)
+            bouffages = [{"nom": row[0], "montant": row[1], "tontine": row[2]}
+                         for row in cur.fetchall()]
+
+            cur.execute("SELECT COALESCE(SUM(montant), 0) FROM dettes_ira WHERE statut='Due'")
+            ira_total = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COALESCE(SUM(montant_brut), 0)
+                FROM transactions
+                WHERE date_heure::date = CURRENT_DATE AND statut = 'Confirmee'
+            """)
+            gmv_jour = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COALESCE(SUM(montant_brut), 0)
+                FROM transactions
+                WHERE statut = 'Confirmee'
+            """)
+            gmv_total = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT type_event, details, date_heure
+                FROM audit_log
+                ORDER BY date_heure DESC
+                LIMIT 15
+            """)
+            activite = [
+                {"type": row[0],
+                 "details": (row[1] or "")[:60],
+                 "ts": row[2].strftime("%H:%M:%S") if row[2] else ""}
+                for row in cur.fetchall()
+            ]
+
+            return jsonify({
+                "uptime":       uptime,
+                "ts":           datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                "tontines":     tontines,
+                "membres":      membres,
+                "revenus":      revenus,
+                "cotis_attente": cotis_attente,
+                "bouffages":    bouffages,
+                "ira_total":    ira_total,
+                "gmv_jour":     gmv_jour,
+                "gmv_total":    gmv_total,
+                "activite":     activite,
+            })
+        finally:
+            release_conn(conn)
+    except Exception as e:
+        log.error(f"Dashboard data error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>KATECHON OS — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#060606;color:#00ff88;font-family:'JetBrains Mono','Courier New',monospace;font-size:13px;min-height:100vh}
+#statusbar{background:#00ff88;color:#060606;padding:6px 16px;display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:12px;letter-spacing:1px}
+#statusbar .right{display:flex;gap:20px;align-items:center}
+.tag{background:#060606;color:#00ff88;padding:1px 7px;font-size:11px}
+.grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:#111}
+.panel{background:#060606;padding:14px 16px;min-height:200px}
+.panel-title{color:#ffa500;font-weight:700;font-size:11px;letter-spacing:2px;text-transform:uppercase;border-bottom:1px solid #2a1800;padding-bottom:6px;margin-bottom:10px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{color:#555;font-weight:400;text-align:left;padding:3px 6px 3px 0;font-size:11px}
+td{padding:4px 6px 4px 0;border-bottom:1px solid #0d0d0d}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat-box{border:1px solid #111;padding:10px;text-align:center}
+.stat-val{font-size:28px;font-weight:700;line-height:1}
+.stat-lbl{font-size:10px;color:#555;margin-top:4px;letter-spacing:1px}
+.green{color:#00ff88}.amber{color:#ffa500}.red{color:#ff4444}.gray{color:#555}.white{color:#eee}
+.rev-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #0d0d0d}
+.rev-row:last-child{border-bottom:none;border-top:1px solid #1a1a1a;margin-top:4px;padding-top:8px;font-weight:700}
+.feed-item{padding:3px 0;border-bottom:1px solid #0a0a0a;display:flex;gap:8px;overflow:hidden}
+.feed-ts{color:#333;min-width:62px;font-size:11px;flex-shrink:0}
+.feed-type{color:#ffa500;min-width:140px;font-size:11px;flex-shrink:0}
+.feed-detail{color:#666;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.alert{padding:6px 10px;margin-bottom:5px;border-left:3px solid}
+.alert-warn{border-color:#ffa500;background:#0d0800}
+.alert-crit{border-color:#ff4444;background:#0d0000}
+.alert-ok{border-color:#00ff88;background:#000d07}
+.brow{padding:5px 0;border-bottom:1px solid #0d0d0d;display:flex;justify-content:space-between}
+#refresh-bar{background:#060606;padding:4px 16px;font-size:10px;color:#222;text-align:right;border-top:1px solid #0d0d0d}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.pulse{animation:pulse 2s infinite}
+</style>
+</head>
+<body>
+<div id="statusbar">
+  <span>&#x2B21; KATECHON OS &nbsp;|&nbsp; TontineBot Pro v9.18 &nbsp;|&nbsp; BADF Ltd &mdash; Cameroun</span>
+  <div class="right">
+    <span>BOT <span id="s-status" class="tag pulse">&#9679;&nbsp;ONLINE</span></span>
+    <span>UPTIME <span id="s-uptime" class="tag">&#8212;</span></span>
+    <span>DB <span id="s-db" class="tag">&#9679;&nbsp;OK</span></span>
+    <span id="s-ts" style="color:#060606;font-size:11px">&#8212;</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <div class="panel-title">&#9656; Tontines actives</div>
+    <div id="p-tontines"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Flux financier &mdash; aujourd&#x2019;hui</div>
+    <div id="p-revenus"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Membres r&#233;seau</div>
+    <div class="stats" id="p-membres"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Activit&#233; temps r&#233;el</div>
+    <div id="p-activite"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Alertes</div>
+    <div id="p-alertes"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">&#9656; Bouffages en attente</div>
+    <div id="p-bouffages"><span class="gray">Chargement&#8230;</span></div>
+  </div>
+</div>
+<div id="refresh-bar">Auto-refresh 10s &nbsp;|&nbsp; <span id="s-last">&#8212;</span></div>
+
+<script>
+var USD=550;
+function usd(n){return'($'+Math.round(Number(n)/USD).toLocaleString('en-US')+')';}  
+function money(n){return Number(n).toLocaleString('fr-FR')+' FCFA '+'<span class="gray" style="font-size:11px">'+usd(n)+'</span>';}
+function render(d){
+  document.getElementById('s-uptime').textContent=d.uptime;
+  document.getElementById('s-ts').textContent=d.ts;
+  document.getElementById('s-last').textContent='Dernier refresh : '+d.ts;
+
+  // Tontines
+  var tt=d.tontines;
+  if(!tt||tt.length===0){
+    document.getElementById('p-tontines').innerHTML='<span class="gray">Aucune tontine active</span>';
+  }else{
+    var h='<table><tr><th>Nom</th><th>Membres</th><th>Mise</th><th>Cycle</th><th>⏰</th></tr>';
+    tt.forEach(function(t){
+      h+='<tr><td class="white">'+t.nom+'</td><td class="green">'+t.nb_membres+'</td>'
+        +'<td class="amber">'+Number(t.montant_place).toLocaleString('fr-FR')+' FCFA <span class="gray" style="font-size:10px">'+usd(t.montant_place)+'</span></td>'
+        +'<td class="gray">#'+t.cycle_actuel+'</td>'
+        +'<td class="gray">'+(t.heure_bouffage||'&#8212;')+'</td></tr>';
+    });
+    document.getElementById('p-tontines').innerHTML=h+'</table>';
+  }
+
+  // Revenus + GMV
+  var r=d.revenus;
+  document.getElementById('p-revenus').innerHTML=
+    '<div class="rev-row" style="border-bottom:1px solid #1a1a00;padding-bottom:8px;margin-bottom:4px"><span style="color:#ffd700;font-size:11px;letter-spacing:1px">GMV JOUR</span><span style="color:#ffd700;font-weight:700">'+money(d.gmv_jour)+'</span></div>'
+   +'<div class="rev-row" style="margin-bottom:8px"><span style="color:#888;font-size:11px">GMV TOTAL</span><span style="color:#aaa">'+money(d.gmv_total)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">FMP 2% collect&#233;</span><span class="green">'+money(r.fmp)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">Adh&#233;sions</span><span class="green">'+money(r.adhesions)+'</span></div>'
+   +'<div class="rev-row"><span class="gray">IRA (retards)</span><span class="amber">'+money(r.ira)+'</span></div>'
+   +'<div class="rev-row"><span class="white">REVENUS JOUR</span><span class="white">'+money(r.total)+'</span></div>';
+
+  // Membres
+  var m=d.membres;
+  document.getElementById('p-membres').innerHTML=
+    '<div class="stat-box"><div class="stat-val white">'+m.total+'</div><div class="stat-lbl">TOTAL</div></div>'
+   +'<div class="stat-box"><div class="stat-val green">'+m.actifs+'</div><div class="stat-lbl">ACTIFS</div></div>'
+   +'<div class="stat-box"><div class="stat-val amber">'+m.suspendus+'</div><div class="stat-lbl">SUSPENDUS</div></div>'
+   +'<div class="stat-box"><div class="stat-val red">'+m.bannis+'</div><div class="stat-lbl">BANNIS</div></div>';
+
+  // Activité
+  var acts=d.activite;
+  if(!acts||acts.length===0){
+    document.getElementById('p-activite').innerHTML='<span class="gray">Aucune activit&#233; r&#233;cente</span>';
+  }else{
+    var h4='';
+    acts.forEach(function(a){
+      h4+='<div class="feed-item"><span class="feed-ts">'+a.ts+'</span>'
+         +'<span class="feed-type">'+a.type+'</span>'
+         +'<span class="feed-detail">'+(a.details||'')+'</span></div>';
+    });
+    document.getElementById('p-activite').innerHTML=h4;
+  }
+
+  // Alertes
+  var ca=d.cotis_attente, ira=d.ira_total, alerts='';
+  if(ca>0) alerts+='<div class="alert alert-warn">&#9888; '+ca+' cotisation(s) en attente de confirmation admin</div>';
+  if(ira>0) alerts+='<div class="alert alert-warn">&#8987; IRA dû total : '+money(ira)+'</div>';
+  if(alerts==='') alerts='<div class="alert alert-ok">&#10003; Aucune alerte active</div>';
+  document.getElementById('p-alertes').innerHTML=alerts;
+
+  // Bouffages
+  var bfs=d.bouffages;
+  if(!bfs||bfs.length===0){
+    document.getElementById('p-bouffages').innerHTML='<span class="gray">Aucun bouffage en attente</span>';
+  }else{
+    var h6='';
+    bfs.forEach(function(b){
+      h6+='<div class="brow"><span class="white">'+b.nom+'</span>'
+         +'<span><span class="gray" style="font-size:10px">'+b.tontine+'</span>&nbsp;&nbsp;<span class="amber">'+money(b.montant)+'</span></span></div>';
+    });
+    document.getElementById('p-bouffages').innerHTML=h6;
+  }
+}
+
+function load(){
+  fetch('/dashboard/data')
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.error){
+        document.getElementById('s-db').textContent='&#9679; ERR';
+        document.getElementById('s-db').style.color='#ff4444';
+        return;
+      }
+      document.getElementById('s-db').textContent='&#9679; OK';
+      document.getElementById('s-db').style.color='#060606';
+      render(d);
+    })
+    .catch(function(){
+      document.getElementById('s-status').textContent='&#9679; OFFLINE';
+      document.getElementById('s-status').style.color='#ff4444';
+    });
+}
+load();
+setInterval(load,10000);
+</script>
+</body>
+</html>"""
+
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    """Dashboard local temps réel — Bloomberg terminal UI."""
+    from flask import Response as _R
+    return _R(_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
 
 
 # ══════════════════════════════════════════════════════════════════════════
