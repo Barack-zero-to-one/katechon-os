@@ -114,8 +114,8 @@ FRAIS_REACTIV    = 1_000   # Réactivation après suspension
 FRAIS_CHGNUM     = 250     # Changement de numéro Mobile Money
 
 # ── Numéro collecteur BADF — reçoit FMP + adhésions + IRA ─────────────────
-NUMERO_BADF_MTN    = os.getenv("NUMERO_BADF_MTN",    "+237693969773")  # Orange Money
-NUMERO_BADF_ORANGE = os.getenv("NUMERO_BADF_ORANGE", "+237693969773")  # Orange Money principal
+NUMERO_BADF_MTN    = os.getenv("NUMERO_BADF_MTN",    "+237683603113")  # MTN MoMo
+NUMERO_BADF_ORANGE = os.getenv("NUMERO_BADF_ORANGE", "+237692100606")  # Orange Money
 
 # ── Anti-fraude screenshots ────────────────────────────────────────────────
 DELAI_SCREENSHOT_HEURES = 24   # Screenshot plus vieux que 24h → rejeté
