@@ -1,14 +1,14 @@
 @echo off
 REM ═══════════════════════════════════════════════════════════════════════
-REM   TontineBot Pro v9.18 — DEMARRAGE v2 — Meta Cloud API
+REM   TontineBot Pro v9.18 — DEMARRAGE v2 — Green API
 REM   BADF Ltd — Cameroun
 REM
-REM   Architecture : Python Flask + Meta WhatsApp Cloud API (PAS Baileys)
+REM   Architecture : Python Flask + Green API WhatsApp (compte perso, scan QR)
 REM
 REM   Ce script :
 REM     1. Vérifie que PostgreSQL tourne (redémarre si arrêté)
 REM     2. Vérifie que le port 5000 est libre
-REM     3. Lance ngrok en arrière-plan (tunnel public pour webhook Meta)
+REM     3. Lance ngrok en arrière-plan (tunnel public pour webhook Green API)
 REM     4. Lance le watchdog Node.js qui gère le bot Python
 REM     5. Auto-restart en boucle infinie si le watchdog crash
 REM
@@ -72,7 +72,7 @@ if exist "ENV" (
     )
     echo    Variables chargees depuis ENV.
 ) else (
-    echo    ATTENTION : fichier ENV introuvable ! Meta API ne fonctionnera pas.
+    echo    ATTENTION : fichier ENV introuvable ! Green API ne fonctionnera pas.
 )
 
 REM ── 4. Lancer le watchdog Node.js (qui lance Python à son tour) ───────
