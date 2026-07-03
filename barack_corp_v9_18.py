@@ -48,7 +48,7 @@ AMEN. AMEN. AMEN. (Vibration 3-6-9 activée).
 ║   ✅ Webhook promotion admin WhatsApp → enregistrement auto              ║
 ║                                                                          ║
 ║   FONCTIONNALITÉS COMPLÈTES :                                            ║
-║   ✅ KYC complet 5 étapes (nom/CNI/naissance/ville/photo)               ║
+║   ✅ Inscription gratuite — prénom uniquement, compte actif immédiat     ║
 ║   ✅ Commission 2% + IRA 150 FCFA retard                                ║
 ║   ✅ Rappels horaires 12h→18h + matin 8h (codes USSD MTN + Orange)      ║
 ║   ✅ Suspension automatique 72h | Réactivation 1 000 FCFA               ║
@@ -576,88 +576,31 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
 
 
 def msg_kyc_groupe(nom_tontine: str) -> str:
-    """
-    Deuxième message envoyé dans le groupe à l'arrivée du bot.
-    Persuasif, professionnel, froid.
-    Justifie les 2 000 FCFA d'adhésion de manière technique et juridique.
-    Ingénierie sociale anti-fraude.
-    """
+    """Message envoyé dans le groupe à l'arrivée du bot."""
     return (
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔐 *ENRÔLEMENT OBLIGATOIRE — {nom_tontine}*\n"
+        f"🏦 *BIENVENUE — {nom_tontine}*\n"
         f"Barack & AI Development Facilities Ltd — BADF Ltd\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"*Ce message s'adresse à chaque personne présente dans ce groupe.*\n\n"
-        f"Dès votre entrée dans ce groupe, *votre identifiant WhatsApp, "
-        f"votre adresse IP et les métadonnées de votre session sont enregistrés*. "
-        f"Vous êtes déjà dans le système. La question est uniquement de savoir "
-        f"si votre identité y est associée ou non.\n\n"
-        f"Sans dossier KYC validé, vous ne recevrez rien et ne serez protégé par rien. "
-        f"*Vous n'existez pas dans le registre BADF Ltd.*\n\n"
-        f"📲 Tapez *menu* en message privé à *TontineBot Pro* pour ouvrir votre dossier.\n\n"
+        f"📲 Pour rejoindre, tapez *menu* en *message privé* au bot.\n"
+        f"C'est gratuit. 30 secondes.\n\n"
         f"─────────────────────────────────────────────\n"
-        f"📁 *CONSTITUTION DU DOSSIER KYC*\n"
+        f"🔐 *SÉCURITÉ*\n"
         f"─────────────────────────────────────────────\n\n"
-        f"Le système exige une pièce d'identité valide :\n"
-        f"▪ *Carte Nationale d'Identité* — membres majeurs\n"
-        f"▪ *Acte de naissance + nom légal complet* — membres mineurs "
-        f"ou dont la CNI est expirée ou non encore établie\n\n"
-        f"Vos données sont transformées en *empreinte cryptographique SHA-256* "
-        f"— unique, irréversible, horodatée. Ce dossier constitue "
-        f"*une preuve légale opposable devant tout tribunal camerounais*. "
-        f"Il est archivé *7 ans* et ne peut pas être supprimé.\n\n"
-        f"─────────────────────────────────────────────\n"
-        f"📡 *DONNÉES ASSOCIÉES À VOTRE DOSSIER*\n"
-        f"─────────────────────────────────────────────\n\n"
-        f"Une fois enrôlé, les éléments suivants sont liés à votre identité :\n\n"
-        f"▪ *Numéro MSISDN Mobile Money* — enregistré auprès de MTN ou Orange "
-        f"sous votre CNI ou acte de naissance\n"
-        f"▪ *Identifiant de session WhatsApp* — non falsifiable, lié à votre appareil\n"
-        f"▪ *Adresse IP de connexion* — géolocalisation approximative reconstituable\n"
-        f"▪ *Historique complet* de chaque message, screenshot et transaction "
-        f"dans ce groupe — horodaté, signé, archivé\n\n"
-        f"En cas de fraude, *votre position au moment des faits est reconstituable*. "
-        f"*Changer de numéro WhatsApp ou de carte SIM ne supprime pas votre dossier.*\n\n"
-        f"─────────────────────────────────────────────\n"
-        f"⚖️ *CADRE LÉGAL APPLICABLE*\n"
-        f"─────────────────────────────────────────────\n\n"
+        f"Dès votre entrée dans ce groupe, votre identifiant WhatsApp "
+        f"et les métadonnées de votre session sont enregistrés.\n\n"
         f"En cas de fraude documentée, BADF Ltd engage sans délai :\n"
-        f"▪ Transmission du dossier complet à la *Police Judiciaire* de votre région\n"
+        f"▪ Transmission à la *Police Judiciaire*\n"
         f"▪ Signalement à l'*ANIF* — Agence Nationale d'Investigation Financière\n"
-        f"▪ Demande de *blocage définitif du compte Mobile Money* du contrevenant\n"
-        f"▪ Engagement de poursuites — *Articles 318 à 323 du Code Pénal Camerounais*\n\n"
-        f"*Sans dossier KYC, aucune de ces protections ne s'applique en votre faveur. "
-        f"BADF Ltd n'a aucun mandat juridique pour agir en votre nom.*\n\n"
-        f"─────────────────────────────────────────────\n"
-        f"⛔ *DÉFAUT D'ENRÔLEMENT — EFFETS IMMÉDIATS*\n"
-        f"─────────────────────────────────────────────\n\n"
-        f"▪ Cotisations soumises → *non créditées*\n"
-        f"▪ Place dans l'ordre de bouffage → *suspendue*\n"
-        f"▪ Fraude subie → *aucune intervention possible*\n"
-        f"▪ Comportement anormal détecté → *signalement automatique "
-        f"sans avertissement préalable*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📲 Tapez *menu* en DM à *TontineBot Pro*\n"
-        f"   Conformité COBAC R-2019/01 | ANIF | Archivage 7 ans\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"_Barack & AI Development Facilities Ltd — BADF Ltd_\n"
+        f"▪ Blocage définitif *Mobile Money*\n"
+        f"▪ Poursuites — *Articles 318 à 323 du Code Pénal Camerounais*\n\n"
         f"_« Utiliser la technologie pour servir le prochain avec intégrité »_"
     )
 MSG_BIENVENUE_DM = (
     "🏦 *Bienvenue sur TontineBot Pro — BADF Ltd*\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Pour rejoindre une tontine, une seule étape : "
-    "compléter votre *dossier KYC gratuit* (moins de 3 minutes).\n\n"
-    "🔒 *Pourquoi le KYC ?*\n\n"
-    "TontineBot Pro gère des fonds réels. Chaque membre doit être "
-    "identifié conformément aux exigences *CEMAC/ANIF*. "
-    "Vos données sont chiffrées SHA-256, archivées 7 ans, "
-    "et ne sont jamais partagées avec des tiers.\n\n"
-    "En cas de fraude, votre dossier KYC permet d'enclencher "
-    "les procédures légales et le blocage Mobile Money.\n\n"
-    "─────────────────────────────────────────\n"
-    "Tapez *menu* pour démarrer votre vérification.\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "Votre compte est actif.\n\n"
+    "Tapez *menu* pour voir vos tontines et options.\n\n"
     "_BADF Ltd — Technologie au service du prochain_"
 )
 
@@ -3269,7 +3212,7 @@ def wa_mentionner_retardataires(nom_groupe: str, retardataires: list,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# KYC COMPLET — 5 ÉTAPES
+# ONBOARDING — COLLECTE NOM
 # ══════════════════════════════════════════════════════════════════════════
 
 def _calculer_age(date_str: str) -> int:
@@ -3298,11 +3241,7 @@ def _demarrer_collecte_nom(wa: str):
 
 
 def traiter_kyc(wa: str, texte: str, est_media: bool = False) -> bool:
-    """
-    Traite chaque étape du KYC adaptatif.
-    Flux adulte  : 0-Nom → 1-Naissance → 2-CNI → 3-Ville
-    Flux mineur  : 0-Nom → 1-Naissance → 2-Ville
-    """
+    """Collecte le prénom/surnom. Étape unique d'onboarding."""
     wa = normaliser_numero(wa)
     if wa not in _sessions_kyc or not session_valide(_sessions_kyc, wa):
         return False
@@ -7394,213 +7333,6 @@ def _groupe_rappel_manuel(wa_admin: str, group_id: str) -> str:
 # WEBHOOK WHATSAPP — META CLOUD API
 # ══════════════════════════════════════════════════════════════════════════
 
-def _traiter_screenshot_adhesion_dm(wa: str, image_bytes: bytes) -> bool:
-    """
-    Détecte un screenshot de paiement 2 000 FCFA envoyé en DM.
-
-    Flux automatisé :
-      1. Anti-recyclage SHA-256
-      2. Vérifie si le membre est pré-enregistré par l'admin
-      3. Active immédiatement le compte (adhesion_payee=1, statut=Actif)
-      4. Inscrit dans toutes les tontines du groupe d'où il vient
-      5. Pose 2 questions rapides en arrière-plan (CNI + ville)
-
-    Retourne True si le screenshot a été traité comme une adhésion.
-    """
-    wa_norm = normaliser_numero(wa)
-    img_hash = hash_screenshot(image_bytes)
-
-    conn = get_conn()
-    try:
-        # Anti-recyclage
-        if screenshot_deja_utilise(conn, img_hash):
-            wa_prive(wa_norm,
-                "❌ Ce screenshot a déjà été utilisé.\n"
-                "Envoyez un nouveau screenshot de votre virement.")
-            release_conn(conn)
-            return True
-
-        # Chercher le membre pré-enregistré
-        membre = fetchone(conn,
-            "SELECT * FROM membres WHERE whatsapp=%s", (wa_norm,))
-
-        if not membre:
-            # Inconnu — créer le profil minimal (ON CONFLICT évite la race condition)
-            kyc_hash = hashlib.sha256(f"ADH{wa_norm}{img_hash}".encode()).hexdigest()
-            cur = q(conn, """
-                INSERT INTO membres
-                    (nom_complet, kyc_hash, whatsapp, adhesion_payee,
-                     statut_global, kyc_etape)
-                VALUES (%s,%s,%s,1,'Actif',0)
-                ON CONFLICT (whatsapp) DO NOTHING
-                RETURNING id
-            """, (f"Membre_{wa_norm[-4:]}", kyc_hash, wa_norm))
-            row = cur.fetchone()
-            if row:
-                membre_id = row[0]
-            else:
-                # Conflit — profil créé par thread concurrent
-                membre = fetchone(conn, "SELECT * FROM membres WHERE whatsapp=%s", (wa_norm,))
-                membre_id = membre["id"]
-            est_nouveau = True
-        elif membre["adhesion_payee"] and membre["statut_global"] == "Actif":
-            # Déjà actif — image DM ignorée (adhesion gratuite, pas de screenshot requis)
-            release_conn(conn)
-            return True
-        else:
-            # Pré-enregistré par admin mais pas encore activé
-            membre_id = membre["id"]
-            q(conn, """UPDATE membres
-                       SET adhesion_payee=1, statut_global='Actif', kyc_etape=0
-                       WHERE id=%s""", (membre_id,))
-            est_nouveau = True
-
-        # Enregistrer le hash anti-recyclage
-        enregistrer_screenshot(conn, img_hash, membre_id, None)
-
-        # Enregistrer la transaction d'adhésion
-        q(conn, """INSERT INTO transactions
-                   (membre_id, montant_brut, montant_net, type_transaction, statut)
-                   VALUES (%s,%s,%s,'Adhesion','Confirmee')""",
-          (membre_id, FRAIS_ADHESION, FRAIS_ADHESION))
-
-        # Inscrire dans les tontines liées aux groupes où il est présent
-        # (Le bot les connaît via la table tontines/admins_groupe)
-        tontines_dispo = fetchall(conn,
-            "SELECT id, nom FROM tontines WHERE statut='Active'")
-        tontines_inscrites = []
-        for t in tontines_dispo:
-            # Vérifier s'il n'est pas déjà inscrit
-            deja = fetchone(conn,
-                "SELECT id FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
-                (membre_id, t["id"]))
-            if not deja:
-                try:
-                    q(conn, """
-                        INSERT INTO adhesions (membre_id, tontine_id, statut)
-                        VALUES (%s,%s,'Actif')
-                        ON CONFLICT (membre_id, tontine_id) DO UPDATE SET statut='Actif'
-                    """, (membre_id, t["id"]))
-                    tontines_inscrites.append(t["nom"])
-                except Exception:
-                    pass
-
-        conn.commit()
-
-        # Nom d'affichage
-        nom = membre["nom_complet"] if membre else f"Membre_{wa_norm[-4:]}"
-
-        # Notifier le membre — activation immédiate
-        tontines_txt = "\n".join(f"  ✅ {n}" for n in tontines_inscrites) if tontines_inscrites else "  (aucune tontine active)"
-        wa_prive(wa_norm,
-            f"✅ *COMPTE ACTIVÉ — BADF Ltd*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Bonjour *{nom}* !\n\n"
-            f"Votre compte est maintenant *actif*.\n\n"
-            f"Tontines activées :\n{tontines_txt}\n\n"
-            f"─────────────────────────────────────────\n"
-            f"Pour compléter votre dossier KYC (2 questions rapides) :\n"
-            f"Tapez *kyc* en réponse à ce message.\n\n"
-            f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
-        )
-
-        # Notifier l'admin
-        wa_owner(
-            f"✅ *NOUVELLE ADHÉSION*\n"
-            f"Numéro : {wa_norm}\n"
-            f"Tontines : {', '.join(tontines_inscrites) if tontines_inscrites else 'aucune'}"
-        )
-
-        log_audit("ADHESION_AUTO_SCREENSHOT",
-                  f"Membre:{wa_norm} | Hash:{img_hash[:12]} | "
-                  f"Tontines:{len(tontines_inscrites)}")
-
-        # Démarrer KYC simplifié en arrière-plan (non bloquant)
-        if est_nouveau:
-            _sessions_kyc_rapide[wa_norm] = {
-                "etape":     "cni",
-                "membre_id": membre_id,
-                "data":      {},
-                "ts":        time_module.time()
-            }
-
-        release_conn(conn)
-        return True
-
-    except Exception as e:
-        conn.rollback()
-        release_conn(conn)
-        log.error(f"_traiter_screenshot_adhesion_dm {wa_norm}: {e}")
-        return False
-
-
-# ── KYC rapide post-activation (2 questions) ─────────────────────────────
-_sessions_kyc_rapide: dict = {}
-
-def traiter_kyc_rapide(wa: str, texte: str) -> bool:
-    """
-    KYC simplifié après activation par screenshot.
-    2 questions seulement : CNI (ou acte naissance) + ville.
-    Non bloquant — le compte est déjà actif.
-    """
-    wa_norm = normaliser_numero(wa)
-    if wa_norm not in _sessions_kyc_rapide:
-        return False
-    if not session_valide(_sessions_kyc_rapide, wa_norm):
-        _sessions_kyc_rapide.pop(wa_norm, None)
-        return False
-
-    sess      = _sessions_kyc_rapide[wa_norm]
-    etape     = sess["etape"]
-    membre_id = sess["membre_id"]
-
-    # ── CNI ou acte naissance ─────────────────────────────────────────────
-    if etape == "cni":
-        if texte.strip().lower() in ("non", "pas", "skip", "passer"):
-            # Passer — on demande juste la ville
-            sess["etape"] = "ville"
-            wa_prive(wa_norm,
-                "✏️ *Dernière question — Ville de résidence*\n\n"
-                "Entrez votre ville actuelle :\n"
-                "Exemple : *Douala*, *Yaoundé*, *Bafoussam*")
-            return True
-
-        cni = texte.strip().upper()
-        conn = get_conn()
-        q(conn, "UPDATE membres SET kyc_cni=%s WHERE id=%s", (cni, membre_id))
-        conn.commit()
-        release_conn(conn)
-        sess["data"]["cni"] = cni
-        sess["etape"] = "ville"
-        wa_prive(wa_norm,
-            f"✅ Pièce enregistrée.\n\n"
-            f"✏️ *Dernière question — Ville de résidence*\n\n"
-            f"Entrez votre ville :\n"
-            f"Exemple : *Douala*, *Yaoundé*, *Bafoussam*")
-        return True
-
-    # ── Ville ─────────────────────────────────────────────────────────────
-    if etape == "ville":
-        ville = texte.strip()
-        if len(ville) < 2:
-            wa_prive(wa_norm, "❌ Entrez le nom de votre ville.")
-            return True
-        conn = get_conn()
-        q(conn, """UPDATE membres
-                   SET kyc_ville=%s, kyc_complet=1, kyc_etape=5
-                   WHERE id=%s""", (ville, membre_id))
-        conn.commit()
-        release_conn(conn)
-        _sessions_kyc_rapide.pop(wa_norm, None)
-        log_audit("KYC_RAPIDE_COMPLET", f"Membre:{wa_norm} | Ville:{ville}")
-        wa_prive(wa_norm,
-            f"✅ *Dossier KYC complété !*\n\n"
-            f"Votre dossier est maintenant complet et sécurisé.\n"
-            f"Tapez *menu* pour accéder à votre espace membre.\n\n"
-            f"_Barack & AI Development Facilities Ltd — BADF Ltd_")
-        return True
-
-    return False
 
 
 @app.route("/webhook/whatsapp", methods=["GET"])
@@ -7860,8 +7592,6 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
         try:
             if group_id:
                 _traiter_screenshot_cotisation_bytes(wa, img_bytes, caption, group_id)
-            else:
-                _traiter_screenshot_adhesion_dm(wa, img_bytes)
         except Exception as e:
             log.error(f"Erreur image Green API : {e}")
         return
@@ -7936,18 +7666,11 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
 
         if not adhesion:
             if group_id:
-                if membre["statut_global"] in ("En_attente_kyc", "En_attente_paiement"):
-                    wa_prive(wa,
-                        "📸 *Frais d'inscription*\n\n"
-                        "Pour activer votre compte, envoyez votre reçu de "
-                        "*2 000 FCFA* en *message privé* au bot (pas dans le groupe).\n\n"
-                        "_TontineBot Pro — BADF Ltd_")
-                else:
-                    wa_prive(wa,
-                        "⚠️ *Reçu reçu — tontine non configurée*\n\n"
-                        "Votre groupe n'est pas encore lié à une tontine active.\n"
-                        "Contactez votre admin.\n\n"
-                        "_TontineBot Pro — BADF Ltd_")
+                wa_prive(wa,
+                    "⚠️ *Reçu reçu — tontine non configurée*\n\n"
+                    "Votre groupe n'est pas encore lié à une tontine active.\n"
+                    "Contactez votre admin.\n\n"
+                    "_TontineBot Pro — BADF Ltd_")
             return
 
         # Calcul du montant attendu selon les places
