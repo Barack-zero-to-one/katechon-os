@@ -106,8 +106,7 @@ WAITRESS_THREADS = 70   # aligné sur maxconn=80 (-10 réservés APScheduler)
 BOT_NOM = os.getenv("BOT_NOM", "TontineBot Pro")
 
 # ── Frais BADF Ltd ────────────────────────────────────────────────────────
-FRAIS_ADHESION   = 0       # Adhésion gratuite — revenu 100% FMP
-FRAIS_FMP        = 0.02    # 2% prélevé sur chaque cotisation → reversé à BADF
+FRAIS_FMP        = 0.00    # Gratuit au lancement — modèle 2% activable (une ligne)
 MONTANT_IRA      = 150     # Pénalité retard (FCFA/jour)
 HEURE_LIMITE_DEF = time(18, 0)
 FRAIS_REACTIV    = 1_000   # Réactivation après suspension
@@ -283,7 +282,6 @@ def msg_intro_groupe(nom_tontine: str, montant: int,
     Génère le message d'introduction personnalisé pour chaque groupe.
     Appelé quand le bot est ajouté au groupe, ou manuellement par un admin.
     """
-    fmp_montant   = int(montant * 0.02)
     return (
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏛️ *BARACK & AI DEVELOPMENT FACILITIES Ltd — BADF Ltd*\n"
@@ -315,17 +313,14 @@ def msg_intro_groupe(nom_tontine: str, montant: int,
         f"─────────────────────────────────────────────\n"
         f"📌 *ARTICLE 2 — RETENUES OBLIGATOIRES*\n"
         f"─────────────────────────────────────────────\n\n"
-        f"*I — Frais de Mission et de Prestation (FMP) : 2%*\n"
-        f"Prélevés automatiquement sur chaque cotisation confirmée. "
-        f"Base légale : Règlement COBAC R-2019/01. *Non négociables.*\n\n"
-        f"*II — Caution de Garantie Anti-Fugue : 10% de la cagnotte*\n"
+        f"*I — Caution de Garantie Anti-Fugue : 10% de la cagnotte*\n"
         f"Retenue au moment du bouffage. Une seule issue selon votre comportement :\n"
         f"▪ *Restituée* si vous cotisez jusqu'à la fin du cycle sans incident\n"
         f"▪ *Saisie définitivement* en cas d'abandon, de disparition ou de défaut post-bouffage\n\n"
         f"Ce mécanisme a été conçu pour neutraliser le schéma classique du fraudeur : "
         f"percevoir sa cagnotte, puis cesser de cotiser. "
         f"La caution rend ce comportement *financièrement négatif avant même qu'il soit tenté*.\n\n"
-        f"*III — Pénalité de retard (IRA) : {150:,} FCFA/jour*\n"
+        f"*II — Pénalité de retard (IRA) : {150:,} FCFA/jour*\n"
         f"Déclenchée automatiquement après *{heure_limite}*. "
         f"Cumulée chaque jour et déduite intégralement de votre bouffage.\n\n"
         f"─────────────────────────────────────────────\n"
@@ -382,10 +377,6 @@ def msg_dm_admin_bienvenue(nom_tontine: str) -> str:
         f"Le jour du bouffage, je calcule le montant exact à virer au bénéficiaire "
         f"(cagnotte moins toutes les déductions). Vous virez ce montant sur son "
         f"numéro Mobile Money, puis confirmez via le menu admin.\n\n"
-        f"*3️⃣ Reverser les FMP à BADF Ltd*\n"
-        f"10 minutes après l'heure de bouffage, je vous envoie automatiquement "
-        f"le relevé des frais de service (2%) à reverser sur *{NUMERO_BADF_ORANGE}*. "
-        f"Vous envoyez le code de transaction au bot pour clôturer.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 *POUR DÉMARRER — ENVOYEZ LA LISTE*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -3487,8 +3478,9 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
             av   = f" (+{t['periodes_payees']-1} avance)" if t["periodes_payees"] > 1 else ""
             lines.append(
                 f"{icon} {date} | *{t['type_transaction']}{av}*\n"
-                f"   Brut:{t['montant_brut']:,} | FMP:-{t['frais_fmp']} | "
-                f"IRA:-{t['frais_ira']} | Net:{t['montant_net']:,}\n"
+                f"   {t['montant_brut']:,} FCFA"
+                f"{' | IRA:-' + str(t['frais_ira']) if t['frais_ira'] else ''}"
+                f" | Net:{t['montant_net']:,}\n"
                 f"   {t['tontine'] or 'N/A'}"
             )
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━\n_Tapez *menu*_")
@@ -3899,7 +3891,6 @@ def _passer_a_cotisation_suivante(sess: dict, tid: int, tnom: str, msg_resultat:
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔖 *#{c['id']}* — {c['nom_complet']}{places_txt}\n"
         f"   💰 {c['montant_declare']:,} FCFA\n"
-        f"   💼 FMP : {c['fmp_du']:,} FCFA\n"
         f"   📅 Soumise : {dt}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"❓ *Le transfert a-t-il bien été reçu ?*\n\n"
@@ -5679,8 +5670,7 @@ def traiter_cotisation(conn, membre_id: int, tontine_id: int,
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👤 *{membre['nom_complet']}*\n"
         f"📅 {datetime.now().strftime('%d/%m/%Y à %Hh%M')}\n\n"
-        f"💰 Montant brut : *{montant_brut:,} FCFA*{av_txt}\n"
-        f"   Commission Barack Corp (2%) : *-{frais['frais_fmp']:,} FCFA*{ira_txt}{dette_txt}\n"
+        f"💰 Montant : *{montant_brut:,} FCFA*{av_txt}{ira_txt}{dette_txt}\n"
         f"   *Net crédité au pool : {frais['montant_net']:,} FCFA*\n"
         f"{rang_txt}\n\n"
         f"🔐 Réf. transaction : `{ref}`\n"
@@ -5688,13 +5678,12 @@ def traiter_cotisation(conn, membre_id: int, tontine_id: int,
         f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
     )
 
-    # Rapport owner (FMP + IRA)
-    total_frais = frais["frais_fmp"] + frais["frais_ira"]
-    if total_frais > 0:
+    # Rapport owner (IRA uniquement — FMP désactivé au lancement)
+    if frais["frais_ira"] > 0:
         wa_owner(
-            f"💰 *REVENUS BADF Ltd*\n"
-            f"FMP: +{frais['frais_fmp']:,} | IRA: +{frais['frais_ira']:,}\n"
-            f"*+{total_frais:,} FCFA* | {tontine['nom']} | Réf:{ref}"
+            f"⏰ *IRA — {tontine['nom']}*\n"
+            f"Pénalité retard : +{frais['frais_ira']:,} FCFA\n"
+            f"Réf:{ref}"
         )
 
     log_audit("COTISATION", f"Membre {membre_id} — {montant_brut:,} F — {ref}", ip=ip)
@@ -6194,13 +6183,6 @@ def _owner_rapport_jour() -> str:
             WHERE statut='Confirmee' AND date_heure::date = CURRENT_DATE
         """)["v"]
 
-        # Adhésions du jour
-        adhesions = fetchone(conn, """
-            SELECT COUNT(*) n, COALESCE(SUM(montant_brut), 0) v FROM transactions
-            WHERE type_transaction='Adhesion' AND statut='Confirmee'
-              AND date_heure::date = CURRENT_DATE
-        """)
-
         # Cotisations du jour
         cot = fetchone(conn, """
             SELECT COUNT(*) n, COALESCE(SUM(montant_brut), 0) v FROM transactions
@@ -6244,7 +6226,7 @@ def _owner_rapport_jour() -> str:
                 f" | FMP: {t_fmp:,} FCFA"
             )
 
-        total_badf = fmp + ira + adhesions["v"] + cautions_saisies["v"]
+        total_badf = fmp + ira + cautions_saisies["v"]
 
         return (
             f"📊 *RAPPORT DU JOUR — {datetime.now().strftime('%d/%m/%Y')}*\n"
@@ -6252,7 +6234,6 @@ def _owner_rapport_jour() -> str:
             f"💰 *REVENUS BADF Ltd*\n"
             f"  Commission FMP (2%)     : *{fmp:,} FCFA*\n"
             f"  Pénalités IRA           : *{ira:,} FCFA*\n"
-            f"  Frais d'adhésion        : *{adhesions['v']:,} FCFA* ({adhesions['n']} membres)\n"
             f"  Cautions saisies        : *{cautions_saisies['v']:,} FCFA* ({cautions_saisies['n']} fugitifs)\n"
             f"  ──────────────────────────────\n"
             f"  *TOTAL BADF AUJOURD'HUI : {total_badf:,} FCFA*\n\n"
@@ -6283,11 +6264,6 @@ def _owner_rapport_mois() -> str:
             SELECT COALESCE(SUM(frais_ira), 0) v FROM transactions
             WHERE statut='Confirmee' AND date_heure >= %s
         """, (debut_mois,))["v"]
-        adhesions = fetchone(conn, """
-            SELECT COUNT(*) n, COALESCE(SUM(montant_brut), 0) v FROM transactions
-            WHERE type_transaction='Adhesion' AND statut='Confirmee'
-              AND date_heure >= %s
-        """, (debut_mois,))
         cautions = fetchone(conn, """
             SELECT COUNT(*) n, COALESCE(SUM(montant), 0) v
             FROM cautions_garantie
@@ -6297,7 +6273,7 @@ def _owner_rapport_mois() -> str:
             SELECT COUNT(*) n FROM liste_passage
             WHERE statut='Paye' AND date_paiement >= %s
         """, (debut_mois,))
-        total = fmp + ira + adhesions["v"] + cautions["v"]
+        total = fmp + ira + cautions["v"]
         mois_nom = datetime.now().strftime("%B %Y").upper()
         return (
             f"📆 *RAPPORT {mois_nom}*\n"
@@ -6305,7 +6281,6 @@ def _owner_rapport_mois() -> str:
             f"💰 *REVENUS BADF Ltd*\n"
             f"  Commission FMP          : *{fmp:,} FCFA*\n"
             f"  Pénalités IRA           : *{ira:,} FCFA*\n"
-            f"  Frais d'adhésion        : *{adhesions['v']:,} FCFA* ({adhesions['n']} membres)\n"
             f"  Cautions saisies        : *{cautions['v']:,} FCFA* ({cautions['n']} fugitifs)\n"
             f"  ──────────────────────────────\n"
             f"  *TOTAL MOIS : {total:,} FCFA*\n\n"
@@ -6332,11 +6307,6 @@ def _owner_historique_n_jours(nb_jours: int, titre: str = None) -> str:
             SELECT COALESCE(SUM(frais_ira), 0) v FROM transactions
             WHERE statut='Confirmee' AND date_heure >= %s
         """, (debut,))["v"]
-        adhesions = fetchone(conn, """
-            SELECT COUNT(*) n, COALESCE(SUM(montant_brut), 0) v FROM transactions
-            WHERE type_transaction='Adhesion' AND statut='Confirmee'
-              AND date_heure >= %s
-        """, (debut,))
         cautions = fetchone(conn, """
             SELECT COUNT(*) n, COALESCE(SUM(montant), 0) v
             FROM cautions_garantie WHERE statut='Saisie' AND date_liberation >= %s
@@ -6356,14 +6326,13 @@ def _owner_historique_n_jours(nb_jours: int, titre: str = None) -> str:
             for r in top_jours
         ) or "  Aucune donnée."
 
-        total = fmp + ira + adhesions["v"] + cautions["v"]
+        total = fmp + ira + cautions["v"]
         return (
             f"📈 *{titre}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💰 *REVENUS BADF Ltd*\n"
             f"  Commission FMP          : *{fmp:,} FCFA*\n"
             f"  Pénalités IRA           : *{ira:,} FCFA*\n"
-            f"  Frais d'adhésion        : *{adhesions['v']:,} FCFA* ({adhesions['n']} membres)\n"
             f"  Cautions saisies        : *{cautions['v']:,} FCFA* ({cautions['n']} fugitifs)\n"
             f"  ──────────────────────────────\n"
             f"  *TOTAL PÉRIODE : {total:,} FCFA*\n\n"
@@ -6436,11 +6405,6 @@ def _owner_membres_stats() -> str:
             SELECT COUNT(*) n FROM membres
             WHERE created_at >= date_trunc('month', CURRENT_DATE)
         """)["n"]
-        revenus_adh = fetchone(conn, """
-            SELECT COALESCE(SUM(montant_brut), 0) v FROM transactions
-            WHERE type_transaction='Adhesion' AND statut='Confirmee'
-        """)["v"]
-
         return (
             f"👥 *STATISTIQUES MEMBRES — BADF Ltd*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -6450,7 +6414,6 @@ def _owner_membres_stats() -> str:
             f"  Bannis           : {bannis}\n\n"
             f"  Nouveaux aujourd'hui : {nouveaux_j}\n"
             f"  Nouveaux ce mois     : {nouveaux_m}\n\n"
-            f"  Revenus adhésions (total) : *{revenus_adh:,} FCFA*\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"_Tapez *0* pour le menu principal._"
         )
