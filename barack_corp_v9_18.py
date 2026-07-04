@@ -106,7 +106,7 @@ WAITRESS_THREADS = 70   # aligné sur maxconn=80 (-10 réservés APScheduler)
 BOT_NOM = os.getenv("BOT_NOM", "TontineBot Pro")
 
 # ── Frais BADF Ltd ────────────────────────────────────────────────────────
-FRAIS_FMP        = 0.02    # 2% prélevé sur chaque cotisation → reversé à BADF
+FRAIS_FMP        = 0.00    # Gratuit au lancement — modèle 2% activable (une ligne)
 MONTANT_IRA      = 150     # Pénalité retard (FCFA/jour)
 HEURE_LIMITE_DEF = time(18, 0)
 FRAIS_REACTIV    = 1_000   # Réactivation après suspension
