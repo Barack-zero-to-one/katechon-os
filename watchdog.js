@@ -29,7 +29,8 @@ const http      = require("http");
 // ── Configuration ─────────────────────────────────────────────────────────
 const PYTHON_CMD        = "python";
 const PYTHON_SCRIPT     = "barack_corp_v9_18.py";
-const HEALTH_URL        = "http://localhost:5000/health";
+const HEALTH_TOKEN      = process.env.HEALTH_TOKEN || "badf_health_2026";
+const HEALTH_URL        = `http://localhost:5000/health?token=${HEALTH_TOKEN}`;
 const WEBHOOK_URL       = "http://localhost:5000/webhook/whatsapp";
 const QUEUE_FILE        = "logs/message_queue.json";
 const WATCHDOG_LOG      = "logs/watchdog.log";
@@ -45,6 +46,8 @@ let pythonBackoff  = INITIAL_BACKOFF;
 let pythonOk       = false;
 let count503       = 0;
 let arret          = false;
+let startupGrace      = false;  // true pendant 25s après chaque démarrage Python
+let startupGraceTimer = null;   // handle clearTimeout pour éviter les timers stale
 
 // ── Setup dossiers ────────────────────────────────────────────────────────
 ["logs", "backups"].forEach(d => {
@@ -80,6 +83,11 @@ function demarrerPython() {
     if (arret) return;
 
     log("INFO", "python_start_attempt", { script: PYTHON_SCRIPT });
+
+    // Grace period : Flask prend ~15-20s pour charger (10k lignes + DB + scheduler)
+    if (startupGraceTimer) clearTimeout(startupGraceTimer);
+    startupGrace = true;
+    startupGraceTimer = setTimeout(() => { startupGrace = false; }, 25000);
 
     pythonProcess = spawn(PYTHON_CMD, [PYTHON_SCRIPT], {
         stdio: ["ignore", "pipe", "pipe"],
@@ -133,6 +141,10 @@ function healthCheck(url) {
 }
 
 async function surveillerProcessus() {
+    if (startupGrace) {
+        log("INFO", "python_startup_grace", { msg: "Flask en cours d'initialisation, health check suspendu" });
+        return;
+    }
     const result = await healthCheck(HEALTH_URL);
 
     if (result.ok) {

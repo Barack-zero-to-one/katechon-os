@@ -648,16 +648,20 @@ _download_executor = concurrent.futures.ThreadPoolExecutor(
 _wa_throttle_lock = threading.Lock()
 _wa_last_send_ts  = 0.0
 
+# ── Groupes ayant déjà reçu l'intro — évite le spam ──────────────────────────
+_groupes_intro_envoyes: set = set()
+
 
 def _throttle_wa():
-    """Garantit un intervalle ≥ 13ms entre deux envois Meta — évite le 429 sur les batchs."""
+    """Garantit un intervalle ≥ 3s entre deux envois — évite la détection WhatsApp."""
     global _wa_last_send_ts
     with _wa_throttle_lock:
         now = time_module.time()
         gap = now - _wa_last_send_ts
-        if gap < 0.013:
-            time_module.sleep(0.013 - gap)
-        _wa_last_send_ts = time_module.time()
+        wait = max(0.0, 3.0 - gap)
+        _wa_last_send_ts = now + wait
+    if wait > 0:
+        time_module.sleep(wait)
 
 
 def session_valide(sessions: dict, wa: str) -> bool:
@@ -2988,11 +2992,14 @@ def _wa_request(method: str, payload: dict, max_retries: int = 3) -> bool:
 
 
 def _wa_send_direct(to: str, body: str) -> bool:
-    """Envoi DM via Green API. `to` au format +237XXXXXXXXX."""
+    """Envoi DM ou groupe via Green API.
+    `to` accepte +237XXXXXXXXX, un JID @c.us ou un JID @g.us (outbox drain)."""
     _throttle_wa()   # ≤ 77 msg/s — évite le 429 sur les batchs APScheduler
-    # Green API chatId : numéro sans + ni espaces + @c.us
-    to_clean = to.lstrip("+").replace(" ", "")
-    chat_id  = f"{to_clean}@c.us"
+    if "@g.us" in to or "@c.us" in to:
+        chat_id = to
+    else:
+        to_clean = to.lstrip("+").replace(" ", "")
+        chat_id  = f"{to_clean}@c.us"
     payload  = {
         "chatId":  chat_id,
         "message": body[:4096],
@@ -3169,22 +3176,25 @@ def wa_admins_tontine(tontine_id: int, message: str):
 
 def wa_groupe(group_id: str, message: str):
     """
-    Envoie un message à tous les membres actifs d'une tontine via Meta.
-    group_id = JID du groupe (ex: 120363XXXXXXXX@g.us)
+    Envoie un message dans le canal WhatsApp du groupe de la tontine.
+    group_id = JID @g.us du groupe (ex: 120363XXXXXXXX@g.us)
     ou nom de la tontine si on a le whatsapp_groupe en base.
+    Fallback broadcast DM aux membres actifs si aucun JID @g.us disponible.
     """
     if group_id and "@g.us" in group_id:
-        # JID direct → envoyer dans le groupe
-        _wa_send_groupe(group_id, message)
+        _wa_send_group_chatid(group_id, message)
     elif group_id:
-        # Chercher le JID par nom de tontine
         conn = get_conn()
         tontine = fetchone(conn,
             "SELECT whatsapp_groupe FROM tontines WHERE nom=%s OR whatsapp_groupe=%s",
             (group_id, group_id))
         release_conn(conn)
         if tontine and tontine.get("whatsapp_groupe"):
-            _wa_send_groupe(tontine["whatsapp_groupe"], message)
+            jid = tontine["whatsapp_groupe"]
+            if "@g.us" in jid:
+                _wa_send_group_chatid(jid, message)
+            else:
+                _wa_send_groupe(jid, message)
 
 
 def wa_admin(message: str):
@@ -7269,6 +7279,65 @@ def _groupe_liste_cotisations(wa_admin: str, group_id: str) -> str:
     return "\n".join(lignes)
 
 
+def _traiter_commande_groupe(wa: str, texte: str, group_id: str):
+    """Dispatch des commandes texte admin dans le groupe @g.us.
+    Si le groupe n'a pas de tontine liée, envoie l'intro automatiquement
+    au premier message reçu (une seule fois par groupe)."""
+    global _groupes_intro_envoyes
+
+    conn = get_conn()
+    try:
+        tontine = fetchone(conn,
+            "SELECT * FROM tontines WHERE whatsapp_groupe=%s AND statut='Active'",
+            (group_id,))
+    finally:
+        release_conn(conn)
+
+    # ── Auto-intro : groupe inconnu → présentation automatique ───────────────
+    with _sessions_lock:
+        already_sent = group_id in _groupes_intro_envoyes
+        if not tontine and not already_sent:
+            _groupes_intro_envoyes.add(group_id)
+    if not tontine and not already_sent:
+        wa_groupe(group_id, MSG_INTRO_GROUPE)
+        log_audit("INTRO_GROUPE_AUTO", f"Groupe:{group_id} Trigger:{wa}", wa)
+        return
+
+    cmd = texte.strip().lower()
+
+    if cmd == "intro":
+        if not est_admin(wa) and not est_owner(wa):
+            return
+        if tontine:
+            msg = msg_intro_groupe(
+                nom_tontine     = tontine["nom"],
+                montant         = tontine["montant_place"],
+                heure_bouffage  = tontine.get("heure_bouffage",  "17:00") or "17:00",
+                heure_ouverture = tontine.get("heure_ouverture", "05:00") or "05:00",
+                heure_rappel    = tontine.get("heure_rappel",    "14:00") or "14:00",
+                heure_limite    = tontine.get("heure_limite",    "18:00") or "18:00",
+            )
+        else:
+            msg = MSG_INTRO_GROUPE
+        wa_groupe(group_id, msg)
+        log_audit("INTRO_GROUPE", f"Admin:{wa} Groupe:{group_id}", wa)
+        return
+
+    if not tontine:
+        return
+    if not est_admin(wa) and not est_owner(wa):
+        return
+
+    if cmd == "liste":
+        rep = _groupe_liste_cotisations(wa, group_id)
+        if rep:
+            wa_groupe(group_id, rep)
+    elif cmd == "rappel":
+        rep = _groupe_rappel_manuel(wa, group_id)
+        if rep:
+            wa_groupe(group_id, rep)
+
+
 def _groupe_rappel_manuel(wa_admin: str, group_id: str) -> str:
     """
     Commande "rappel" tapée dans le groupe par l'admin.
@@ -7310,11 +7379,15 @@ def _groupe_rappel_manuel(wa_admin: str, group_id: str) -> str:
         )
 
     mentions = "\n".join(f"  @{m['nom_complet']}" for m in retards)
-    adm_col  = fetchone(
-        get_conn(),
-        "SELECT numero_collecte FROM admins_groupe WHERE tontine_id=%s AND numero_collecte IS NOT NULL LIMIT 1",
-        (tid,)
-    )
+    conn2 = get_conn()
+    try:
+        adm_col = fetchone(
+            conn2,
+            "SELECT numero_collecte FROM admins_groupe WHERE tontine_id=%s AND numero_collecte IS NOT NULL LIMIT 1",
+            (tid,)
+        )
+    finally:
+        release_conn(conn2)
     num_col = adm_col["numero_collecte"] if adm_col else "— demandez à l'admin"
 
     return (
@@ -7597,6 +7670,10 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
         return
 
     if group_id:
+        try:
+            _traiter_commande_groupe(wa, texte, group_id)
+        except Exception as e:
+            log.error(f"Erreur commande groupe {group_id} : {e}")
         return
 
     if est_owner(wa):
