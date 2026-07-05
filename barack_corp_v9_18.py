@@ -151,6 +151,15 @@ GREENAPI_TOKEN          = os.getenv("GREENAPI_TOKEN",          "")  # API token 
 GREENAPI_WEBHOOK_SECRET = os.getenv("GREENAPI_WEBHOOK_SECRET", "")  # Token secret webhook (256 bits)
 GREENAPI_BASE           = os.getenv("GREENAPI_BASE", "https://api.green-api.com")
 
+# ── Validation credentials Green API au démarrage ─────────────────────────
+import logging as _log_startup
+if not GREENAPI_WEBHOOK_SECRET:
+    _log_startup.getLogger(__name__).error(
+        "❌ GREENAPI_WEBHOOK_SECRET manquant — webhook sera refusé en 503")
+if not GREENAPI_INSTANCE_ID or not GREENAPI_TOKEN:
+    _log_startup.getLogger(__name__).error(
+        "❌ GREENAPI_INSTANCE_ID / GREENAPI_TOKEN manquants — envoi impossible")
+
 # ── WhatsApp ──────────────────────────────────────────────────────────────
 GROUPE_ADMIN = "Admin Barack Corp"
 OWNER_WA     = os.getenv("OWNER_WA", "+237693969773")
@@ -1239,7 +1248,7 @@ def init_db():
             log.error(f"❌ Tables manquantes après init_db : {manquantes}")
             log.error("   Exécutez create_db_v917.sql manuellement dans psql.")
         else:
-            log.info("✅ PostgreSQL TontineBot Pro v9.17 — toutes les tables présentes.")
+            log.info("✅ PostgreSQL TontineBot Pro v9.18 — toutes les tables présentes.")
     except Exception as e:
         log.error(f"❌ init_db commit ERREUR : {e}")
         conn.rollback()
@@ -6612,8 +6621,9 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                 f"*Orange Money* / *MTN MoMo* associés seront bloqués auprès des opérateurs "
                 f"et une procédure judiciaire sera engagée.\n\n"
                 f"📊 *BARÈME DES FRAIS ET PÉNALITÉS*\n\n"
-                f"• *FMP (Frais de Maintenance) :* 2 % par cotisation "
-                f"_(Financement des serveurs ultra-sécurisés)_\n"
+                + (f"• *FMP (Frais de Maintenance) :* {int(FRAIS_FMP*100)} % par cotisation "
+                f"_(Financement des serveurs ultra-sécurisés)_\n" if FRAIS_FMP > 0 else "")
+                + (
                 f"• *Discipline Collective (Retard) :* 150 FCFA / jour\n"
                 f"• *Réactivation :* 1 000 FCFA "
                 f"_(Après 48h de suspension sans cotisation et sans avoir prévenu l'Administrateur)_\n"
@@ -6625,7 +6635,7 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                 f"tous réseaux (Orange, MTN, Camtel).\n\n"
                 f"_Avec TontineBot Pro, construisons ensemble une épargne forte, transparente "
                 f"et sans stress. Bienvenue dans l'ère de la tontine professionnelle._"
-            )
+            ))
             if admin:
                 _t.sleep(1)
                 wa_prive(admin["whatsapp"], msg_dm_admin_bienvenue(tontine["nom"]))
@@ -7462,7 +7472,8 @@ def _greenapi_telecharger_media(url_media: str) -> bytes:
 def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id: str = ""):
     """Parse un événement Green API et route vers la logique métier."""
     if not group_id and not est_owner(wa):
-        if not get_membre_by_wa(wa) and not est_admin(wa):
+        wa_norm = normaliser_numero(wa)
+        if not get_membre_by_wa(wa) and not est_admin(wa) and wa_norm not in _sessions_config:
             return
 
     # ── Capture passive du pushname ──────────────────────────────────────────
@@ -9972,7 +9983,7 @@ def health():
         db_ok = False
     return jsonify({
         "status":    "ok" if db_ok else "db_error",
-        "version":   "9.17",
+        "version":   "9.18",
         "timestamp": datetime.now().isoformat(),
         "db":        "ok" if db_ok else "error",
     }), 200 if db_ok else 503
@@ -10589,7 +10600,7 @@ def demarrer_scheduler():
     scheduler.add_job(alerter_risques_bouffage_imminent, "cron", hour=5, minute=33, id="risque_fugue_predictif")
 
     scheduler.start()
-    log.info("✅ Scheduler TontineBot Pro v9.17 démarré.")
+    log.info("✅ Scheduler TontineBot Pro v9.18 démarré.")
     return scheduler
 
 
@@ -10599,7 +10610,7 @@ def demarrer_scheduler():
 
 if __name__ == "__main__":
     log.info("━" * 60)
-    log.info("🚀 TontineBot Pro v9.17 — Barack & AI Development Facilities Ltd")
+    log.info("🚀 TontineBot Pro v9.18 — Barack & AI Development Facilities Ltd")
     log.info("   BADF Ltd — Cameroun 🇨🇲")
     log.info("━" * 60)
     log.info(f"   Owner           : {OWNER_WA}")
@@ -10625,7 +10636,7 @@ if __name__ == "__main__":
     init_pool()
     init_db()
     _restaurer_sessions()
-    log.info("✅ Base de données v9.17 initialisée.")
+    log.info("✅ Base de données v9.18 initialisée.")
 
     # ── 3. Détecter l'URL publique ngrok ──────────────────────────────────
     log.info("🌐 Détection URL publique ngrok...")
@@ -10641,7 +10652,7 @@ if __name__ == "__main__":
     demarrer_scheduler()
     log.info("✅ Scheduler démarré.")
     log.info("━" * 60)
-    log.info("🟢 TontineBot Pro v9.17 — Prêt à recevoir des messages.")
+    log.info("🟢 TontineBot Pro v9.18 — Prêt à recevoir des messages.")
     log.info("━" * 60)
 
     def _shutdown_bot():
