@@ -5153,12 +5153,13 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         places_txt = f" ×{c['nombre_places']}" if c["nombre_places"] > 1 else ""
         total = len(en_attente)
 
+        _fmp = f"   💼 FMP : {c['fmp_du']:,} FCFA\n" if FRAIS_FMP > 0 else ""
         return (
             f"📋 *COTISATION 1/{total} — {tnom}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🔖 *#{c['id']}* — {c['nom_complet']}{places_txt}\n"
             f"   💰 {c['montant_declare']:,} FCFA\n"
-            f"   💼 FMP : {c['fmp_du']:,} FCFA\n"
+            f"{_fmp}"
             f"   📅 Soumise : {dt}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"❓ *Le transfert a-t-il bien été reçu ?*\n\n"
@@ -6691,9 +6692,13 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
         return
 
     for admin_wa, admin_name in admins_list:
+        if est_owner(admin_wa) or est_admin(admin_wa):
+            continue
         prenom = admin_name.split()[0] if admin_name else ""
         salut  = f" {prenom}" if prenom else ""
         with _sessions_lock:
+            if admin_wa in _sessions_config:
+                continue
             _sessions_config[admin_wa] = {
                 "group_id":   group_id,
                 "group_name": nom_groupe,
@@ -6711,6 +6716,11 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
             "_TontineBot Pro - BADF Ltd_"
         )
 
+    wa_owner(
+        f"NOUVEAU GROUPE : *{nom_groupe}*\n"
+        f"Config DM envoyé à {len(admins_list)} admin(s).\n"
+        f"ID : {group_id}"
+    )
     log_audit("BOT_ADDED_GROUPE_INCONNU",
               f"Groupe:{group_id} Nom:{nom_groupe} Admins:{len(admins_list)} DMs envoyés")
 
@@ -6839,6 +6849,11 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
         if not num or len(num) < 12:
             return "Numero invalide. Format : *+237690123456*"
 
+        with _sessions_lock:
+            if wa_norm not in _sessions_config:
+                return None
+            _sessions_config.pop(wa_norm)
+
         data["collecte"] = num
         group_id   = sess["group_id"]
         group_name = sess["group_name"]
@@ -6880,8 +6895,6 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
             log.error(f"Erreur creation tontine: {e}")
             return f"Erreur creation tontine: {str(e)[:80]}"
         release_conn(conn)
-
-        _sessions_config.pop(wa_norm, None)
 
         _t.sleep(2)
         if data.get("deja_en_cours"):
@@ -7044,8 +7057,8 @@ def _groupe_liste_cotisations(wa_admin: str, group_id: str) -> str:
             nb_pl  = m.get("nombre_places") or 1
             pl_txt = f" ×{nb_pl}" if nb_pl > 1 else ""
             lignes.append(
-                f"  @{m['nom_complet']}{pl_txt} — "
-                f"*{mont:,} FCFA* _(FMP BADF : {fmp_m:,} FCFA)_"
+                f"  @{m['nom_complet']}{pl_txt} — *{mont:,} FCFA*"
+                + (f" _(FMP BADF : {fmp_m:,} FCFA)_" if fmp_m > 0 else "")
             )
     else:
         lignes.append(f"✅ *ONT COTISÉ (0/{nb_total})*")
@@ -7068,8 +7081,8 @@ def _groupe_liste_cotisations(wa_admin: str, group_id: str) -> str:
         "",
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"💰 Collecté     : *{total_coll:,} FCFA*",
-        f"💼 FMP BADF 2%  : *{total_fmp:,} FCFA*",
-        f"📦 Net tontine  : *{net_tontine:,} FCFA*",
+        *(([f"💼 FMP BADF {int(fmp_pct*100)}%  : *{total_fmp:,} FCFA*",
+            f"📦 Net tontine  : *{net_tontine:,} FCFA*"]) if total_fmp > 0 else []),
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"_TontineBot Pro — BADF Ltd_",
     ]
@@ -7107,14 +7120,18 @@ def _traiter_commande_groupe(wa: str, texte: str, group_id: str, group_name: str
         nom = grp_name or group_name or group_id
         if admins_list:
             for admin_wa, admin_name in admins_list:
+                if est_owner(admin_wa) or est_admin(admin_wa):
+                    continue
                 prenom = admin_name.split()[0] if admin_name else ""
                 salut  = f" {prenom}" if prenom else ""
                 with _sessions_lock:
+                    if admin_wa in _sessions_config:
+                        continue
                     _sessions_config[admin_wa] = {
                         "group_id":   group_id,
                         "group_name": nom,
                         "etape":      "montant",
-                        "data":       {},
+                        "data":       {"participants": []},
                         "ts":         time_module.time(),
                     }
                 wa_prive(admin_wa,
@@ -7388,7 +7405,7 @@ def webhook_whatsapp_greenapi():
     type_webhook = payload.get("typeWebhook", "")
 
     if type_webhook == "incomingGroupParticipantsUpdate":
-        _traiter_groupe_participants(payload)
+        _msg_executor.submit(_traiter_groupe_participants, payload)
         return jsonify({"status": "ok"}), 200
 
     if type_webhook not in ("incomingMessageReceived", "incomingAPIMessageReceived"):
@@ -7538,7 +7555,8 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
 
     if group_id:
         try:
-            _traiter_commande_groupe(wa, texte, group_id)
+            group_name = (payload.get("senderData") or {}).get("chatName", "")
+            _traiter_commande_groupe(wa, texte, group_id, group_name)
         except Exception as e:
             log.error(f"Erreur commande groupe {group_id} : {e}")
         return
@@ -8966,7 +8984,9 @@ def _purger_sessions_expirees():
             store.pop(k, None)
     for k in [k for k, v in list(_sessions_config.items())
               if now - v.get("ts", 0) > SESSION_TIMEOUT]:
-        _sessions_config.pop(k, None)
+        sess = _sessions_config.pop(k, None)
+        if sess:
+            _groupes_intro_envoyes.discard(sess.get("group_id", ""))
 
 
 def _sauvegarder_sessions():
