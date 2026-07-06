@@ -152,12 +152,11 @@ GREENAPI_WEBHOOK_SECRET = os.getenv("GREENAPI_WEBHOOK_SECRET", "")  # Token secr
 GREENAPI_BASE           = os.getenv("GREENAPI_BASE", "https://api.green-api.com")
 
 # ── Validation credentials Green API au démarrage ─────────────────────────
-import logging as _log_startup
 if not GREENAPI_WEBHOOK_SECRET:
-    _log_startup.getLogger(__name__).error(
+    logging.getLogger(__name__).error(
         "❌ GREENAPI_WEBHOOK_SECRET manquant — webhook sera refusé en 503")
 if not GREENAPI_INSTANCE_ID or not GREENAPI_TOKEN:
-    _log_startup.getLogger(__name__).error(
+    logging.getLogger(__name__).error(
         "❌ GREENAPI_INSTANCE_ID / GREENAPI_TOKEN manquants — envoi impossible")
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────
@@ -6562,6 +6561,39 @@ def _auto_inscrire_participants(conn, tontine_id: int, participants: list) -> in
     return inscrits
 
 
+def _envoyer_config_dm_admins(admins_list: list, group_id: str, nom_groupe: str,
+                               participants: list = None) -> int:
+    """DM la Question 1/3 à chaque admin éligible du groupe et crée sa session config.
+    Retourne le nombre de DMs envoyés."""
+    sent = 0
+    for admin_wa, admin_name in admins_list:
+        if est_owner(admin_wa) or est_admin(admin_wa):
+            continue
+        prenom = admin_name.split()[0] if admin_name else ""
+        salut  = f" {prenom}" if prenom else ""
+        with _sessions_lock:
+            if admin_wa in _sessions_config:
+                continue
+            _sessions_config[admin_wa] = {
+                "group_id":   group_id,
+                "group_name": nom_groupe,
+                "etape":      "montant",
+                "data":       {"participants": participants or []},
+                "ts":         time_module.time(),
+            }
+        time_module.sleep(1)
+        wa_prive(admin_wa,
+            f"Bonjour{salut} ! Je suis TontineBot Pro dans *{nom_groupe}*.\n\n"
+            "Configurez votre tontine en *3 questions*.\n\n"
+            "Question *1/3*\n\n"
+            "Quel est le *montant de cotisation* ? (en FCFA)\n"
+            "Exemple : *5000*\n\n"
+            "_TontineBot Pro - BADF Ltd_"
+        )
+        sent += 1
+    return sent
+
+
 def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
     """
     Bot ajouté dans un groupe WhatsApp.
@@ -6691,30 +6723,7 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                   f"Groupe:{group_id} Nom:{nom_groupe} (pas d'admin détecté)")
         return
 
-    for admin_wa, admin_name in admins_list:
-        if est_owner(admin_wa) or est_admin(admin_wa):
-            continue
-        prenom = admin_name.split()[0] if admin_name else ""
-        salut  = f" {prenom}" if prenom else ""
-        with _sessions_lock:
-            if admin_wa in _sessions_config:
-                continue
-            _sessions_config[admin_wa] = {
-                "group_id":   group_id,
-                "group_name": nom_groupe,
-                "etape":      "montant",
-                "data":       {"participants": participants or []},
-                "ts":         time_module.time(),
-            }
-        _t.sleep(1)
-        wa_prive(admin_wa,
-            f"Bonjour{salut} ! Je suis TontineBot Pro dans *{nom_groupe}*.\n\n"
-            "Configurez votre tontine en *3 questions*.\n\n"
-            "Question *1/3*\n\n"
-            "Quel est le *montant de cotisation* ? (en FCFA)\n"
-            "Exemple : *5000*\n\n"
-            "_TontineBot Pro - BADF Ltd_"
-        )
+    _envoyer_config_dm_admins(admins_list, group_id, nom_groupe, participants)
 
     wa_owner(
         f"NOUVEAU GROUPE : *{nom_groupe}*\n"
@@ -7104,43 +7113,23 @@ def _traiter_commande_groupe(wa: str, texte: str, group_id: str, group_name: str
     finally:
         release_conn(conn)
 
-    # ── Groupe sans tontine → déclencher config via DM aux admins ────────────
-    with _sessions_lock:
-        already_triggered = group_id in _groupes_intro_envoyes
-        if not already_triggered:
-            already_triggered = any(
-                v.get("group_id") == group_id
-                for v in _sessions_config.values()
-            )
-        if not tontine and not already_triggered:
-            _groupes_intro_envoyes.add(group_id)
+    already_triggered = False
+    if not tontine:
+        with _sessions_lock:
+            already_triggered = group_id in _groupes_intro_envoyes
+            if not already_triggered:
+                already_triggered = any(
+                    v.get("group_id") == group_id
+                    for v in _sessions_config.values()
+                )
+            if not already_triggered:
+                _groupes_intro_envoyes.add(group_id)
 
     if not tontine and not already_triggered:
         admins_list, grp_name = _greenapi_get_group_admins(group_id)
         nom = grp_name or group_name or group_id
         if admins_list:
-            for admin_wa, admin_name in admins_list:
-                if est_owner(admin_wa) or est_admin(admin_wa):
-                    continue
-                prenom = admin_name.split()[0] if admin_name else ""
-                salut  = f" {prenom}" if prenom else ""
-                with _sessions_lock:
-                    if admin_wa in _sessions_config:
-                        continue
-                    _sessions_config[admin_wa] = {
-                        "group_id":   group_id,
-                        "group_name": nom,
-                        "etape":      "montant",
-                        "data":       {"participants": []},
-                        "ts":         time_module.time(),
-                    }
-                wa_prive(admin_wa,
-                    f"Bonjour{salut} ! Je suis TontineBot Pro dans *{nom}*.\n\n"
-                    "Question *1/3*\n\n"
-                    "Quel est le *montant de cotisation* ? (en FCFA)\n"
-                    "Exemple : *5000*\n\n"
-                    "_TontineBot Pro - BADF Ltd_"
-                )
+            _envoyer_config_dm_admins(admins_list, group_id, nom)
             _wa_send_group_chatid(group_id,
                 "🔧 *Configuration TontineBot Pro en cours...*\n"
                 "L'administrateur reçoit les instructions en message privé.\n\n"
@@ -7489,8 +7478,7 @@ def _greenapi_telecharger_media(url_media: str) -> bytes:
 def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id: str = ""):
     """Parse un événement Green API et route vers la logique métier."""
     if not group_id and not est_owner(wa):
-        wa_norm = normaliser_numero(wa)
-        if not get_membre_by_wa(wa) and not est_admin(wa) and wa_norm not in _sessions_config:
+        if not get_membre_by_wa(wa) and not est_admin(wa) and wa not in _sessions_config:
             return
 
     # ── Capture passive du pushname ──────────────────────────────────────────
