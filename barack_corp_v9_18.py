@@ -6561,13 +6561,14 @@ def _auto_inscrire_participants(conn, tontine_id: int, participants: list) -> in
     return inscrits
 
 
+@healed
 def _envoyer_config_dm_admins(admins_list: list, group_id: str, nom_groupe: str,
                                participants: list = None) -> int:
     """DM la Question 1/3 à chaque admin éligible du groupe et crée sa session config.
     Retourne le nombre de DMs envoyés."""
     sent = 0
     for admin_wa, admin_name in admins_list:
-        if est_owner(admin_wa) or est_admin(admin_wa):
+        if est_owner(admin_wa):
             continue
         prenom = admin_name.split()[0] if admin_name else ""
         salut  = f" {prenom}" if prenom else ""
@@ -6581,16 +6582,19 @@ def _envoyer_config_dm_admins(admins_list: list, group_id: str, nom_groupe: str,
                 "data":       {"participants": participants or []},
                 "ts":         time_module.time(),
             }
-        time_module.sleep(1)
-        wa_prive(admin_wa,
-            f"Bonjour{salut} ! Je suis TontineBot Pro dans *{nom_groupe}*.\n\n"
-            "Configurez votre tontine en *3 questions*.\n\n"
-            "Question *1/3*\n\n"
-            "Quel est le *montant de cotisation* ? (en FCFA)\n"
-            "Exemple : *5000*\n\n"
-            "_TontineBot Pro - BADF Ltd_"
-        )
-        sent += 1
+        try:
+            wa_prive(admin_wa,
+                f"Bonjour{salut} ! Je suis TontineBot Pro dans *{nom_groupe}*.\n\n"
+                "Configurez votre tontine en *3 questions*.\n\n"
+                "Question *1/3*\n\n"
+                "Quel est le *montant de cotisation* ? (en FCFA)\n"
+                "Exemple : *5000*\n\n"
+                "_TontineBot Pro - BADF Ltd_"
+            )
+            sent += 1
+        except Exception:
+            with _sessions_lock:
+                _sessions_config.pop(admin_wa, None)
     return sent
 
 
@@ -6702,12 +6706,6 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
     # Tontine inconnue → config via DM aux admins réels du groupe
     release_conn(conn)
 
-    _wa_send_group_chatid(group_id,
-        "🔧 *Configuration TontineBot Pro en cours...*\n"
-        "L'administrateur du groupe reçoit les instructions en message privé.\n\n"
-        "_TontineBot Pro - BADF Ltd_"
-    )
-
     admins_list, grp_name = _greenapi_get_group_admins(group_id)
     nom_groupe = grp_name or group_name or group_id
 
@@ -6723,6 +6721,11 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                   f"Groupe:{group_id} Nom:{nom_groupe} (pas d'admin détecté)")
         return
 
+    _wa_send_group_chatid(group_id,
+        "🔧 *Configuration TontineBot Pro en cours...*\n"
+        "L'administrateur du groupe reçoit les instructions en message privé.\n\n"
+        "_TontineBot Pro - BADF Ltd_"
+    )
     _envoyer_config_dm_admins(admins_list, group_id, nom_groupe, participants)
 
     wa_owner(
@@ -7114,27 +7117,27 @@ def _traiter_commande_groupe(wa: str, texte: str, group_id: str, group_name: str
         release_conn(conn)
 
     already_triggered = False
-    if not tontine:
-        with _sessions_lock:
-            already_triggered = group_id in _groupes_intro_envoyes
-            if not already_triggered:
-                already_triggered = any(
-                    v.get("group_id") == group_id
-                    for v in _sessions_config.values()
-                )
-            if not already_triggered:
-                _groupes_intro_envoyes.add(group_id)
+    with _sessions_lock:
+        already_triggered = group_id in _groupes_intro_envoyes
+        if not tontine and not already_triggered:
+            already_triggered = any(
+                v.get("group_id") == group_id
+                for v in _sessions_config.values()
+            )
+        if not already_triggered:
+            _groupes_intro_envoyes.add(group_id)
 
     if not tontine and not already_triggered:
         admins_list, grp_name = _greenapi_get_group_admins(group_id)
         nom = grp_name or group_name or group_id
         if admins_list:
-            _envoyer_config_dm_admins(admins_list, group_id, nom)
             _wa_send_group_chatid(group_id,
                 "🔧 *Configuration TontineBot Pro en cours...*\n"
                 "L'administrateur reçoit les instructions en message privé.\n\n"
                 "_TontineBot Pro - BADF Ltd_"
             )
+            participants_list = _greenapi_get_group_members(group_id)
+            _envoyer_config_dm_admins(admins_list, group_id, nom, participants_list)
         else:
             wa_groupe(group_id, MSG_INTRO_GROUPE)
         log_audit("CONFIG_GROUPE_DECLENCHE",
