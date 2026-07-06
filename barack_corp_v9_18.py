@@ -6898,7 +6898,7 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
 
         _t.sleep(2)
         if data.get("deja_en_cours"):
-            participants = data.get("participants", [])
+            participants = data.get("participants") or _greenapi_get_group_members(group_id)
             inscrits = 0
             if participants:
                 conn2 = get_conn()
