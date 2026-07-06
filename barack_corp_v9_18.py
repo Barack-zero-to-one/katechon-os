@@ -41,7 +41,7 @@ AMEN. AMEN. AMEN. (Vibration 3-6-9 activée).
 ║   ✅ Changement de numéro (CHGNUM 250 FCFA) — handler complet           ║
 ║   ✅ Admins groupe enregistrés automatiquement en base                   ║
 ║   ✅ Bot rejoint groupe → se présente + enregistre admins                ║
-║   ✅ creer_tontine() / inscrire_dans_tontine() — menu admin opt.12      ║
+║   ✅ creer_tontine() / inscrire_dans_tontine() — config auto DM admin   ║
 ║   ✅ jours_avance respecté dans suspension 72h                           ║
 ║   ✅ SELECT FOR UPDATE PostgreSQL sur cashout (verrou natif DB)          ║
 ║   ✅ Codes USSD MTN/Orange configurables par tontine                     ║
@@ -150,6 +150,15 @@ GREENAPI_INSTANCE_ID    = os.getenv("GREENAPI_INSTANCE_ID",    "")  # Ex: 123456
 GREENAPI_TOKEN          = os.getenv("GREENAPI_TOKEN",          "")  # API token Green API
 GREENAPI_WEBHOOK_SECRET = os.getenv("GREENAPI_WEBHOOK_SECRET", "")  # Token secret webhook (256 bits)
 GREENAPI_BASE           = os.getenv("GREENAPI_BASE", "https://api.green-api.com")
+
+# ── Validation credentials Green API au démarrage ─────────────────────────
+import logging as _log_startup
+if not GREENAPI_WEBHOOK_SECRET:
+    _log_startup.getLogger(__name__).error(
+        "❌ GREENAPI_WEBHOOK_SECRET manquant — webhook sera refusé en 503")
+if not GREENAPI_INSTANCE_ID or not GREENAPI_TOKEN:
+    _log_startup.getLogger(__name__).error(
+        "❌ GREENAPI_INSTANCE_ID / GREENAPI_TOKEN manquants — envoi impossible")
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────
 GROUPE_ADMIN = "Admin Barack Corp"
@@ -1239,7 +1248,7 @@ def init_db():
             log.error(f"❌ Tables manquantes après init_db : {manquantes}")
             log.error("   Exécutez create_db_v917.sql manuellement dans psql.")
         else:
-            log.info("✅ PostgreSQL TontineBot Pro v9.17 — toutes les tables présentes.")
+            log.info("✅ PostgreSQL TontineBot Pro v9.18 — toutes les tables présentes.")
     except Exception as e:
         log.error(f"❌ init_db commit ERREUR : {e}")
         conn.rollback()
@@ -3807,9 +3816,6 @@ MENU_ADMIN_TXT = (
     "1️⃣1️⃣ *Ajouter membre*\n"
     "    └ Inscrire quelqu'un manuellement\n"
     "\n"
-    "1️⃣2️⃣ *Créer tontine*\n"
-    "    └ Nouvelle tontine\n"
-    "\n"
     "1️⃣3️⃣ *Ordre initial*\n"
     "    └ Définir le 1er ordre de bouffage\n"
     "\n"
@@ -4874,166 +4880,6 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         sess["etape"] = "menu"
         return f"✅ *{nom}* ({num}) ajouté et inscrit dans *{tnom}*. ID:{mid}"
 
-    # ── Option 12 : Créer une nouvelle tontine (owner uniquement) ─────────
-    elif texte == "12" and sess["etape"] == "menu":
-        if not est_owner(wa):
-            return "🚫 Cette option est réservée au *propriétaire* du système."
-        sess["etape"] = "creer_tontine_nom"
-        sess["data"]["new_tontine"] = {}
-        return (
-            "🏛️ *CRÉER UNE NOUVELLE TONTINE*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "Étape 1/5 — Entrez le *nom* de la tontine :\n"
-            "_(ex : GOLD_200, HEBDO_ELITE)_"
-        )
-
-    elif sess.get("etape") == "creer_tontine_nom":
-        if texte == "0":
-            sess["etape"] = "menu"
-            return "❌ Annulé."
-        nom = texte.strip().upper().replace(" ", "_")
-        if len(nom) < 3:
-            return "❌ Nom trop court (min 3 caractères)."
-        conn = get_conn()
-        existant = fetchone(conn, "SELECT id FROM tontines WHERE nom=%s", (nom,))
-        release_conn(conn)
-        if existant:
-            return f"❌ Une tontine *{nom}* existe déjà."
-        sess["data"]["new_tontine"]["nom"] = nom
-        sess["etape"] = "creer_tontine_type"
-        return (
-            f"✅ Nom : *{nom}*\n\n"
-            "Étape 2/5 — *Type* de tontine :\n"
-            "J = Journalière\nH = Hebdomadaire\nM = Mensuelle"
-        )
-
-    elif sess.get("etape") == "creer_tontine_type":
-        mapping = {"J": "Journaliere", "H": "Hebdomadaire", "M": "Mensuelle"}
-        t_type  = mapping.get(texte.upper())
-        if not t_type:
-            return "❌ Tapez J, H ou M."
-        sess["data"]["new_tontine"]["type"] = t_type
-        if t_type == "Journaliere":
-            sess["data"]["new_tontine"]["jour_semaine"] = "Lundi"
-            sess["data"]["new_tontine"]["jour_mois"]    = 1
-            sess["etape"] = "creer_tontine_montant"
-            return (
-                f"✅ Type : *Journalière*\n\n"
-                "Étape 3/5 — *Montant de cotisation* par jour (FCFA) :"
-            )
-        elif t_type == "Hebdomadaire":
-            sess["etape"] = "creer_tontine_jour"
-            return (
-                f"✅ Type : *Hebdomadaire*\n\n"
-                "Étape 2b/5 — Quel *jour de la semaine* ?\n\n"
-                "L = Lundi\nM = Mardi\nX = Mercredi\nJ = Jeudi\n"
-                "V = Vendredi\nS = Samedi\nD = Dimanche"
-            )
-        else:  # Mensuelle
-            sess["etape"] = "creer_tontine_jour"
-            return (
-                f"✅ Type : *Mensuelle*\n\n"
-                "Étape 2b/5 — Quel *jour du mois* ? (1 à 28)\n"
-                "_(ex : 1 = 1er de chaque mois, 15 = le 15)_"
-            )
-
-    elif sess.get("etape") == "creer_tontine_jour":
-        t_type = sess["data"]["new_tontine"]["type"]
-        if t_type == "Hebdomadaire":
-            mapping_j = {"L":"Lundi","M":"Mardi","X":"Mercredi","J":"Jeudi",
-                         "V":"Vendredi","S":"Samedi","D":"Dimanche"}
-            jour = mapping_j.get(texte.strip().upper())
-            if not jour:
-                return "❌ Tapez L, M, X, J, V, S ou D."
-            sess["data"]["new_tontine"]["jour_semaine"] = jour
-            sess["data"]["new_tontine"]["jour_mois"]    = 1
-            label_jour = f"*{jour}*"
-        else:  # Mensuelle
-            try:
-                j = int(texte.strip())
-                if not (1 <= j <= 28):
-                    return "❌ Entrez un nombre entre 1 et 28."
-            except ValueError:
-                return "❌ Entrez un nombre entre 1 et 28."
-            sess["data"]["new_tontine"]["jour_mois"]    = j
-            sess["data"]["new_tontine"]["jour_semaine"] = "Lundi"
-            label_jour = f"le *{j}* de chaque mois"
-        sess["etape"] = "creer_tontine_montant"
-        return (
-            f"✅ Jour : {label_jour}\n\n"
-            "Étape 3/5 — *Montant de cotisation* par période (FCFA) :"
-        )
-
-    elif sess.get("etape") == "creer_tontine_montant":
-        try:
-            montant = int(texte.replace(" ", "").replace(",", ""))
-            if montant < 100:
-                return "❌ Montant minimum : 100 FCFA."
-        except ValueError:
-            return "❌ Entrez un nombre entier."
-        sess["data"]["new_tontine"]["montant"] = montant
-        sess["etape"] = "creer_tontine_groupe"
-        return (
-            f"✅ Montant : *{montant:,} FCFA*\n\n"
-            "Étape 4/5 — *Nom du groupe WhatsApp* exact :\n"
-            "_(tel qu'il apparaît dans WhatsApp)_\n"
-            "Tapez *AUCUN* si pas encore créé."
-        )
-
-    elif sess.get("etape") == "creer_tontine_groupe":
-        groupe = "" if texte.upper() == "AUCUN" else texte.strip()
-        sess["data"]["new_tontine"]["groupe"] = groupe
-        sess["etape"] = "creer_tontine_caution"
-        return (
-            f"✅ Groupe : *{groupe or 'Non défini'}*\n\n"
-            "Étape 5/5 — *% de caution* (retenu au bouffage, libéré si paiement continu) :\n"
-            "_(Défaut recommandé : 10)_\n"
-            "Entrez un nombre entre 5 et 30 :"
-        )
-
-    elif sess.get("etape") == "creer_tontine_caution":
-        try:
-            pct = int(texte)
-            if not (5 <= pct <= 30):
-                return "❌ Entre 5 et 30."
-        except ValueError:
-            return "❌ Entrez un nombre."
-        d    = sess["data"]["new_tontine"]
-        try:
-            tid_nouveau = creer_tontine(
-                nom=d["nom"], type_tontine=d["type"],
-                montant_place=d["montant"],
-                groupe_wa=d["groupe"], caution_pourcent=pct,
-                jour_semaine=d.get("jour_semaine","Lundi"),
-                jour_mois=d.get("jour_mois",1)
-            )
-            if d["groupe"]:
-                conn_g = get_conn()
-                try:
-                    q(conn_g, "UPDATE tontines SET whatsapp_groupe=%s WHERE id=%s",
-                      (d["groupe"], tid_nouveau))
-                    conn_g.commit()
-                finally:
-                    release_conn(conn_g)
-            sess["etape"] = "menu"
-            sess["tontine_id"]  = tid_nouveau
-            sess["tontine_nom"] = d["nom"]
-            return (
-                f"🎉 *TONTINE CRÉÉE — BADF Ltd*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🏦 Nom : *{d['nom']}*\n"
-                f"📅 Type : {d['type']}\n"
-                f"💰 Cotisation : {d['montant']:,} FCFA\n"
-                f"👥 Groupe : {d['groupe'] or 'À configurer'}\n"
-                f"🔒 Caution : {pct}%\n"
-                f"ID : {tid_nouveau}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Utilisez *admin {d['nom']}* pour gérer cette tontine."
-            )
-        except Exception as e:
-            sess["etape"] = "menu"
-            return f"❌ Erreur création : {e}"
-
     # ── Option 13 : Saisir l'ordre initial de bouffage ───────────────────
     elif texte == "13" and sess["etape"] == "menu":
         conn    = get_conn()
@@ -5543,7 +5389,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             "• Menu expire après 5 min d'inactivité\n"
             "• Toutes actions sont auditées\n"
             "• Options 1-15 disponibles\n"
-            "• Options 12-13 : owner uniquement\n"
+            "• Option 13 : owner uniquement\n"
             "• KICK nécessite que le bot soit admin du groupe\n"
             f"• Owner : {OWNER_WA}"
         )
@@ -6775,8 +6621,9 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                 f"*Orange Money* / *MTN MoMo* associés seront bloqués auprès des opérateurs "
                 f"et une procédure judiciaire sera engagée.\n\n"
                 f"📊 *BARÈME DES FRAIS ET PÉNALITÉS*\n\n"
-                f"• *FMP (Frais de Maintenance) :* 2 % par cotisation "
-                f"_(Financement des serveurs ultra-sécurisés)_\n"
+                + (f"• *FMP (Frais de Maintenance) :* {int(FRAIS_FMP*100)} % par cotisation "
+                f"_(Financement des serveurs ultra-sécurisés)_\n" if FRAIS_FMP > 0 else "")
+                + (
                 f"• *Discipline Collective (Retard) :* 150 FCFA / jour\n"
                 f"• *Réactivation :* 1 000 FCFA "
                 f"_(Après 48h de suspension sans cotisation et sans avoir prévenu l'Administrateur)_\n"
@@ -6788,7 +6635,7 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                 f"tous réseaux (Orange, MTN, Camtel).\n\n"
                 f"_Avec TontineBot Pro, construisons ensemble une épargne forte, transparente "
                 f"et sans stress. Bienvenue dans l'ère de la tontine professionnelle._"
-            )
+            ))
             if admin:
                 _t.sleep(1)
                 wa_prive(admin["whatsapp"], msg_dm_admin_bienvenue(tontine["nom"]))
@@ -6819,34 +6666,53 @@ def _bot_ajoute_groupe(group_id: str, group_name: str, participants: list = []):
                   f"Groupe:{group_id} Tontine:{tontine['nom']} (nouvelle)")
         return
 
-    # Tontine inconnue → config via DM
+    # Tontine inconnue → config via DM aux admins réels du groupe
     release_conn(conn)
 
-    msg_grp = (
-        "TontineBot Pro vient d'etre ajoute dans ce groupe.\n"
-        "Configuration en cours...\n"
-        "L'administrateur recoit les instructions en message prive.\n\n"
-        "_TontineBot Pro - BADF Ltd_"
-    )
-    _wa_send_group_chatid(group_id, msg_grp)
-
-    wa_owner(
-        "NOUVEAU GROUPE DETECTE\n\n"
-        f"Nom : {group_name}\n"
-        f"ID  : {group_id}\n\n"
-        "L'admin va configurer la tontine en DM.\n"
+    _wa_send_group_chatid(group_id,
+        "🔧 *Configuration TontineBot Pro en cours...*\n"
+        "L'administrateur du groupe reçoit les instructions en message privé.\n\n"
         "_TontineBot Pro - BADF Ltd_"
     )
 
-    _sessions_config[f"pending_{group_id}"] = {
-        "group_id":   group_id,
-        "group_name": group_name,
-        "etape":      "attente_admin",
-        "data":       {"participants": participants or []},
-        "ts":         time_module.time()
-    }
+    admins_list, grp_name = _greenapi_get_group_admins(group_id)
+    nom_groupe = grp_name or group_name or group_id
+
+    if not admins_list:
+        wa_owner(
+            f"⚠️ Nouveau groupe : *{nom_groupe}*\n"
+            f"ID : {group_id}\n\n"
+            "Aucun admin détecté via API.\n"
+            "Demandez à l'admin de m'écrire en DM pour configurer.\n\n"
+            "_TontineBot Pro - BADF Ltd_"
+        )
+        log_audit("BOT_ADDED_GROUPE_INCONNU",
+                  f"Groupe:{group_id} Nom:{nom_groupe} (pas d'admin détecté)")
+        return
+
+    for admin_wa, admin_name in admins_list:
+        prenom = admin_name.split()[0] if admin_name else ""
+        salut  = f" {prenom}" if prenom else ""
+        with _sessions_lock:
+            _sessions_config[admin_wa] = {
+                "group_id":   group_id,
+                "group_name": nom_groupe,
+                "etape":      "montant",
+                "data":       {"participants": participants or []},
+                "ts":         time_module.time(),
+            }
+        _t.sleep(1)
+        wa_prive(admin_wa,
+            f"Bonjour{salut} ! Je suis TontineBot Pro dans *{nom_groupe}*.\n\n"
+            "Configurez votre tontine en *3 questions*.\n\n"
+            "Question *1/3*\n\n"
+            "Quel est le *montant de cotisation* ? (en FCFA)\n"
+            "Exemple : *5000*\n\n"
+            "_TontineBot Pro - BADF Ltd_"
+        )
+
     log_audit("BOT_ADDED_GROUPE_INCONNU",
-              f"Groupe:{group_id} Nom:{group_name}")
+              f"Groupe:{group_id} Nom:{nom_groupe} Admins:{len(admins_list)} DMs envoyés")
 
 
 def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
@@ -6859,33 +6725,7 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
     sess = _sessions_config.get(wa_norm)
 
     if not sess:
-        pending = {
-            k: v for k, v in _sessions_config.items()
-            if k.startswith("pending_") and v["etape"] == "attente_admin"
-            and time_module.time() - v["ts"] < 1800
-        }
-        if not pending:
-            return None
-        if len(pending) == 1:
-            key  = list(pending.keys())[0]
-            sess = pending[key]
-            _sessions_config[wa_norm] = dict(sess, etape="montant",
-                                             ts=time_module.time())
-            del _sessions_config[key]
-            sess = _sessions_config[wa_norm]
-            return (
-                f"Bonjour ! Configuration de la tontine *{sess['group_name']}*\n\n"
-                "Question *1/4*\n\n"
-                "Quel est le *montant de cotisation* ? (en FCFA)\n"
-                "Exemple : *5000*\n\n"
-                "_TontineBot Pro - BADF Ltd_"
-            )
-        else:
-            lignes = ["Plusieurs groupes en attente :"]
-            for i, (k, v) in enumerate(pending.items(), 1):
-                lignes.append(f"{i}. *{v['group_name']}*")
-            lignes.append("Tapez le numero du groupe.")
-            return "\n".join(lignes)
+        return None
 
     if not session_valide(_sessions_config, wa_norm):
         _sessions_config.pop(wa_norm, None)
@@ -6904,12 +6744,11 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
         data["montant"] = montant
         sess["etape"]   = "type"
         sess["data"]    = data
-        fmp = int(montant * 0.02)
         return (
-            f"Montant : *{montant:,} FCFA* (FMP BADF : {fmp:,} FCFA)\n\n"
-            "Question *2/4*\n\n"
+            f"✅ Montant : *{montant:,} FCFA*\n\n"
+            "Question *2/3*\n\n"
             "Type de tontine ?\n"
-            "1 - Journaliere\n"
+            "1 - Journalière\n"
             "2 - Hebdomadaire\n"
             "3 - Mensuelle\n\n"
             "Tapez *1*, *2* ou *3*"
@@ -6926,8 +6765,8 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
             data["jour_mois"]    = 1
             sess["etape"] = "en_cours"
             return (
-                f"Type : *Journalière*\n\n"
-                "Question *3/4*\n\n"
+                f"✅ Type : *Journalière*\n\n"
+                "Question *3/3*\n\n"
                 "Cette tontine est-elle *déjà en cours* ?\n"
                 "(Les membres cotisent déjà, même sans le bot)\n\n"
                 "Répondez *OUI* ou *NON*"
@@ -6935,16 +6774,16 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
         elif data["type"] == "Hebdomadaire":
             sess["etape"] = "jour"
             return (
-                f"Type : *Hebdomadaire*\n\n"
-                "Question *2b/4* — Quel *jour de la semaine* ?\n\n"
+                f"✅ Type : *Hebdomadaire*\n\n"
+                "Question *2b/3* — Quel *jour de la semaine* ?\n\n"
                 "L = Lundi\nM = Mardi\nX = Mercredi\nJ = Jeudi\n"
                 "V = Vendredi\nS = Samedi\nD = Dimanche"
             )
         else:  # Mensuelle
             sess["etape"] = "jour"
             return (
-                f"Type : *Mensuelle*\n\n"
-                "Question *2b/4* — Quel *jour du mois* ? (1 à 28)\n"
+                f"✅ Type : *Mensuelle*\n\n"
+                "Question *2b/3* — Quel *jour du mois* ? (1 à 28)\n"
                 "_(ex : 1 = 1er de chaque mois)_"
             )
 
@@ -6973,7 +6812,7 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
         sess["data"]  = data
         return (
             f"✅ Jour : {label_j}\n\n"
-            "Question *3/4*\n\n"
+            "Question *3/3*\n\n"
             "Cette tontine est-elle *déjà en cours* ?\n"
             "(Les membres cotisent déjà, même sans le bot)\n\n"
             "Répondez *OUI* ou *NON*"
@@ -6990,7 +6829,6 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
         sess["etape"] = "collecte"
         sess["data"]  = data
         return (
-            "Question *4/4*\n\n"
             "Votre *numéro de collecte* MTN/Orange Money ?\n"
             "(Le numéro où les membres virent l'argent)\n\n"
             "Format : *+237690123456*"
@@ -7083,18 +6921,16 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
             f"Montant: {montant:,}F | Admin: {wa_norm}"
         )
 
-        fmp = int(montant * 0.02)
         msg_statut = (
             "Membres auto-inscrits — KYC reporté à la fin du cycle."
             if data.get("deja_en_cours")
             else "Message d'intro envoyé dans le groupe."
         )
         return (
-            f"Tontine *{group_name}* configurée !\n\n"
+            f"🎉 Tontine *{group_name}* configurée !\n\n"
             f"Type    : *{type_t}*\n"
             f"Montant : *{montant:,} FCFA*\n"
-            f"Collecte: *{num}*\n"
-            f"FMP BADF: *{fmp:,} FCFA*\n\n"
+            f"Collecte: *{num}*\n\n"
             f"{msg_statut}\n\n"
             "Envoyez maintenant la liste de passage :\n"
             "*01- Prenom JJ/MM/AA*\n"
@@ -7242,10 +7078,9 @@ def _groupe_liste_cotisations(wa_admin: str, group_id: str) -> str:
     return "\n".join(lignes)
 
 
-def _traiter_commande_groupe(wa: str, texte: str, group_id: str):
+def _traiter_commande_groupe(wa: str, texte: str, group_id: str, group_name: str = ""):
     """Dispatch des commandes texte admin dans le groupe @g.us.
-    Si le groupe n'a pas de tontine liée, envoie l'intro automatiquement
-    au premier message reçu (une seule fois par groupe)."""
+    Si le groupe n'a pas de tontine liée, déclenche la config automatique via DM admin."""
     global _groupes_intro_envoyes
 
     conn = get_conn()
@@ -7256,14 +7091,48 @@ def _traiter_commande_groupe(wa: str, texte: str, group_id: str):
     finally:
         release_conn(conn)
 
-    # ── Auto-intro : groupe inconnu → présentation automatique ───────────────
+    # ── Groupe sans tontine → déclencher config via DM aux admins ────────────
     with _sessions_lock:
-        already_sent = group_id in _groupes_intro_envoyes
-        if not tontine and not already_sent:
+        already_triggered = group_id in _groupes_intro_envoyes
+        if not already_triggered:
+            already_triggered = any(
+                v.get("group_id") == group_id
+                for v in _sessions_config.values()
+            )
+        if not tontine and not already_triggered:
             _groupes_intro_envoyes.add(group_id)
-    if not tontine and not already_sent:
-        wa_groupe(group_id, MSG_INTRO_GROUPE)
-        log_audit("INTRO_GROUPE_AUTO", f"Groupe:{group_id} Trigger:{wa}", wa)
+
+    if not tontine and not already_triggered:
+        admins_list, grp_name = _greenapi_get_group_admins(group_id)
+        nom = grp_name or group_name or group_id
+        if admins_list:
+            for admin_wa, admin_name in admins_list:
+                prenom = admin_name.split()[0] if admin_name else ""
+                salut  = f" {prenom}" if prenom else ""
+                with _sessions_lock:
+                    _sessions_config[admin_wa] = {
+                        "group_id":   group_id,
+                        "group_name": nom,
+                        "etape":      "montant",
+                        "data":       {},
+                        "ts":         time_module.time(),
+                    }
+                wa_prive(admin_wa,
+                    f"Bonjour{salut} ! Je suis TontineBot Pro dans *{nom}*.\n\n"
+                    "Question *1/3*\n\n"
+                    "Quel est le *montant de cotisation* ? (en FCFA)\n"
+                    "Exemple : *5000*\n\n"
+                    "_TontineBot Pro - BADF Ltd_"
+                )
+            _wa_send_group_chatid(group_id,
+                "🔧 *Configuration TontineBot Pro en cours...*\n"
+                "L'administrateur reçoit les instructions en message privé.\n\n"
+                "_TontineBot Pro - BADF Ltd_"
+            )
+        else:
+            wa_groupe(group_id, MSG_INTRO_GROUPE)
+        log_audit("CONFIG_GROUPE_DECLENCHE",
+                  f"Groupe:{group_id} Admins:{len(admins_list) if admins_list else 0}", wa)
         return
 
     cmd = texte.strip().lower()
@@ -7422,6 +7291,40 @@ def _greenapi_get_group_members(group_chatid: str, exclude: str = "") -> list:
         return []
 
 
+def _greenapi_get_group_admins(group_chatid: str) -> tuple:
+    """getGroupData → ([(wa_num, pushname)], group_name) pour les admins uniquement."""
+    if not GREENAPI_INSTANCE_ID or not GREENAPI_TOKEN:
+        return [], ""
+    url = (
+        f"{GREENAPI_BASE}/waInstance{GREENAPI_INSTANCE_ID}"
+        f"/getGroupData/{GREENAPI_TOKEN}"
+    )
+    try:
+        r = requests.post(url, json={"groupId": group_chatid}, timeout=15)
+        if r.status_code != 200:
+            log.warning(f"getGroupData admins → {r.status_code}")
+            return [], ""
+        data = r.json()
+        group_name = data.get("subject", "")
+        admins = []
+        for p in data.get("participants", []):
+            if not isinstance(p, dict):
+                continue
+            if not (p.get("isAdmin") or p.get("isSuperAdmin")):
+                continue
+            pid = p.get("id", "")
+            if not pid or not pid.endswith("@c.us"):
+                continue
+            num = normaliser_numero(pid.split("@")[0])
+            if num:
+                pushname = (p.get("name") or p.get("pushName") or "").strip()
+                admins.append((num, pushname))
+        return admins, group_name
+    except Exception as e:
+        log.error(f"getGroupData admins : {e}")
+        return [], ""
+
+
 def _traiter_groupe_participants(payload: dict):
     """
     Dispatch incomingGroupParticipantsUpdate.
@@ -7569,7 +7472,8 @@ def _greenapi_telecharger_media(url_media: str) -> bytes:
 def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id: str = ""):
     """Parse un événement Green API et route vers la logique métier."""
     if not group_id and not est_owner(wa):
-        if not get_membre_by_wa(wa) and not est_admin(wa):
+        wa_norm = normaliser_numero(wa)
+        if not get_membre_by_wa(wa) and not est_admin(wa) and wa_norm not in _sessions_config:
             return
 
     # ── Capture passive du pushname ──────────────────────────────────────────
@@ -7637,6 +7541,12 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
             _traiter_commande_groupe(wa, texte, group_id)
         except Exception as e:
             log.error(f"Erreur commande groupe {group_id} : {e}")
+        return
+
+    # ── Config tontine via DM — intercept avant menu normal ──────────────────
+    config_rep = traiter_config_tontine(wa, texte)
+    if config_rep:
+        wa_prive(wa, config_rep)
         return
 
     if est_owner(wa):
@@ -9055,8 +8965,7 @@ def _purger_sessions_expirees():
                   if now - v.get("ts", 0) > SESSION_TIMEOUT]:
             store.pop(k, None)
     for k in [k for k, v in list(_sessions_config.items())
-              if (k.startswith("pending_") and now - v.get("ts", 0) > 1800)
-              or (not k.startswith("pending_") and now - v.get("ts", 0) > SESSION_TIMEOUT)]:
+              if now - v.get("ts", 0) > SESSION_TIMEOUT]:
         _sessions_config.pop(k, None)
 
 
@@ -10074,7 +9983,7 @@ def health():
         db_ok = False
     return jsonify({
         "status":    "ok" if db_ok else "db_error",
-        "version":   "9.17",
+        "version":   "9.18",
         "timestamp": datetime.now().isoformat(),
         "db":        "ok" if db_ok else "error",
     }), 200 if db_ok else 503
@@ -10691,7 +10600,7 @@ def demarrer_scheduler():
     scheduler.add_job(alerter_risques_bouffage_imminent, "cron", hour=5, minute=33, id="risque_fugue_predictif")
 
     scheduler.start()
-    log.info("✅ Scheduler TontineBot Pro v9.17 démarré.")
+    log.info("✅ Scheduler TontineBot Pro v9.18 démarré.")
     return scheduler
 
 
@@ -10701,7 +10610,7 @@ def demarrer_scheduler():
 
 if __name__ == "__main__":
     log.info("━" * 60)
-    log.info("🚀 TontineBot Pro v9.17 — Barack & AI Development Facilities Ltd")
+    log.info("🚀 TontineBot Pro v9.18 — Barack & AI Development Facilities Ltd")
     log.info("   BADF Ltd — Cameroun 🇨🇲")
     log.info("━" * 60)
     log.info(f"   Owner           : {OWNER_WA}")
@@ -10727,7 +10636,7 @@ if __name__ == "__main__":
     init_pool()
     init_db()
     _restaurer_sessions()
-    log.info("✅ Base de données v9.17 initialisée.")
+    log.info("✅ Base de données v9.18 initialisée.")
 
     # ── 3. Détecter l'URL publique ngrok ──────────────────────────────────
     log.info("🌐 Détection URL publique ngrok...")
@@ -10743,7 +10652,7 @@ if __name__ == "__main__":
     demarrer_scheduler()
     log.info("✅ Scheduler démarré.")
     log.info("━" * 60)
-    log.info("🟢 TontineBot Pro v9.17 — Prêt à recevoir des messages.")
+    log.info("🟢 TontineBot Pro v9.18 — Prêt à recevoir des messages.")
     log.info("━" * 60)
 
     def _shutdown_bot():
