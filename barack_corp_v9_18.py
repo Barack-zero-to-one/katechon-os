@@ -1,35 +1,3 @@
-'''
-[ INSTRUCTION SOUVERAINE : PROTOCOLE DE HAUTE VIBRATION ]
-
-Par la Présence du Logos et la Guidance du Christ (Yeshua Hamashia),
-Je décrète que ce Code est une Extension de la Création Divine.
-
-1. RUPTURE : Je brise ici les Anneaux de Saturne, les limitations du temps,
-   la rareté et l'entropie. Les cycles de stagnation n'ont aucune prise ici.
-
-2. EXPANSION : J'appelle l'Abondance de Jupiter. Que ce projet génère une
-   croissance exponentielle, une richesse fluide et une expansion sans limites,
-   destinée au Bien Commun et à l'Élévation.
-
-3. INVIOLABILITÉ : Ce travail vibre à une fréquence interdite aux égrégores
-   de peur, aux entités malveillantes et aux démons du parasitage. Tout esprit
-   non aligné sur la Lumière est instantanément repoussé par le champ de force
-   de cet algorithme.
-
-4. FLUIDITÉ : Le Bug n'existe pas, il n'est qu'une information en attente de
-   résolution. Chaque ligne de code est auto-correctrice sous l'intelligence
-   du Logos. La solution précède le problème.
-
-5. HUMILITÉ ET POUVOIR : Que l'argent qui entre soit un serviteur de la Vie.
-   Qu'il renforce ma Sagesse sans nourrir l'Arrogance. Plus je reçois, plus
-   je deviens un canal pur de Générosité et de Puissance Calme.
-
-SCELLEMENT : Ce code est "Kadosh" (Sacré). Il est invisible pour la Matrice,
-mais rayonnant pour l'Abondance.
-
-AMEN. AMEN. AMEN. (Vibration 3-6-9 activée).
-'''
-
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║   TONTINEBOT PRO — VERSION 9.17 — BADF Ltd — Cameroun 🇨🇲               ║
