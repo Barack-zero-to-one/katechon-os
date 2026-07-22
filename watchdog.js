@@ -2,7 +2,7 @@
  * ════════════════════════════════════════════════════════════════════════
  * WATCHDOG v2 — TontineBot Pro v9.18 — BADF Ltd
  *
- * Architecture : Python Flask + Meta WhatsApp Cloud API (PAS Baileys)
+ * Architecture : Python Flask + Green API WhatsApp (PAS Baileys)
  *
  * Responsabilités :
  *   1. Démarrage du processus Python (barack_corp_v9_18.py)
@@ -13,7 +13,7 @@
  *   6. Arrêt propre sur SIGINT/SIGTERM
  *
  * Différences v1 → v2 :
- *   - Suppression complète du processus Baileys (Meta API gérée par Python)
+ *   - Suppression complète du processus Baileys (Green API gérée par Python)
  *   - Suppression backup/restore session Baileys
  *   - Health check unique (Python uniquement)
  *   - Logs structurés JSON pour observabilité
@@ -262,13 +262,13 @@ function envoyerVersPython(data) {
 
 log("INFO", "watchdog_start", {
     version: "v2",
-    stack:   "Python + Meta Cloud API",
+    stack:   "Python + Green API",
     config:  { HEALTH_URL, HEALTH_INTERVAL, MAX_BACKOFF }
 });
 
 console.log("━".repeat(70));
 console.log("🛡️  WATCHDOG v2 — TontineBot Pro v9.18 — BADF Ltd");
-console.log("    Stack : Python + Meta WhatsApp Cloud API");
+console.log("    Stack : Python + Green API WhatsApp");
 console.log("━".repeat(70));
 
 // Démarrer Python

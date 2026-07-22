@@ -30,7 +30,7 @@ echo ============================================ >> logs\autostart.log
 echo.
 echo ============================================
 echo   TontineBot Pro v9.18 — BADF Ltd
-echo   Stack : Python + Meta Cloud API
+echo   Stack : Python + Green API WhatsApp
 echo ============================================
 echo.
 
