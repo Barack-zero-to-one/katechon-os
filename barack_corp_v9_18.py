@@ -5813,8 +5813,13 @@ def _verifier_liberation_caution(conn, membre_id: int, tontine_id: int):
 # ══════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
-app.secret_key  = os.getenv("FLASK_SECRET_KEY", "badf_local_dev_secret_2026")
-_DASH_TOKEN     = os.getenv("DASHBOARD_TOKEN",  "badf_dash_2026")
+# Pas de fallback hardcodé : ce fichier est sur un repo public GitHub, donc
+# toute valeur par défaut ici serait un secret public. Si la variable est
+# absente, secret_key vaut "" — Flask lève à la première utilisation de la
+# session, et le check fail-closed dans __main__ empêche même de démarrer.
+app.secret_key  = os.getenv("FLASK_SECRET_KEY", "")
+_DASH_TOKEN     = os.getenv("DASHBOARD_TOKEN",  "")
+_HEALTH_TOKEN   = os.getenv("HEALTH_TOKEN",     "")
 _BOT_START_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_start")
 try:
     with open(_BOT_START_FILE) as _f:
@@ -9936,7 +9941,7 @@ def dashboard():
     """Dashboard local temps réel — Bloomberg terminal UI."""
     tok = request.args.get("token", "")
     if not session.get("dash_ok"):
-        if tok != _DASH_TOKEN:
+        if not _DASH_TOKEN or not hmac.compare_digest(tok, _DASH_TOKEN):
             return Response(
                 '<html><body style="background:#060606;color:#ff4444;'
                 'font-family:monospace;padding:40px">'
@@ -9956,7 +9961,7 @@ def dashboard():
 
 @app.route("/health", methods=["GET"])
 def health():
-    if request.args.get("token", "") != os.getenv("HEALTH_TOKEN", "badf_health_2026"):
+    if not _HEALTH_TOKEN or not hmac.compare_digest(request.args.get("token", ""), _HEALTH_TOKEN):
         return jsonify({"status": "unauthorized"}), 401
     try:
         conn = get_conn()
@@ -10108,7 +10113,7 @@ def _check_greenapi():
 @app.route("/health/detail", methods=["GET"])
 def health_detail():
     """Endpoint santé détaillé pour monitoring externe."""
-    if request.args.get("token", "") != os.getenv("HEALTH_TOKEN", "badf_health_2026"):
+    if not _HEALTH_TOKEN or not hmac.compare_digest(request.args.get("token", ""), _HEALTH_TOKEN):
         return jsonify({"status": "unauthorized"}), 401
     with _health_lock:
         state = dict(_health_state)
@@ -10609,6 +10614,27 @@ if __name__ == "__main__":
     log.info("   • Admin confirme en 1 tap")
     log.info("   • Bot notifie le membre")
     log.info("━" * 60)
+
+    # ── 0. Validation fail-closed des secrets critiques ─────────────────────
+    # Ce fichier est sur un repo GitHub public : aucune valeur par défaut
+    # hardcodée n'est acceptable pour ces secrets. Si l'un d'eux est absent
+    # ou trop faible, on refuse de démarrer plutôt que de tourner avec un
+    # secret devinable par quiconque lit le code source.
+    _SECRETS_CRITIQUES = {
+        "FLASK_SECRET_KEY": app.secret_key,
+        "DASHBOARD_TOKEN":  _DASH_TOKEN,
+        "HEALTH_TOKEN":     _HEALTH_TOKEN,
+    }
+    _secrets_manquants = [nom for nom, val in _SECRETS_CRITIQUES.items() if not val]
+    _secrets_faibles   = [nom for nom, val in _SECRETS_CRITIQUES.items() if val and len(val) < 16]
+    if _secrets_manquants or _secrets_faibles:
+        if _secrets_manquants:
+            log.error(f"❌ ARRÊT — variable(s) d'environnement manquante(s) : {', '.join(_secrets_manquants)}")
+        if _secrets_faibles:
+            log.error(f"❌ ARRÊT — secret(s) trop court(s) (min 16 caractères) : {', '.join(_secrets_faibles)}")
+        log.error("   Configurez-les dans le fichier ENV avant de redémarrer. Aucun fallback par défaut n'existe (repo public).")
+        exit(1)
+    log.info("✅ Secrets critiques validés (présents, ≥16 caractères).")
 
     # ── 1. Vérification PostgreSQL ─────────────────────────────────────────
     log.info("🔍 Vérification PostgreSQL...")

@@ -29,7 +29,15 @@ const http      = require("http");
 // ── Configuration ─────────────────────────────────────────────────────────
 const PYTHON_CMD        = "python";
 const PYTHON_SCRIPT     = "barack_corp_v9_18.py";
-const HEALTH_TOKEN      = process.env.HEALTH_TOKEN || "badf_health_2026";
+
+// Pas de fallback hardcodé : ce fichier est sur un repo GitHub public, donc
+// une valeur par défaut ici serait un secret public utilisable par n'importe
+// qui contre l'endpoint /health exposé sur internet via ngrok.
+const HEALTH_TOKEN      = process.env.HEALTH_TOKEN || "";
+if (!HEALTH_TOKEN) {
+    console.error("[FATAL] HEALTH_TOKEN absent de l'environnement — voir fichier ENV. Arrêt.");
+    process.exit(1);
+}
 const HEALTH_URL        = `http://localhost:5000/health?token=${HEALTH_TOKEN}`;
 const WEBHOOK_URL       = "http://localhost:5000/webhook/whatsapp";
 const QUEUE_FILE        = "logs/message_queue.json";
