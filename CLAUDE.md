@@ -1,4 +1,4 @@
-# CLAUDE.md — BADF Ltd — KATECHON OS — TontineBot Pro v9.18
+# CLAUDE.md — BADF Ltd — KATECHON OS 
 
 ## Identité du projet
 
@@ -187,7 +187,7 @@ Ne jamais hardcoder dans le code. Ne jamais commiter.
 - **Origine** : Yaoundé, Cameroun
 - **Développement** : solo, 3 mois
 - **Objectif immédiat** : Y Combinator Fall 2026 (deadline 27 juillet 2026)
-- **Priorité 36 jours** : trouver un groupe de 50 membres qui cotisent 750 FCFA/jour → traction réelle pour YC
+
 
 ---
 
