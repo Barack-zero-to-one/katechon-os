@@ -84,9 +84,6 @@ FRAIS_CHGNUM     = 250     # Changement de numéro Mobile Money
 NUMERO_BADF_MTN    = os.getenv("NUMERO_BADF_MTN",    "+237683603113")  # MTN MoMo
 NUMERO_BADF_ORANGE = os.getenv("NUMERO_BADF_ORANGE", "+237692100606")  # Orange Money
 
-# ── Anti-fraude screenshots ────────────────────────────────────────────────
-DELAI_SCREENSHOT_HEURES = 24   # Screenshot plus vieux que 24h → rejeté
-
 # ── Anti-fraude général ────────────────────────────────────────────────────
 MAX_TENTATIVES_FRAUDE   = 3
 RATE_LIMIT_MAX          = 10
@@ -95,13 +92,6 @@ DELAI_SUSPENSION_HEURES = 72
 DELAI_ALERTE_FUGUE      = 3
 DELAI_BLOCAGE_FUGUE     = 7
 BACKUP_ROTATION         = 7
-
-# ── Horaires automatiques ─────────────────────────────────────────────────
-HEURE_RAPPEL_5H        = 5
-HEURE_RAPPEL_MATIN     = 8
-HEURE_RAPPEL_14H       = 14
-HEURE_DEMANDE_BOUFFAGE = 17
-HEURE_RAPPORT_OWNER    = 21
 HEURE_BACKUP           = 2
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────
@@ -181,21 +171,6 @@ COUNTRY_CONFIG = {
 
 DEFAULT_COUNTRY = "CM"  # Cameroun par défaut
 
-def country_for_tontine(tontine: dict) -> dict:
-    """Retourne la config pays pour une tontine donnée."""
-    code = (tontine or {}).get("pays_code") or (tontine or {}).get("country_code", DEFAULT_COUNTRY)
-    return COUNTRY_CONFIG.get(code, COUNTRY_CONFIG[DEFAULT_COUNTRY])
-
-def country_for_phone(numero: str) -> dict:
-    """Détecte le pays à partir du préfixe du numéro de téléphone."""
-    if not numero:
-        return COUNTRY_CONFIG[DEFAULT_COUNTRY]
-    n = numero.lstrip("+")
-    for code, cfg in COUNTRY_CONFIG.items():
-        if n.startswith(cfg["phone_local"]):
-            return cfg
-    return COUNTRY_CONFIG[DEFAULT_COUNTRY]
-
 
 # ── Webhook public (ngrok ou domaine) ────────────────────────────────────
 NGROK_DOMAIN  = os.getenv("NGROK_DOMAIN", "lennox-unbiographical-jasmin.ngrok-free.dev")
@@ -234,19 +209,11 @@ MSG_DISSUASION = (
 )
 
 
-
 def msg_dissuasion(wa: str = "", raison: str = "") -> str:
     """Génère MSG_DISSUASION avec une référence dossier unique."""
     import time as _t
     ref = hashlib.sha256(f"{wa}{raison}{_t.time()}".encode()).hexdigest()[:12].upper()
     return MSG_DISSUASION.replace("{ref}", ref)
-
-MSG_ANIF_ALERTE = (
-    "🚨 *ALERTE ANIF — DOSSIER OUVERT*\n"
-    "Votre dossier a été transmis à l'ANIF Cameroun.\n"
-    "Référence : {ref}\n"
-    "Régularisez immédiatement pour clôturer ce dossier."
-)
 
 def msg_intro_groupe(nom_tontine: str, montant: int,
                      heure_bouffage: str = "17:00",
@@ -826,17 +793,10 @@ def init_db():
             CHECK(statut_global IN
                 ('En_attente_kyc','Actif','Suspendu_global','Banni')),
         adhesion_payee      INTEGER NOT NULL DEFAULT 0,
-        -- KYC 5 étapes
+        -- Onboarding (prénom seul)
         kyc_complet         INTEGER NOT NULL DEFAULT 0,
         kyc_etape           INTEGER NOT NULL DEFAULT 0,
         kyc_nom             TEXT,
-        kyc_cni             TEXT    UNIQUE,
-        kyc_naissance       TEXT,
-        kyc_ville           TEXT,
-        kyc_photo_recu      INTEGER NOT NULL DEFAULT 0,
-        -- Mineur (< 18 ans) : pas de CNI, acte de naissance
-        kyc_mineur          INTEGER NOT NULL DEFAULT 0,
-        kyc_acte_naissance  TEXT,    -- Numéro acte de naissance (mineur)
         -- Finances
         solde_dette         INTEGER NOT NULL DEFAULT 0,
         dette_ira_total     INTEGER NOT NULL DEFAULT 0,
@@ -1122,8 +1082,6 @@ def init_db():
     # Un SAVEPOINT garantit que l'échec d'une migration n'affecte pas les autres
     # et ne met PAS la transaction globale en état ERROR.
     for migration in [
-        "ALTER TABLE membres ADD COLUMN IF NOT EXISTS kyc_mineur INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE membres ADD COLUMN IF NOT EXISTS kyc_acte_naissance TEXT",
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS nickname TEXT",
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS date_bouffage DATE",
         "ALTER TABLE liste_passage ALTER COLUMN membre_id DROP NOT NULL",
@@ -1152,13 +1110,16 @@ def init_db():
                'Avertissement_1','Avertissement_2','Blocage','Interception_caution',
                'TrustGraph_orange','TrustGraph_rouge'
            ))""",
+        # ── Capture numéro Mobile Money bouffage (BOUFFAGE_VIRE) ────────────
+        "ALTER TABLE bouffages_manuels ADD COLUMN IF NOT EXISTS operateur_cashout TEXT",
     ]:
         try:
             c.execute("SAVEPOINT mig")
             c.execute(migration)
             c.execute("RELEASE SAVEPOINT mig")
-        except Exception:
+        except Exception as e:
             c.execute("ROLLBACK TO SAVEPOINT mig")
+            log.error(f"❌ Migration en échec (ignorée, SAVEPOINT isolé) : {migration[:80]} : {e}")
 
 
     # ── INDEX PERFORMANCES ────────────────────────────────────────────────
@@ -1188,13 +1149,20 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_audit_date       ON audit_log(date_heure DESC)",
         "CREATE INDEX IF NOT EXISTS idx_cotis_pending    ON cotisations_manuelles(tontine_id,date_soumission DESC) WHERE statut='En_attente'",
         # Hash unique anti-recyclage déjà UNIQUE mais on confirme l'index
-        "CREATE INDEX IF NOT EXISTS idx_screenshot_date  ON screenshots_hash(date_creation DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_screenshot_date  ON screenshots_hash(created_at DESC)",
     ]
+    # SAVEPOINT par index — sans ça, un seul CREATE INDEX en échec empoisonne
+    # toute la transaction PostgreSQL en cours et le conn.commit() plus bas se
+    # comporte comme un rollback silencieux, annulant TOUTES les migrations et
+    # tous les index précédents sans lever la moindre exception Python.
     for idx in indexes:
         try:
+            c.execute("SAVEPOINT idx")
             c.execute(idx)
-        except Exception:
-            pass
+            c.execute("RELEASE SAVEPOINT idx")
+        except Exception as e:
+            c.execute("ROLLBACK TO SAVEPOINT idx")
+            log.error(f"❌ Index en échec (ignoré, SAVEPOINT isolé) : {idx[:80]} : {e}")
 
     try:
         conn.commit()
@@ -1226,62 +1194,6 @@ def init_db():
 # ══════════════════════════════════════════════════════════════════════════
 # FONCTIONS MÉTIER — CRÉATION TONTINE / INSCRIPTION MEMBRES
 # ══════════════════════════════════════════════════════════════════════════
-
-def creer_tontine(nom: str, type_tontine: str, montant_place: int,
-                  groupe_wa: str = "",
-                  capacite_max: int = 2000,
-                  heure_limite: str = "18:00",
-                  caution_pourcent: int = 10,
-                  jour_semaine: str = "Lundi",
-                  jour_mois: int = 1) -> int:
-    """
-    Crée une nouvelle tontine en base.
-    Retourne l'ID de la tontine créée.
-    """
-    conn = get_conn()
-    cur  = q(conn, """
-        INSERT INTO tontines
-            (nom, type_tontine, montant_place,
-             whatsapp_groupe, capacite_max, heure_limite, caution_pourcent,
-             jour_semaine, jour_mois)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-    """, (nom, type_tontine, montant_place,
-          groupe_wa or None, capacite_max, heure_limite, caution_pourcent,
-          jour_semaine, jour_mois))
-    tid = cur.fetchone()[0]
-    conn.commit()
-    release_conn(conn)
-    log.info(f"✅ Tontine créée : {nom} (ID:{tid})")
-    log_audit("TONTINE_CREEE", f"{nom} | {type_tontine} | {montant_place}F")
-    return tid
-
-
-def inscrire_membre(nom: str, whatsapp: str, kyc_ref: str = "") -> int:
-    """
-    Inscrit un nouveau membre en base (sans KYC complet).
-    Retourne l'ID du membre.
-    """
-    conn     = get_conn()
-    whatsapp = normaliser_numero(whatsapp)
-    # Vérifier doublon
-    existant = fetchone(conn, "SELECT id FROM membres WHERE whatsapp=%s", (whatsapp,))
-    if existant:
-        release_conn(conn)
-        raise ValueError(f"Numéro {whatsapp} déjà enregistré (ID:{existant['id']}).")
-    kyc_hash = hashlib.sha256(
-        f"{nom.upper().strip()}{whatsapp}{kyc_ref}".encode()
-    ).hexdigest()
-    cur = q(conn, """
-        INSERT INTO membres
-            (nom_complet, kyc_hash, whatsapp, adhesion_payee, statut_global)
-        VALUES (%s,%s,%s,1,'En_attente_kyc') RETURNING id
-    """, (nom.strip(), kyc_hash, whatsapp))
-    mid = cur.fetchone()[0]
-    conn.commit()
-    release_conn(conn)
-    log.info(f"✅ Membre inscrit : {nom} ({whatsapp}) ID:{mid}")
-    log_audit("INSCRIPTION", f"{nom} | KYC:{kyc_hash[:16]}...", whatsapp)
-    return mid
 
 
 def inscrire_dans_tontine(membre_id: int, tontine_id: int,
@@ -1546,60 +1458,6 @@ def format_montant(montant: int, pays_code: str = "CM") -> str:
     """
     devise = get_pays(pays_code).get("devise", "FCFA")
     return f"{montant:,} {devise}".replace(",", " ")
-
-
-def detecter_pays_par_indicatif(numero: str) -> str:
-    """
-    Détecte le code pays à partir du numéro WhatsApp normalisé.
-    +237693969773 → 'CM'
-    +221701234567 → 'SN'
-    +225071234567 → 'CI'
-    """
-    if not numero or not numero.startswith("+"):
-        return "CM"
-    indicatifs = {
-        "+237": "CM",
-        "+221": "SN",
-        "+225": "CI",
-    }
-    for ind, code in indicatifs.items():
-        if numero.startswith(ind):
-            return code
-    return "CM"
-
-
-def normaliser_numero_intl(numero: str, pays_code: str = "CM") -> str:
-    """
-    Normalisation paramétrable selon le pays.
-    Cameroun : 9 chiffres après +237
-    Sénégal  : 9 chiffres après +221
-    Côte d'Ivoire : 10 chiffres après +225
-    """
-    if not numero:
-        return numero
-    n = numero.strip()
-    if "@" in n: n = n.split("@")[0]
-    if ":" in n: n = n.split(":")[0]
-    n = re.sub(r"[^\d+]", "", n)
-    if n.startswith("00"):
-        n = "+" + n[2:]
-    if not n.startswith("+"):
-        n = "+" + n
-    pays = get_pays(pays_code)
-    indicatif = pays.get("indicatif", "+237")
-    longueur  = pays.get("longueur_num", 9)
-    # Si numéro court (sans indicatif) → ajouter celui du pays
-    digits = n.lstrip("+")
-    if len(digits) == longueur:
-        n = indicatif + digits
-    return n
-
-
-
-
-def get_timezone_pays(pays_code: str = "CM") -> str:
-    """Timezone IANA d'un pays (pour scheduler dynamique par tontine)."""
-    return get_pays(pays_code).get("timezone", "Africa/Douala")
 
 
 def calculer_frais(montant_brut: int, heure: time,
@@ -2438,8 +2296,10 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
         f"  Elle vous sera restituée à la fin du cycle si vous\n"
         f"  continuez à cotiser normalement.\n\n"
         f"*III. INSTRUCTIONS*\n\n"
-        f"  Envoyez votre numéro Mobile Money (MTN ou Orange)\n"
-        f"  pour recevoir le virement.\n\n"
+        f"  Envoyez votre numéro Mobile Money, précédé de l'opérateur :\n\n"
+        f"    *MTN +237690XXXXXX*\n"
+        f"  ou\n"
+        f"    *ORANGE +237699XXXXXX*\n\n"
         f"  ⏱ Vous avez *2 heures* pour répondre.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"_Réf. COBAC R-2019/01 — Barack & AI Development Facilities Ltd_"
@@ -2468,32 +2328,140 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
     return bouffage_id
 
 
+def traiter_reponse_numero_bouffage(wa: str, texte: str, membre: dict):
+    """
+    Intercepte la réponse d'un bénéficiaire de bouffage manuel à qui on a
+    demandé son numéro Mobile Money (déclenché par declencher_bouffage_manuel).
+
+    Volontairement SANS session en mémoire : le bénéficiaire a 2h pour
+    répondre, largement au-delà de SESSION_TIMEOUT (300s) — l'état est lu
+    directement dans bouffages_manuels.statut='En_attente'.
+
+    Retourne None si rien à faire (laisser le dispatcher normal continuer),
+    ou une chaîne de réponse sinon.
+    """
+    conn = get_conn()
+    try:
+        bouffage = fetchone(conn, """
+            SELECT bm.*, t.nom AS tontine_nom
+            FROM bouffages_manuels bm JOIN tontines t ON t.id = bm.tontine_id
+            WHERE bm.membre_id=%s AND bm.statut='En_attente'
+            ORDER BY bm.id DESC LIMIT 1
+        """, (membre["id"],))
+        if not bouffage:
+            return None
+
+        match = re.search(r"(\+?237[26789]\d{8}|\b[26789]\d{8}\b)", texte)
+        if not match:
+            # Ne ressemble pas à une tentative de numéro MM → laisser passer
+            # (ex: le membre navigue son menu normalement).
+            return None
+
+        tu = texte.upper()
+        operateur = None
+        if "MTN" in tu:
+            operateur = "cm.mtn"
+        elif "ORANGE" in tu:
+            operateur = "cm.orange"
+
+        n      = match.group(1)
+        numero = normaliser_numero(n if "237" in n else "237" + n)
+        if not operateur or not valider_numero_cameroun(numero):
+            return (
+                "❌ Format non reconnu.\nPrécisez l'opérateur, exemples :\n"
+                "• *MTN +237690123456*\n• *ORANGE +237699123456*"
+            )
+
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute("SELECT * FROM bouffages_manuels WHERE id=%s FOR UPDATE", (bouffage["id"],))
+            b2 = cur.fetchone()
+            if not b2 or b2["statut"] != "En_attente":
+                conn.rollback()
+                return "ℹ️ Ce bouffage a déjà été traité."
+            cur.execute("""UPDATE bouffages_manuels
+                           SET statut='Vire', numero_mm=%s, operateur_cashout=%s
+                           WHERE id=%s""", (numero, operateur, bouffage["id"]))
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            log.error(f"traiter_reponse_numero_bouffage #{bouffage['id']} : {e}")
+            return "❌ Erreur technique. Réessayez ou contactez votre admin."
+        finally:
+            cur.close()
+
+        log_audit("BOUFFAGE_NUMERO_RECU",
+                  f"Bouffage#{bouffage['id']} | Membre#{membre['id']} | {numero} ({operateur})", wa)
+
+        wa_admins_tontine(bouffage["tontine_id"],
+            f"💸 *NUMÉRO REÇU — {bouffage['tontine_nom']}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Bénéficiaire : *{membre['nom_complet']}*\n"
+            f"Montant net  : *{bouffage['montant_net']:,} FCFA*\n"
+            f"Numéro MM    : *{numero}* ({'MTN' if operateur == 'cm.mtn' else 'Orange'})\n\n"
+            f"Effectuez le virement, puis tapez :\n"
+            f"*admin {bouffage['tontine_nom']}* puis *BOUFFAGE_VIRE {bouffage['id']}*\n\n"
+            f"_TontineBot Pro — BADF Ltd_"
+        )
+        return (
+            f"✅ Numéro enregistré : *{numero}*\n\n"
+            f"Votre admin va effectuer le virement sous peu. "
+            f"Vous recevrez une confirmation dès réception."
+        )
+    finally:
+        release_conn(conn)
+
+
 def confirmer_bouffage_vire(conn, bouffage_id: int, admin_wa: str) -> dict:
-    """Admin confirme avoir viré le montant au bénéficiaire."""
-    bouffage = fetchone(conn,
-        "SELECT * FROM bouffages_manuels WHERE id=%s", (bouffage_id,))
-    if not bouffage:
-        return {"ok": False, "msg": "Bouffage introuvable."}
+    """Admin confirme avoir viré le montant au bénéficiaire.
 
-    q(conn, """UPDATE bouffages_manuels
-               SET statut='Confirme', confirme_par=%s, date_confirmation=NOW()
-               WHERE id=%s""", (admin_wa, bouffage_id))
+    SELECT FOR UPDATE + vérif statut='Vire' : verrou pessimiste et
+    idempotence, même schéma que confirmer_cotisation (PATCH 1 v9.18) —
+    empêche un double-tap ou un retry webhook de créer deux transactions.
+    """
+    import psycopg2.extras
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute("SELECT * FROM bouffages_manuels WHERE id=%s FOR UPDATE", (bouffage_id,))
+        bouffage = cur.fetchone()
+        if not bouffage:
+            conn.rollback()
+            return {"ok": False, "msg": "Bouffage introuvable."}
+        if bouffage["statut"] != "Vire":
+            conn.rollback()
+            return {"ok": False, "msg": f"❌ Déjà traité ou pas encore prêt (statut : {bouffage['statut']})."}
 
-    # Marquer le passage comme payé
-    if bouffage["passage_id"]:
-        q(conn, """UPDATE liste_passage SET statut='Paye', date_paiement=NOW()
-                   WHERE id=%s""", (bouffage["passage_id"],))
+        cur.execute("""UPDATE bouffages_manuels
+                       SET statut='Confirme', confirme_par=%s, date_confirmation=NOW()
+                       WHERE id=%s""", (admin_wa, bouffage_id))
 
-    # Enregistrer la transaction
-    q(conn, """
-        INSERT INTO transactions
-            (membre_id, tontine_id, montant_brut, montant_net,
-             type_transaction, statut)
-        VALUES (%s,%s,%s,%s,'Bouffage','Confirmee')
-    """, (bouffage["membre_id"], bouffage["tontine_id"],
-          bouffage["montant_brut"], bouffage["montant_net"]))
+        # Marquer le passage comme payé
+        if bouffage["passage_id"]:
+            cur.execute("""UPDATE liste_passage
+                           SET statut='Paye', date_paiement=NOW(),
+                               numero_cashout=%s, operateur_cashout=%s
+                           WHERE id=%s""",
+                        (bouffage["numero_mm"], bouffage.get("operateur_cashout"),
+                         bouffage["passage_id"]))
 
-    conn.commit()
+        # Enregistrer la transaction
+        cur.execute("""
+            INSERT INTO transactions
+                (membre_id, tontine_id, montant_brut, montant_net,
+                 type_transaction, statut)
+            VALUES (%s,%s,%s,%s,'Bouffage','Confirmee')
+        """, (bouffage["membre_id"], bouffage["tontine_id"],
+              bouffage["montant_brut"], bouffage["montant_net"]))
+
+        conn.commit()
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        log.error(f"❌ confirmer_bouffage_vire #{bouffage_id} échec: {e}")
+        return {"ok": False, "msg": f"Erreur technique: {str(e)[:80]}"}
+    finally:
+        cur.close()
 
     # Notifier le bénéficiaire
     membre = fetchone(conn,
@@ -2574,8 +2542,9 @@ def _verifier_fin_cycle(conn, tontine_id: int):
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Tous les membres ont bouffé. Le cycle {nb_cycles} est clôturé.\n\n"
             f"Que souhaitez-vous faire ?\n\n"
-            f"▪ Tapez *NOUVEAU_CYCLE* pour repartir avec les mêmes membres\n"
-            f"▪ Tapez *CLOTURER* pour clôturer définitivement cette tontine\n\n"
+            f"  1. Tapez *admin {tontine['nom']}*\n"
+            f"  2. Puis tapez *NOUVEAU_CYCLE* pour repartir avec les mêmes membres\n"
+            f"     ou *CLOTURER* pour clôturer définitivement cette tontine\n\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
 
@@ -2621,6 +2590,19 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
         if not tontine:
             release_conn(conn)
             return "❌ Tontine introuvable."
+
+        # Garde-fou : refuser si le cycle actuel n'est pas terminé — sinon
+        # on libère les cautions de membres qui n'ont pas encore bouffé.
+        restants = fetchone(conn, """
+            SELECT COUNT(*) n FROM liste_passage
+            WHERE tontine_id=%s AND cycle=%s AND statut NOT IN ('Paye','Intercepte','Cede')
+        """, (tontine_id, tontine["cycle_actuel"]))["n"]
+        if restants > 0:
+            release_conn(conn)
+            return (
+                f"❌ Le cycle {tontine['cycle_actuel']} n'est pas encore terminé "
+                f"({restants} passage(s) restant(s)). Impossible de lancer un nouveau cycle."
+            )
 
         ancien_cycle = tontine["cycle_actuel"]
         nouveau_cycle = ancien_cycle + 1
@@ -2775,7 +2757,7 @@ def rapport_dettes_badf_admin(admin_wa: str) -> str:
         f"📱 Virement vers :\n"
         f"  MTN    : *{NUMERO_BADF_MTN}*\n"
         f"  Orange : *{NUMERO_BADF_ORANGE}*\n\n"
-        f"Envoyez le code de transaction au bot après le virement.\n\n"
+        f"Envoyez *PAIEMENT_BADF <code>* au bot après le virement.\n\n"
         f"_Barack & AI Development Facilities Ltd_"
     )
 
@@ -2783,63 +2765,68 @@ def rapport_dettes_badf_admin(admin_wa: str) -> str:
 def enregistrer_paiement_badf(admin_wa: str, code_transaction: str) -> str:
     """Admin envoie son code de virement vers BADF — marque les dettes comme payées."""
     conn = get_conn()
-    dettes = fetchall(conn, """
-        SELECT id FROM dettes_badf
-        WHERE admin_wa=%s AND statut='Due'
-    """, (admin_wa,))
+    try:
+        dettes = fetchall(conn, """
+            SELECT id FROM dettes_badf
+            WHERE admin_wa=%s AND statut='Due'
+        """, (admin_wa,))
 
-    if not dettes:
+        if not dettes:
+            return "Aucune dette en cours pour votre compte."
+
+        ids = [d["id"] for d in dettes]
+        q(conn, """UPDATE dettes_badf
+                   SET statut='Payee', date_paiement=NOW(), code_paiement=%s
+                   WHERE id = ANY(%s) AND statut='Due'""",
+          (code_transaction, ids))
+
+        # Rétablir les tontines suspendues pour dette
+        tontines_suspendues = fetchall(conn, """
+            SELECT id, nom, whatsapp_groupe
+            FROM tontines
+            WHERE statut='Suspendue'
+              AND id IN (SELECT tontine_id FROM admins_groupe WHERE whatsapp=%s)
+        """, (normaliser_numero(admin_wa),))
+
+        groupes_retablis = []
+        for t in tontines_suspendues:
+            q(conn, "UPDATE tontines SET statut='Active' WHERE id=%s", (t["id"],))
+            groupes_retablis.append(t["nom"])
+            log_audit("TONTINE_RETABLIE",
+                      f"Tontine:{t['nom']} rétablie après paiement dette BADF | Admin:{admin_wa}")
+
+        conn.commit()
+
+        log_audit("PAIEMENT_BADF_RECU",
+                  f"Admin:{admin_wa} | Code:{code_transaction} | {len(ids)} dettes soldées")
+
+        retabli_txt = ""
+        if groupes_retablis:
+            retabli_txt = (
+                f"\n\n✅ *Service rétabli sur vos tontines :*\n"
+                + "\n".join(f"  • {g}" for g in groupes_retablis)
+                + f"\n\n_TontineBot Pro a été réintégré. "
+                  f"Rajoutez le bot dans les groupes concernés._"
+            )
+            wa_owner(
+                f"✅ *DETTE BADF SOLDÉE*\n"
+                f"Admin : {admin_wa}\n"
+                f"Code  : {code_transaction}\n"
+                f"Dettes soldées : {len(ids)}\n"
+                f"Tontines rétablies : {', '.join(groupes_retablis)}"
+            )
+
+        return (
+            f"✅ *{len(ids)}* dettes soldées. Code : `{code_transaction}`"
+            f"{retabli_txt}"
+        )
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        log.error(f"❌ enregistrer_paiement_badf Admin:{admin_wa} : {e}")
+        return f"❌ Erreur technique : {str(e)[:80]}"
+    finally:
         release_conn(conn)
-        return "Aucune dette en cours pour votre compte."
-
-    ids = [d["id"] for d in dettes]
-    q(conn, f"""UPDATE dettes_badf
-               SET statut='Payee', date_paiement=NOW(), code_paiement=%s
-               WHERE id = ANY(%s)""",
-      (code_transaction, ids))
-
-    # Rétablir les tontines suspendues pour dette
-    tontines_suspendues = fetchall(conn, """
-        SELECT id, nom, whatsapp_groupe
-        FROM tontines
-        WHERE statut='Suspendue'
-          AND id IN (SELECT tontine_id FROM admins_groupe WHERE whatsapp=%s)
-    """, (normaliser_numero(admin_wa),))
-
-    groupes_retablis = []
-    for t in tontines_suspendues:
-        q(conn, "UPDATE tontines SET statut='Active' WHERE id=%s", (t["id"],))
-        groupes_retablis.append(t["nom"])
-        log_audit("TONTINE_RETABLIE",
-                  f"Tontine:{t['nom']} rétablie après paiement dette BADF | Admin:{admin_wa}")
-
-    conn.commit()
-    release_conn(conn)
-
-    log_audit("PAIEMENT_BADF_RECU",
-              f"Admin:{admin_wa} | Code:{code_transaction} | {len(ids)} dettes soldées")
-
-    retabli_txt = ""
-    if groupes_retablis:
-        retabli_txt = (
-            f"\n\n✅ *Service rétabli sur vos tontines :*\n"
-            + "\n".join(f"  • {g}" for g in groupes_retablis)
-            + f"\n\n_TontineBot Pro a été réintégré. "
-              f"Rajoutez le bot dans les groupes concernés._"
-        )
-        wa_owner(
-            f"✅ *DETTE BADF SOLDÉE*\n"
-            f"Admin : {admin_wa}\n"
-            f"Code  : {code_transaction}\n"
-            f"Dettes soldées : {len(ids)}\n"
-            f"Tontines rétablies : {', '.join(groupes_retablis)}"
-        )
-
-    return (
-        f"✅ *{len(ids)}* dettes soldées. Code : `{code_transaction}`"
-        f"{retabli_txt}"
-    )
-
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2972,43 +2959,6 @@ def _wa_send_direct(to: str, body: str) -> bool:
         "message": body[:4096],
     }
     return _wa_request("sendMessage", payload)
-
-
-def wa_envoyer_boutons(to: str, body: str, boutons: list, header: str = None, footer: str = None) -> bool:
-    """
-    Green API ne supporte pas les boutons interactifs natifs.
-    Retombe systématiquement sur un message texte avec les options en clair.
-    """
-    if not boutons:
-        return _wa_send(to, body)
-    options = "\n".join(f"• Tapez *{b.get('titre', '')}*" for b in boutons)
-    texte = body + "\n\n" + options
-    if footer:
-        texte += f"\n\n_{footer}_"
-    return _wa_send(to, texte)
-
-
-def wa_envoyer_liste(to: str, body: str, sections: list, button_text: str = "Choisir",
-                     header: str = None, footer: str = None) -> bool:
-    """
-    Green API ne supporte pas les listes interactives natives.
-    Retombe systématiquement sur un message texte avec les items numérotés.
-    """
-    if not sections:
-        return _wa_send(to, body)
-    lignes = [body]
-    for s in sections:
-        titre_section = s.get("titre", "")
-        if titre_section:
-            lignes.append(f"\n*{titre_section}*")
-        for it in s.get("items", [])[:10]:
-            t = it.get("titre", "")
-            d = it.get("description", "")
-            ligne = f"• *{t}*" + (f" — {d}" if d else "")
-            lignes.append(ligne)
-    if footer:
-        lignes.append(f"\n_{footer}_")
-    return _wa_send(to, "\n".join(lignes))
 
 
 def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
@@ -3186,24 +3136,9 @@ def wa_mentionner_retardataires(nom_groupe: str, retardataires: list,
         wa_prive(r["whatsapp"], msg)
 
 
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # ONBOARDING — COLLECTE NOM
 # ══════════════════════════════════════════════════════════════════════════
-
-def _calculer_age(date_str: str) -> int:
-    """Calcule l'âge à partir d'une date JJ/MM/AAAA. Retourne -1 si invalide."""
-    try:
-        jour, mois, annee = map(int, date_str.strip().split("/"))
-        naissance = datetime(annee, mois, jour)
-        aujourd_hui = datetime.now()
-        age = aujourd_hui.year - naissance.year
-        if (aujourd_hui.month, aujourd_hui.day) < (naissance.month, naissance.day):
-            age -= 1
-        return age
-    except Exception:
-        return -1
 
 
 def _demarrer_collecte_nom(wa: str):
@@ -3359,6 +3294,18 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
         if membre["statut_global"] == "Banni":
             return msg_dissuasion(wa)
         return MENU_MEMBRE_TXT
+
+    # ── Réponse à une demande de numéro Mobile Money (bouffage manuel) ────
+    # Doit s'exécuter AVANT le gate session_valide() ci-dessous : sans
+    # session active (cas normal ici, 2h > SESSION_TIMEOUT=300s), ce gate
+    # renvoie "" et avale silencieusement la réponse du membre.
+    # Le guard etape_courante évite de percuter un flux explicite en cours
+    # (CHGNUM, paiement avancé, signalement...) qui attend aussi du texte libre.
+    etape_courante = (_sessions_membre.get(wa) or {}).get("etape")
+    if membre and etape_courante in (None, "menu"):
+        rep_bouffage = traiter_reponse_numero_bouffage(wa, texte, membre)
+        if rep_bouffage is not None:
+            return rep_bouffage
 
     if not session_valide(_sessions_membre, wa):
         if texte in ("1","2","3","4","5","6","7","8","0"):
@@ -3882,6 +3829,18 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     if not tontines_admin:
         return ""
 
+    # ── Commande PAIEMENT_BADF — solder les dettes BADF (tontine-agnostique) ──
+    # Placée AVANT le blocage >72h ci-dessous : un admin bloqué doit pouvoir
+    # se débloquer lui-même en soldant sa dette. Placée AVANT session_valide()
+    # (plus bas) : la dette est liée au wa admin, pas à une tontine
+    # sélectionnée via "admin [nom]".
+    if texte.upper().startswith("PAIEMENT_BADF "):
+        parts = texte.strip().split(None, 1)
+        code  = parts[1].strip() if len(parts) > 1 else ""
+        if not code:
+            return "❌ Format : *PAIEMENT_BADF <code_transaction>*"
+        return enregistrer_paiement_badf(wa, code)
+
     # ── Blocage si dette BADF >72h impayée (jamais pour le owner) ────────
     if not est_owner(normaliser_numero(wa)):
         conn_chk = get_conn()
@@ -3907,7 +3866,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                 f"Régularisez immédiatement :\n"
                 f"  MTN    : *{NUMERO_BADF_MTN}*\n"
                 f"  Orange : *{NUMERO_BADF_ORANGE}*\n\n"
-                f"Envoyez le *code de transaction* au bot pour débloquer votre accès.\n\n"
+                f"Envoyez *PAIEMENT_BADF <code>* au bot pour débloquer votre accès.\n\n"
                 f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
             )
 
@@ -4260,24 +4219,29 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                        SET statut='Paye', numero_cashout=%s, operateur_cashout=%s,
                            montant_bouffage=%s, date_paiement=NOW()
                        WHERE id=%s""",
-              (numero, operateur, ac_rec["montant"], ac_rec["passage_id"]))
+              (numero, operateur, ac_rec["montant_net"], ac_rec["passage_id"]))
             q(conn, "UPDATE membres SET nb_bouffages=nb_bouffages+1, dernier_bouffage=NOW() WHERE id=%s",
               (ac_rec["membre_id"],))
             conn.commit()
+            # ── Détection fin de cycle — manquait sur ce chemin "forcé" ─────
+            # (confirmer_bouffage_vire l'appelle déjà pour le chemin normal ;
+            # sans ça, un cycle clôturé via cashout forcé ne déclenchait jamais
+            # l'annonce fin-de-cycle / NOUVEAU_CYCLE / CLOTURER).
+            _verifier_fin_cycle(conn, ac_rec["tontine_id"])
             release_conn(conn)
             log_audit("CASHOUT_FORCE",
-                      f"{expire['nom_complet']} | {ac_rec['montant']:,} FCFA → {numero}", wa)
+                      f"{expire['nom_complet']} | {ac_rec['montant_net']:,} FCFA → {numero}", wa)
             # Notifier le bénéficiaire
             wa_prive(expire["whatsapp"],
                 f"✅ *VIREMENT EFFECTUÉ — {tnom}*\n\n"
-                f"*{ac_rec['montant']:,} FCFA* ont été envoyés sur *{numero}*\n"
+                f"*{ac_rec['montant_net']:,} FCFA* ont été envoyés sur *{numero}*\n"
                 f"Réf : `{cashout_ref}`\n\n"
                 f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
             )
             sess["etape"] = "menu"
             return (
                 f"✅ *Cashout forcé effectué*\n\n"
-                f"{expire['nom_complet']} → *{ac_rec['montant']:,} FCFA* → {numero}\n"
+                f"{expire['nom_complet']} → *{ac_rec['montant_net']:,} FCFA* → {numero}\n"
                 f"Réf : `{cashout_ref}`"
             )
         else:
@@ -5291,6 +5255,32 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             f"Il sera déclenché à la prochaine heure de bouffage."
         )
 
+    # ── Commande NOUVEAU_CYCLE — relancer un cycle après fin de cycle ────
+    if texte.upper() == "NOUVEAU_CYCLE" and sess["etape"] == "menu":
+        return demarrer_nouveau_cycle(tid, wa)
+
+    # ── Commande CLOTURER — clôturer définitivement la tontine ───────────
+    if texte.upper() == "CLOTURER" and sess["etape"] == "menu":
+        return cloturer_tontine(tid, wa)
+
+    # ── Commande BOUFFAGE_VIRE — admin confirme le virement après réception
+    # du numéro Mobile Money du bénéficiaire (cf. traiter_reponse_numero_bouffage) ──
+    if texte.upper().startswith("BOUFFAGE_VIRE ") and sess["etape"] == "menu":
+        parts = texte.strip().split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            return "❌ Format : *BOUFFAGE_VIRE 42* (ID du bouffage)"
+        bouffage_id = int(parts[1])
+        conn = get_conn()
+        bouffage = fetchone(conn,
+            "SELECT id FROM bouffages_manuels WHERE id=%s AND tontine_id=%s",
+            (bouffage_id, tid))
+        if not bouffage:
+            release_conn(conn)
+            return f"❌ Bouffage #{bouffage_id} introuvable pour cette tontine."
+        resultat = confirmer_bouffage_vire(conn, bouffage_id, wa)
+        release_conn(conn)
+        return resultat["msg"]
+
     # ── Commande KICK — retirer un membre du groupe ───────────────────────
     # Admin tape : KICK +237XXXXXXXXX  ou  KICK +237XXXXXXXXX raison
     if texte.upper().startswith("KICK ") and sess["etape"] == "menu":
@@ -5382,126 +5372,6 @@ def _get_retardataires(conn, tontine_id: int) -> list:
           )
         ORDER BY m.score_confiance ASC
     """, (tontine_id, tontine_id))
-
-
-def traiter_cotisation(conn, membre_id: int, tontine_id: int,
-                       montant_brut: int, ref: str, ip: str,
-                       nb_periodes: int = 1):
-    """
-    Enregistre une cotisation confirmée par l'admin.
-    - Vérifie le montant (±10% tolérance)
-    - Applique FMP 2% + IRA si retard
-    - Déduit les dettes IRA en attente
-    - Met à jour le score de confiance
-    - Réinitialise les alertes fugue si membre reprend les paiements
-    - Vérifie libération caution
-    """
-    membre  = fetchone(conn, "SELECT * FROM membres WHERE id=%s", (membre_id,))
-    tontine = fetchone(conn, "SELECT * FROM tontines WHERE id=%s", (tontine_id,))
-
-    if not membre or not tontine:
-        raise ValueError(f"Membre {membre_id} ou tontine {tontine_id} introuvable")
-
-    if membre["statut_global"] in ("Banni", "Suspendu_global"):
-        log_audit("COTISATION_BLOQUEE", f"Membre {membre_id} banni/suspendu", ip=ip)
-        wa_prive(membre["whatsapp"],
-            "🚫 Votre compte est suspendu. Payez le code *REACTIV* "
-            f"({FRAIS_REACTIV:,} FCFA) pour vous réactiver, ou contactez un admin.")
-        return
-
-    montant_attendu = tontine["montant_place"] * nb_periodes
-    if abs(montant_brut - montant_attendu) > montant_attendu * 0.10:
-        incrementer_tentatives_fraude(membre_id,
-            f"Montant incorrect : reçu {montant_brut}, attendu {montant_attendu}")
-        raise ValueError(f"Montant incorrect : {montant_brut} vs {montant_attendu}")
-
-    heure = datetime.now().time()
-    frais = calculer_frais(montant_brut, heure, tontine["heure_limite"])
-
-    # ── Déduire dette IRA existante ───────────────────────────────────────
-    dettes_ira = fetchall(conn,
-        "SELECT id, montant FROM dettes_ira WHERE membre_id=%s AND tontine_id=%s AND statut='Due'",
-        (membre_id, tontine_id))
-    dette_totale = sum(d["montant"] for d in dettes_ira)
-    if dette_totale > 0 and frais["montant_net"] >= dette_totale:
-        for d in dettes_ira:
-            q(conn, "UPDATE dettes_ira SET statut='Prelevee', prelevee_le=NOW() WHERE id=%s", (d["id"],))
-        frais["montant_net"] -= dette_totale
-        log.info(f"Dette IRA {dette_totale} FCFA déduite du paiement membre {membre_id}")
-
-    q(conn, """INSERT INTO transactions
-               (membre_id, tontine_id, montant_brut, frais_fmp, frais_ira,
-                montant_net, type_transaction, statut, reference, periodes_payees, ip_source)
-               VALUES (%s,%s,%s,%s,%s,%s,'Cotisation','Confirmee',%s,%s,%s)""",
-      (membre_id, tontine_id, montant_brut, frais["frais_fmp"], frais["frais_ira"],
-       frais["montant_net"], ref, nb_periodes, ip))
-
-    # Mettre à jour les jours d'avance si paiement multiple
-    if nb_periodes > 1:
-        q(conn, "UPDATE adhesions SET jours_avance=jours_avance+%s WHERE membre_id=%s AND tontine_id=%s",
-          (nb_periodes - 1, membre_id, tontine_id))
-
-    # Score de confiance : +2 si à l'heure, rien si IRA
-    if frais["frais_ira"] == 0:
-        _update_score_confiance(conn, membre_id, delta=2, raison="Cotisation à l'heure")
-
-    # Lever suspension retard si elle existait
-    q(conn, "UPDATE membres SET suspendu_retard=0, date_suspension_retard=NULL WHERE id=%s",
-      (membre_id,))
-    q(conn, "UPDATE adhesions SET nb_avertissements_retard=0 WHERE membre_id=%s AND tontine_id=%s",
-      (membre_id, tontine_id))
-    q(conn, "UPDATE alertes_fugue SET traite=1 WHERE membre_id=%s AND tontine_id=%s AND traite=0",
-      (membre_id, tontine_id))
-
-    conn.commit()
-
-    # ── Notification membre — confirmation enrichie ───────────────────────
-    ira_txt  = f"\n⏰ Pénalité retard (IRA) : *-{frais['frais_ira']:,} FCFA*" if frais["frais_ira"] > 0 else ""
-    av_txt   = f" × {nb_periodes} périodes" if nb_periodes > 1 else ""
-    dette_txt = f"\n✅ Dette IRA soldée : *{dette_totale:,} FCFA*" if dette_totale > 0 else ""
-
-    # Récupérer la position du membre dans cette tontine
-    conn2    = get_conn()
-    passage  = fetchone(conn2, """
-        SELECT lp.ordre,
-               (SELECT COUNT(*) FROM liste_passage
-                WHERE tontine_id=%s AND cycle=lp.cycle AND statut='Paye') AS deja_passes,
-               (SELECT COUNT(*) FROM adhesions WHERE tontine_id=%s AND statut='Actif') AS nb_membres
-        FROM liste_passage lp
-        WHERE lp.tontine_id=%s AND lp.membre_id=%s AND lp.statut IN ('En_attente','Notifie')
-        ORDER BY lp.ordre LIMIT 1
-    """, (tontine_id, tontine_id, tontine_id, membre_id))
-
-    if passage:
-        restants   = passage["ordre"] - passage["deja_passes"]
-        rang_txt   = f"\n📍 Votre rang : *{passage['ordre']}* | Passages restants avant vous : *{restants}*"
-    else:
-        rang_txt   = ""
-    release_conn(conn2)
-
-    wa_prive(membre["whatsapp"],
-        f"✅ *COTISATION ENREGISTRÉE — {tontine['nom']}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 *{membre['nom_complet']}*\n"
-        f"📅 {datetime.now().strftime('%d/%m/%Y à %Hh%M')}\n\n"
-        f"💰 Montant : *{montant_brut:,} FCFA*{av_txt}{ira_txt}{dette_txt}\n"
-        f"   *Net crédité au pool : {frais['montant_net']:,} FCFA*\n"
-        f"{rang_txt}\n\n"
-        f"🔐 Réf. transaction : `{ref}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
-    )
-
-    # Rapport owner (IRA uniquement — FMP désactivé au lancement)
-    if frais["frais_ira"] > 0:
-        wa_owner(
-            f"⏰ *IRA — {tontine['nom']}*\n"
-            f"Pénalité retard : +{frais['frais_ira']:,} FCFA\n"
-            f"Réf:{ref}"
-        )
-
-    log_audit("COTISATION", f"Membre {membre_id} — {montant_brut:,} F — {ref}", ip=ip)
-    _verifier_liberation_caution(conn, membre_id, tontine_id)
 
 
 def saisir_caution_et_compenser_groupe(conn, membre_id: int, tontine_id: int,
@@ -6283,188 +6153,6 @@ def _owner_fugitifs_stats() -> str:
         release_conn(conn)
 
 
-
-def webhook_whatsapp_groupe():
-    """
-    Reçoit les événements de groupe WhatsApp via WPPConnect :
-    - Bot ajouté à un groupe → présentation + enregistrement admins
-    - Bot promu admin → enregistrement en base
-    - Admin ajouté/retiré → mise à jour table admins_groupe
-    - Membre quitte le groupe → alerte admins
-    """
-    data   = request.get_json(force=True) or {}
-    event  = data.get("event", "")
-    groupe = data.get("groupe", "")
-    admins = data.get("admins", [])
-
-    log.info(f"Webhook groupe : {event} | {groupe}")
-
-    if event == "bot_added":
-        # Bot ajouté → présentation personnalisée avec nom de la tontine
-        if groupe:
-            conn    = get_conn()
-            tontine = fetchone(conn,
-                "SELECT nom, montant_place, heure_bouffage, heure_ouverture, "
-                "heure_rappel, heure_limite FROM tontines WHERE whatsapp_groupe=%s", (groupe,))
-            release_conn(conn)
-            nom_tontine = tontine["nom"] if tontine else "Barack Corp"
-            if tontine:
-                msg1 = msg_intro_groupe(
-                    nom_tontine     = tontine["nom"],
-                    montant         = tontine["montant_place"],
-                    heure_bouffage  = tontine["heure_bouffage"]  or "17:00",
-                    heure_ouverture = tontine["heure_ouverture"] or "05:00",
-                    heure_rappel    = tontine["heure_rappel"]    or "14:00",
-                    heure_limite    = tontine["heure_limite"]    or "18:00",
-                )
-            else:
-                msg1 = msg_intro_groupe("Barack Corp", 0)
-                log.warning(f"Bot ajouté dans groupe non configuré : {groupe}")
-
-            # Message 1 — Présentation TontineBot Pro
-            wa_groupe(groupe, msg1)
-
-            # Pause courte pour que les 2 messages arrivent dans l'ordre
-            import time as _t; _t.sleep(2)
-
-            # Message 2 — Appel à l'enrôlement KYC + ingénierie sociale
-            wa_groupe(groupe, msg_kyc_groupe(nom_tontine))
-
-            # Message 3 — DM privé à chaque admin pour demander la liste
-            conn2   = get_conn()
-            tontine2 = fetchone(conn2,
-                "SELECT id FROM tontines WHERE whatsapp_groupe=%s", (groupe,))
-            if tontine2:
-                admins = fetchall(conn2,
-                    "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s",
-                    (tontine2["id"],))
-                release_conn(conn2)
-                for adm in admins:
-                    _t.sleep(1)
-                    wa_prive(adm["whatsapp"], msg_dm_admin_bienvenue(nom_tontine))
-                    # Préparer session admin en attente de liste
-                    _sessions_admin[normaliser_numero(adm["whatsapp"])] = {
-                        "etape":      "attente_liste",
-                        "tontine_id": tontine2["id"],
-                        "data":       {},
-                        "ts":         time_module.time()
-                    }
-            else:
-                release_conn(conn2)
-
-            log_audit("BOT_ADDED_GROUPE", f"Groupe: {groupe}")
-
-    elif event == "member_left":
-        # Un membre a quitté le groupe → alerter les admins
-        wa_parti  = normaliser_numero(data.get("whatsapp", ""))
-        conn      = get_conn()
-        tontine   = fetchone(conn,
-            "SELECT id, nom FROM tontines WHERE whatsapp_groupe=%s", (groupe,))
-        if tontine and wa_parti:
-            membre = fetchone(conn,
-                "SELECT nom_complet, statut_global FROM membres WHERE whatsapp=%s",
-                (wa_parti,))
-            nom_parti = membre["nom_complet"] if membre else wa_parti
-            statut    = membre["statut_global"] if membre else "Inconnu"
-            wa_admins_tontine(tontine["id"],
-                f"⚠️ *MEMBRE A QUITTÉ LE GROUPE*\n"
-                f"Tontine : *{tontine['nom']}*\n"
-                f"👤 {nom_parti} ({wa_parti})\n"
-                f"Statut : {statut}\n\n"
-                f"_Vérifiez sa situation dans le menu admin (option 6)._"
-            )
-            log_audit("MEMBRE_QUITTE_GROUPE",
-                      f"{nom_parti} a quitté {groupe}", wa_parti)
-        release_conn(conn)
-
-    elif event == "bot_promoted_admin":
-        conn    = get_conn()
-        tontine = fetchone(conn,
-            "SELECT id FROM tontines WHERE whatsapp_groupe=%s", (groupe,))
-        if tontine:
-            q(conn, "UPDATE tontines SET bot_est_admin=1 WHERE id=%s", (tontine["id"],))
-            conn.commit()
-            log.info(f"✅ Bot promu admin dans tontine {tontine['id']} ({groupe})")
-            log_audit("BOT_ADMIN", f"Tontine {tontine['id']} | groupe {groupe}")
-        else:
-            log.warning(f"Bot promu admin dans groupe non configuré : {groupe}")
-        release_conn(conn)
-
-    elif event == "bot_demoted_admin":
-        # Bot rétrogradé → mise à jour base
-        conn    = get_conn()
-        tontine = fetchone(conn,
-            "SELECT id FROM tontines WHERE whatsapp_groupe=%s", (groupe,))
-        if tontine:
-            q(conn, "UPDATE tontines SET bot_est_admin=0 WHERE id=%s", (tontine["id"],))
-            conn.commit()
-            log_audit("BOT_RETRO", f"Tontine {tontine['id']} | groupe {groupe}")
-        release_conn(conn)
-
-    elif event in ("admin_added", "admins_list"):
-        conn    = get_conn()
-        tontine = fetchone(conn,
-            "SELECT id, nom FROM tontines WHERE whatsapp_groupe=%s", (groupe,))
-
-        if tontine and admins:
-            for admin_wa in admins:
-                admin_norm = normaliser_numero(admin_wa)
-                # Vérifier si cet admin est dans notre base
-                connu = fetchone(conn,
-                    "SELECT whatsapp FROM admins_groupe "
-                    "WHERE tontine_id=%s AND whatsapp=%s",
-                    (tontine["id"], admin_norm))
-
-                if not connu and not est_owner(admin_norm):
-                    # Admin WA promu mais inconnu en base → alerte owner
-                    log_audit("FAUX_ADMIN_DETECTE",
-                              f"Tontine:{tontine['nom']} | {admin_norm} promu admin WA "
-                              f"mais absent de admins_groupe", admin_norm)
-                    wa_owner(
-                        f"🚨 *ALERTE — ADMIN NON AUTORISÉ*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"Un numéro vient d'être promu *admin WhatsApp* "
-                        f"dans un groupe BADF sans être dans votre registre.\n\n"
-                        f"Tontine   : *{tontine['nom']}*\n"
-                        f"Numéro    : *{admin_norm}*\n"
-                        f"Heure     : {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-                        f"⚠️ *Actions recommandées :*\n"
-                        f"1. Vérifiez s'il s'agit d'un admin légitime\n"
-                        f"2. Si oui → ajoutez-le via option 11 du menu admin\n"
-                        f"3. Si non → retirez-lui le statut admin dans le groupe\n\n"
-                        f"_TontineBot Pro — BADF Ltd_"
-                    )
-                    # Alerte aussi aux admins légitimes de cette tontine
-                    wa_admins_tontine(tontine["id"],
-                        f"⚠️ *ALERTE SÉCURITÉ — {tontine['nom']}*\n\n"
-                        f"Le numéro *{admin_norm}* vient d'être promu admin "
-                        f"WhatsApp de ce groupe alors qu'il n'est pas dans "
-                        f"le registre BADF.\n\n"
-                        f"Vérifiez et retirez-lui le statut admin si nécessaire.\n\n"
-                        f"_TontineBot Pro — BADF Ltd_"
-                    )
-
-            enregistrer_admins_groupe(tontine["id"], admins)
-            log.info(f"Admins mis à jour : tontine {tontine['id']} — {len(admins)} admin(s)")
-
-        release_conn(conn)
-
-    elif event == "admin_removed":
-        wa_retire = normaliser_numero(data.get("whatsapp", ""))
-        conn      = get_conn()
-        tontine   = fetchone(conn,
-            "SELECT id FROM tontines WHERE whatsapp_groupe=%s", (groupe,))
-        if tontine and wa_retire:
-            q(conn,
-              "DELETE FROM admins_groupe WHERE tontine_id=%s AND whatsapp=%s",
-              (tontine["id"], wa_retire))
-            conn.commit()
-            log_audit("ADMIN_RETIRE", f"Tontine {tontine['id']} | {wa_retire}")
-        release_conn(conn)
-
-    return jsonify({"status": "ok"}), 200
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # ÉVÉNEMENTS GROUPE — bot ajouté / membre quitte
 # ══════════════════════════════════════════════════════════════════════════
@@ -6938,33 +6626,6 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
     return None
 
 
-def _membre_quitte_groupe(wa_membre: str, group_id: str):
-    """Membre quitte le groupe — alerte les admins."""
-    conn    = get_conn()
-    tontine = fetchone(conn,
-        "SELECT id, nom FROM tontines WHERE whatsapp_groupe=%s", (group_id,))
-    if not tontine:
-        release_conn(conn)
-        return
-    membre = fetchone(conn,
-        "SELECT nom_complet, statut_global FROM membres WHERE whatsapp=%s",
-        (wa_membre,))
-    release_conn(conn)
-
-    nom    = membre["nom_complet"] if membre else wa_membre
-    statut = membre["statut_global"] if membre else "Inconnu"
-
-    wa_admins_tontine(tontine["id"],
-        f"⚠️ *MEMBRE A QUITTÉ LE GROUPE*\n\n"
-        f"Tontine : *{tontine['nom']}*\n"
-        f"Membre  : *{nom}* ({wa_membre})\n"
-        f"Statut  : {statut}\n\n"
-        f"Vérifiez sa situation depuis votre menu admin.\n\n"
-        f"_TontineBot Pro — BADF Ltd_"
-    )
-    log_audit("MEMBRE_QUITTE_GROUPE", f"{nom} | {tontine['nom']}", wa_membre)
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # COMMANDES GROUPE — liste / rappel
 # ══════════════════════════════════════════════════════════════════════════
@@ -7219,7 +6880,6 @@ def _groupe_rappel_manuel(wa_admin: str, group_id: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════
 # WEBHOOK WHATSAPP — META CLOUD API
 # ══════════════════════════════════════════════════════════════════════════
-
 
 
 @app.route("/webhook/whatsapp", methods=["GET"])
@@ -8099,6 +7759,42 @@ def _update_score_confiance(conn, membre_id: int, raison: str,
       (membre_id, avant, apres, apres - avant, raison))
 
 
+POIDS_MAX_TRUST_GRAPH = 145  # somme des poids max des 10 features (25+20+15+15+10+10+5+20+10+15)
+
+
+def _agreger_score_risque_fugue(score_brut: float, features: dict, signaux: list) -> dict:
+    """
+    Fonction pure — aucun accès DB, aucun I/O.
+    Prend le score brut déjà accumulé par les 10 features (échelle 0-145) et
+    produit le résultat final normalisé sur 0-100 : score, niveau, recommandation.
+    Isolée de calculer_score_risque_fugue pour être testable indépendamment
+    du calcul SQL des features (cf. stress_test_katechon.py).
+    """
+    score = score_brut * (100.0 / POIDS_MAX_TRUST_GRAPH)
+    score = min(100, max(0, round(score)))
+
+    if score <= 30:
+        niveau = "vert"
+        recommandation = "Procéder normalement au bouffage."
+    elif score <= 55:
+        niveau = "jaune"
+        recommandation = "Surveillance accrue. Demander confirmation explicite du membre 24h avant."
+    elif score <= 75:
+        niveau = "orange"
+        recommandation = "RISQUE ÉLEVÉ. Recommander caution renforcée à 20%, ou décaler le tour."
+    else:
+        niveau = "rouge"
+        recommandation = "BLOCAGE RECOMMANDÉ. Investigation requise avant tout versement."
+
+    return {
+        "score":          score,
+        "niveau":         niveau,
+        "features":       features,
+        "recommandation": recommandation,
+        "signaux":        signaux,
+    }
+
+
 def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
     """
     Score 0-100 du risque de fugue post-bouffage pour ce membre.
@@ -8114,7 +7810,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
     try:
         membre = fetchone(conn, """
             SELECT id, nom_complet, score_confiance, statut_global,
-                   tentatives_fraude, date_inscription
+                   tentatives_fraude, date_adhesion
             FROM membres WHERE id=%s
         """, (membre_id,))
         tontine = fetchone(conn,
@@ -8199,7 +7895,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
 
         # ── Feature 3 : Score de confiance inversé (poids 15) ──────────────
         # score_confiance va de 0 à 100. On l'inverse en risque.
-        confiance = membre["score_confiance"] or 50
+        confiance = membre["score_confiance"] if membre["score_confiance"] is not None else 50
         confiance_risque = max(0, (50 - confiance) / 50 * 15)
         features["confiance_inversee"] = round(confiance_risque, 1)
         score += confiance_risque
@@ -8230,7 +7926,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             WHERE membre_id=%s AND statut IN ('Actif','Pause')
         """, (membre_id,))["n"]
 
-        anciennete_jours = (datetime.now() - membre["date_inscription"]).days if membre["date_inscription"] else 0
+        anciennete_jours = (datetime.now().date() - membre["date_adhesion"].date()).days if membre["date_adhesion"] else 0
 
         engagement_score = 0
         if nb_tontines == 1 and anciennete_jours < 30:
@@ -8280,8 +7976,8 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
         # Suspensions passées et tentatives de fraude
         nb_suspensions = fetchone(conn, """
             SELECT COUNT(*) AS n FROM sanctions
-            WHERE membre_id=%s AND type_sanction LIKE '%uspension%'
-        """, (membre_id,))["n"]
+            WHERE membre_id=%s AND type_sanction LIKE %s
+        """, (membre_id, "%uspension%"))["n"]
 
         signaux_faibles = 0
         if nb_suspensions > 0:
@@ -8381,36 +8077,10 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             score += position_score
 
         # ── Normalisation et niveau final ───────────────────────────────────
-        # Somme des poids max des 10 features = 145 (25+20+15+15+10+10+5+20+10+15).
-        # On ramène le score brut sur une échelle 0-100 propre avant clamp,
-        # sinon le score plafonnait artificiellement à 100 bien avant que
-        # toutes les features soient au maximum.
-        score = score * (100.0 / 145.0)
-        score = min(100, max(0, round(score)))
-
-        if score <= 30:
-            niveau = "vert"
-            recommandation = "Procéder normalement au bouffage."
-        elif score <= 55:
-            niveau = "jaune"
-            recommandation = "Surveillance accrue. Demander confirmation explicite du membre 24h avant."
-        elif score <= 75:
-            niveau = "orange"
-            recommandation = "RISQUE ÉLEVÉ. Recommander caution renforcée à 20%, ou décaler le tour."
-        else:
-            niveau = "rouge"
-            recommandation = "BLOCAGE RECOMMANDÉ. Investigation requise avant tout versement."
-
-        return {
-            "score":          score,
-            "niveau":         niveau,
-            "features":       features,
-            "recommandation": recommandation,
-            "signaux":        signaux,
-        }
+        return _agreger_score_risque_fugue(score, features, signaux)
 
     except Exception as e:
-        log.error(f"❌ calculer_score_risque_fugue m={membre_id} t={tontine_id} : {e}")
+        log.error(f"❌ calculer_score_risque_fugue m={membre_id} t={tontine_id} : {e}", exc_info=True)
         return {"score": 0, "niveau": "erreur", "features": {}, "recommandation": "", "signaux": []}
 
 
@@ -8442,15 +8112,27 @@ def alerter_risques_bouffage_imminent():
         """)
 
         alertes_par_admin = {}  # admin_wa → liste d'alertes
+        erreurs_par_admin = {}  # admin_wa → liste de membres en échec de calcul
 
         for p in prochains:
             score_dict = calculer_score_risque_fugue(conn, p["membre_id"], p["tontine_id"])
+
+            if score_dict["niveau"] == "erreur":
+                # Échec du calcul — ne JAMAIS traiter comme "zéro risque" (fail-open).
+                # Signale pour revue manuelle, sans pénalité automatique ni score fictif.
+                admin_err = fetchone(conn, """
+                    SELECT whatsapp FROM admins_groupe
+                    WHERE tontine_id=%s LIMIT 1
+                """, (p["tid"],))
+                if admin_err:
+                    erreurs_par_admin.setdefault(admin_err["whatsapp"], []).append(p)
+                continue
 
             # On n'alerte que pour orange et rouge
             if score_dict["niveau"] not in ("orange", "rouge"):
                 continue
 
-            jours_avant = (p["date_bouffage"].date() - datetime.now().date()).days
+            jours_avant = (p["date_bouffage"] - datetime.now().date()).days
 
             # Trouve l'admin de la tontine
             admin = fetchone(conn, """
@@ -8518,6 +8200,24 @@ def alerter_risques_bouffage_imminent():
                 f"_BADF Ltd · Modèle prédictif · Calibré sur 60j d'historique_"
             )
             wa_prive(admin_wa, msg)
+
+        # Notifier les admins des échecs de calcul (revue manuelle requise)
+        for admin_wa, membres_erreur in erreurs_par_admin.items():
+            lignes = "\n".join(
+                f"  • {p['nom_complet']} (bouffage J+{(p['date_bouffage'] - datetime.now().date()).days})"
+                for p in membres_erreur
+            )
+            wa_prive(admin_wa,
+                f"⚠️ *SCORE DE RISQUE INDISPONIBLE*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Le calcul du score de risque a échoué pour {len(membres_erreur)} "
+                f"membre(s) dont le bouffage arrive dans les 7 prochains jours :\n\n"
+                f"{lignes}\n\n"
+                f"Vérifiez leur situation manuellement avant le bouffage.\n\n"
+                f"_BADF Ltd · Modèle prédictif_"
+            )
+            log_audit("TRUST_GRAPH_ERREUR_PREDICTIF",
+                      f"{len(membres_erreur)} membre(s) en échec de calcul", admin_wa)
 
         # Notifier le owner si plus de 5 alertes total
         total_alertes = sum(len(a) for a in alertes_par_admin.values())
@@ -8798,7 +8498,21 @@ def notifier_prochain_bouffage():
 
         # ── Trust Graph — alerte admin au moment du bouffage ─────────────────
         score_trust = calculer_score_risque_fugue(conn, passage["mbr_id"], t["id"])
-        if score_trust["niveau"] in ("orange", "rouge"):
+        if score_trust["niveau"] == "erreur":
+            # Échec du calcul — ne JAMAIS traiter comme "zéro risque" (fail-open).
+            # Le bouffage se poursuit (pas de blocage automatique sur une erreur
+            # technique), mais l'admin est prévenu pour vérification manuelle.
+            wa_admins_tontine(t["id"],
+                f"⚠️ *SCORE DE RISQUE INDISPONIBLE — {t['nom']}*\n\n"
+                f"Le calcul du score de risque a échoué pour "
+                f"*{passage['nom_complet']}* au moment de son bouffage.\n"
+                f"Le bouffage se poursuit normalement — vérifiez sa situation "
+                f"manuellement si besoin.\n\n"
+                f"_TontineBot Pro — BADF Ltd_"
+            )
+            log_audit("TRUST_GRAPH_ERREUR",
+                      f"{passage['nom_complet']} | {t['nom']}", passage.get("whatsapp", ""))
+        elif score_trust["niveau"] in ("orange", "rouge"):
             emoji_tg = "🔴" if score_trust["niveau"] == "rouge" else "🟠"
             signaux_txt = "\n".join(f"  • {s}" for s in score_trust["signaux"])
             wa_admins_tontine(t["id"],
@@ -8939,8 +8653,6 @@ def notifier_prochain_bouffage():
     release_conn(conn)
 
 
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # NETTOYAGE SESSIONS EXPIRÉES
 # ══════════════════════════════════════════════════════════════════════════
@@ -9059,8 +8771,6 @@ def rappel_ouverture():
     release_conn(conn)
 
 
-
-
 def rappel_matin():
     """Rappel matin — heure_ouverture + 3h pour chaque tontine."""
     heure_now = datetime.now().strftime("%H:00")
@@ -9170,8 +8880,6 @@ def rappel_non_cotisants():
             wa_groupe(t["whatsapp_groupe"] or t["nom"], msg_rappel)
 
     release_conn(conn)
-
-
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -9306,7 +9014,6 @@ def verifier_suspensions_retard():
             release_conn(conn)
 
 
-
 # ══════════════════════════════════════════════════════════════════════════
 # ANTI-FUGUE POST-BOUFFAGE
 # ══════════════════════════════════════════════════════════════════════════
@@ -9411,9 +9118,6 @@ def detecter_fugitifs():
 # ══════════════════════════════════════════════════════════════════════════
 
 
-
-
-
 def envoyer_releve_fmp_post_bouffage():
     """
     Tourne chaque minute. Pour chaque tontine dont heure_bouffage + 10 min
@@ -9495,8 +9199,6 @@ def rapport_groupes_fin_journee():
         )
 
     release_conn(conn)
-
-
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -9711,7 +9413,7 @@ def verifier_dettes_badf_impayees():
                     f"Régularisez *immédiatement* :\n"
                     f"  MTN    : *{NUMERO_BADF_MTN}*\n"
                     f"  Orange : *{NUMERO_BADF_ORANGE}*\n\n"
-                    f"Envoyez le code de transaction au bot pour rétablir le service.\n\n"
+                    f"Envoyez *PAIEMENT_BADF <code>* au bot pour rétablir le service.\n\n"
                     f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
                 )
 
@@ -10174,7 +9876,7 @@ def comptabilite_badf_quotidienne():
         kyc_mois = fetchone(conn, """
             SELECT COUNT(*) AS nb FROM membres
             WHERE kyc_complet=1
-              AND date_inscription::date BETWEEN %s AND %s
+              AND date_adhesion::date BETWEEN %s AND %s
         """, (debut_mois, today))["nb"]
         revenu_kyc_mois = kyc_mois * 2000  # FRAIS_KYC
 
