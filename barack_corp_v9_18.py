@@ -8376,6 +8376,11 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             score += position_score
 
         # ── Normalisation et niveau final ───────────────────────────────────
+        # Somme des poids max des 10 features = 145 (25+20+15+15+10+10+5+20+10+15).
+        # On ramène le score brut sur une échelle 0-100 propre avant clamp,
+        # sinon le score plafonnait artificiellement à 100 bien avant que
+        # toutes les features soient au maximum.
+        score = score * (100.0 / 145.0)
         score = min(100, max(0, round(score)))
 
         if score <= 30:
