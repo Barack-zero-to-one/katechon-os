@@ -124,19 +124,20 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 
 Risk score 0–100 for post-cashout default prediction. Detection **7 days before the event**.
 First behavioral credit bureau for Global South populations never seen by traditional rating agencies.
+Raw internal weights (sum = 145) are normalized to 100 at the end of scoring — `final_score = raw_score × 100/145`.
 
-| Feature | Weight | Signal Measured |
-|---------|--------|----------------|
-| Historical regularity | 25 | Coefficient of variation of contribution intervals |
-| Recent trend | 20 | Ratio contributions 0–30d vs 30–60d |
-| Inverted trust score | 15 | `score_confiance` 0–100 → risk |
-| Outstanding debt | 15 | IRA debt ratio / estimated monthly capacity |
-| Engagement depth | 10 | Seniority + number of active tontines |
-| Payment velocity | 10 | Average delay after `heure_ouverture` |
-| Weak signals | 5 | Past suspensions + fraud attempts |
-| Post-cashout behavior | 20 | Continued contributing after receiving cashout? |
-| Trust score drop | 10 | Drop >25 pts over 30 rolling days |
-| Cycle position | 15 | Late position in rotation = higher flight risk (structural, non-manipulable) |
+| Feature | Raw weight | Normalized /100 | Signal Measured |
+|---------|-----------|------------------|----------------|
+| Historical regularity | 25 | 17 | Coefficient of variation of contribution intervals |
+| Recent trend | 20 | 14 | Ratio contributions 0–30d vs 30–60d |
+| Inverted trust score | 15 | 10 | `score_confiance` 0–100 → risk |
+| Outstanding debt | 15 | 10 | IRA debt ratio / estimated monthly capacity |
+| Engagement depth | 10 | 7 | Seniority + number of active tontines |
+| Payment velocity | 10 | 7 | Average delay after `heure_ouverture` |
+| Weak signals | 5 | 4 | Past suspensions + fraud attempts |
+| Post-cashout behavior | 20 | 14 | Continued contributing after receiving cashout? |
+| Trust score drop | 10 | 7 | Drop >25 pts over 30 rolling days |
+| Cycle position | 15 | 10 | Late position in rotation = higher flight risk (structural, non-manipulable) |
 
 **Risk levels:** 🟢 0–30 Green · 🟡 31–55 Yellow · 🟠 56–75 Orange · 🔴 76–100 Red → admin alerted with full evidence, no automatic block
 

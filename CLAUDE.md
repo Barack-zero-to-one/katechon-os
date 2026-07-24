@@ -76,28 +76,53 @@ Ce n'est pas une app de gestion de tontine. C'est l'infrastructure de confiance 
 
 ---
 
-## 5 Sources de revenus actuelles
+## Modèle de revenus
 
-1. **Frais d'adhésion** — 1 000 FCFA, une fois, valable à vie sur le réseau BADF
-2. **FMP 2%** — Frais de Mission et de Prestation, prélevé automatiquement sur chaque cotisation confirmée
-3. **IRA** — 150 FCFA/jour de retard, cumulé et déduit du bouffage
-4. **Frais de réactivation** — 1 000 FCFA après suspension 72h
-5. **Frais changement de numéro** — 250 FCFA (commande CHGNUM)
+**Lancement (actuel) — zéro friction :**
+- `FRAIS_ADHESION` supprimé du code
+- `FRAIS_FMP = 0.00` — FMP désactivé, aucune ligne visible côté membres ou admin
+- **IRA** — 150 FCFA/jour de retard (seule retenue active visible)
+- **Frais de réactivation** — 1 000 FCFA après suspension 72h
+- **Frais changement de numéro** — 250 FCFA (commande CHGNUM)
+
+**Modèle déclaré à YC (activable en 1 ligne) :**
+- FMP 2% sur chaque cotisation → `FRAIS_FMP = 0.02`
+- Architecture complète en place, messages nettoyés, switch immédiat possible
+
+**Règle absolue :** ne jamais réintroduire de mentions FMP/frais d'adhésion dans les messages visibles aux membres sans validation explicite. Le seul levier monétaire visible = IRA (pénalité retard).
 
 Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance paramétrique.
 
 ---
 
-## 8 Couches de sécurité
+## 26 Couches de sécurité
 
-1. **SHA-256 hash anti-recyclage screenshots** — chaque screenshot a une empreinte unique. Déjà vu ou modifié → rejet immédiat. Délai max 24h.
-2. **SELECT FOR UPDATE PostgreSQL** — verrou pessimiste natif DB sur `confirmer_cotisation`. Deux admins tapent OUI simultanément → un seul passe.
-3. **Rate limiting** — 10 messages / 60 secondes par identifiant → audit log automatique.
-4. **UNIQUE indexes partiels DB** — filet de sécurité niveau base de données. Même si un bug Python contourne tout le reste, la DB refuse les doublons physiquement.
-5. **X-Hub-Signature-256 HMAC** — chaque webhook Meta est signé. Signature invalide → rejeté avant même de lire le message.
-6. **MontantAberrantError** — écart > 50% → refus catégorique. 15–50% → commande FORCE obligatoire. 5–15% → warning. Anti-faute de frappe et anti-arnaque.
-7. **Ingénierie sociale ANIF/COBAC** — MSG_DISSUASION avec référence dossier SHA-256 unique. Dissuasion comportementale avant même la tentative de fraude.
-8. **Blacklist + auto-ban** — 3 tentatives de fraude → bannissement automatique réseau BADF + `blackliste=1` en DB.
+1. **HMAC-SHA256 Webhook Auth** — chaque webhook entrant est signé et validé avant lecture du payload.
+2. **SQL paramétré** — toutes les requêtes utilisent des bind params `%s` — zéro f-string SQL, zéro surface d'injection.
+3. **SELECT FOR UPDATE PostgreSQL** — verrou pessimiste natif DB sur le bouffage. Deux admins tapent OUI simultanément → un seul passe.
+4. **SHA-256 hash anti-recyclage screenshots** — empreinte unique par image ; rejet si déjà vue ou modifiée, délai max 24h.
+5. **UNIQUE indexes partiels DB** — dédup physique niveau base de données sur membres et screenshots. Python ne peut pas contourner ça.
+6. **Rate limiting** — 10 messages / 60 secondes par numéro → audit log + drop silencieux.
+7. **MontantAberrantError** — écart > 50% → refus catégorique. 15–50% → commande FORCE obligatoire.
+8. **SSRF whitelist** — seuls whatsapp.net / fbcdn.net / cdninstagram.com sont autorisés, toute autre URL rejetée.
+9. **Déduplication screenshots** — vérification hash avant OCR, empêche la preuve de paiement recyclée.
+10. **Onboarding zéro-friction** — inscription au prénom seul, accès menu instantané, zéro friction documentaire.
+11. **Auto-ban (×3 fraude)** — 3 tentatives de fraude confirmées → bannissement automatique réseau + `blackliste=1` en DB.
+12. **Trust score (score_confiance)** — réputation 0–100, décrémente sur suspicion, atteint 0 → banni.
+13. **Trust Graph (modèle de fugue)** — modèle comportemental à 10 features, prédit le défaut 7 jours avant l'événement.
+14. **Alerte fraude en rafale** — ≥5 tentatives de fraude/heure → alerte d'escalade déclenchée.
+15. **Dissuasion comportementale (ANIF/COBAC)** — MSG_DISSUASION avec référence dossier SHA-256 unique, dissuasion avant même la tentative.
+16. **Timeout sessions + récupération** — TTL 300s, backup JSON toutes les 60s, restauration complète au redémarrage.
+17. **Persistance Outbox** — les messages WhatsApp survivent à un crash Python via `wa_outbox.jsonl`.
+18. **@healed auto-retry** — 13 fonctions critiques, backoff exponentiel ×3 sur échec DB/réseau.
+19. **Circuit breaker DB** — 10 échecs → pool ouvert 60s → reset automatique.
+20. **Isolation SAVEPOINT/ROLLBACK** — un échec de migration ne peut pas corrompre l'état de transaction global.
+21. **Audit trail immuable** — table `audit_log` + `audit_immutable.log`, 68+ types d'événements, tamper-evident.
+22. **Propagation de réputation cross-tontine** — un flag Trust Graph dans une tontine décrémente le `score_confiance` globalement. Impossible de reset sa réputation en changeant de groupe.
+23. **Validation format téléphone** — normalisation regex vers E.164, rejette les identifiants malformés.
+24. **Sanitization des inputs** — champs nom : `^[A-Za-zÀ-ÿ\s\-'\.]+$`, injection-safe, minimum 3 caractères.
+25. **Protection path traversal** — `os.path.basename()` + regex allowlist sur tous les chemins de fichiers.
+26. **Protection command injection** — arguments `subprocess` en liste, `shell=False` partout (pg_dump, etc.).
 
 ---
 
@@ -119,7 +144,7 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 - **APScheduler** BackgroundScheduler timezone Africa/Douala — 17 jobs cron
 - **ngrok** domaine fixe `lennox-unbiographical-jasmin.ngrok-free.app`
 - **Sessions mémoire** : `_sessions_kyc`, `_sessions_membre`, `_sessions_admin`, `_sessions_config` — durée 300s, perdues au redémarrage
-- **Pool psycopg2** ThreadedConnectionPool minconn=5 maxconn=50
+- **Pool psycopg2** ThreadedConnectionPool minconn=10 maxconn=80
 - **Circuit breaker DB** — 10 failures → open 60s → reset auto
 - **Outbox persistant** — messages WhatsApp non envoyés survivent au crash (JSON)
 - **Décorateur @healed** — auto-retry 3× sur toutes les fonctions critiques
@@ -129,21 +154,23 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 
 ---
 
-## Trust Graph — Modèle prédictif 9 features
+## Trust Graph — Modèle prédictif 10 features
 
 Score 0–100 de risque de fugue post-bouffage. Identification 7 jours avant l'événement.
+Poids bruts internes (somme = 145) normalisés sur 100 en fin de calcul — `score_final = score_brut × 100/145`.
 
-| Feature | Poids | Signal |
-|---------|-------|--------|
-| 1. Régularité historique | 25 | Variance des intervalles de cotisation (coefficient de variation) |
-| 2. Tendance récente | 20 | Ratio cotisations 0–30j vs 30–60j |
-| 3. Score confiance inversé | 15 | score_confiance 0–100 → risque |
-| 4. Dettes en cours | 15 | Ratio dette IRA / capacité mensuelle |
-| 5. Profondeur d'engagement | 10 | Ancienneté + nb tontines actives |
-| 6. Vélocité paiement | 10 | Délai moyen après heure_ouverture |
-| 7. Signaux faibles | 5 | Suspensions passées + tentatives fraude |
-| 8. Comportement post-bouffage | 20 | A-t-il continué à cotiser après son dernier bouffage ? |
-| 9. Chute score confiance | 10 | Chute > 25 pts en 30 jours |
+| Feature | Poids brut | Poids normalisé /100 | Signal |
+|---------|-----------|----------------------|--------|
+| 1. Régularité historique | 25 | 17 | Variance des intervalles de cotisation (coefficient de variation) |
+| 2. Tendance récente | 20 | 14 | Ratio cotisations 0–30j vs 30–60j |
+| 3. Score confiance inversé | 15 | 10 | score_confiance 0–100 → risque |
+| 4. Dettes en cours | 15 | 10 | Ratio dette IRA / capacité mensuelle |
+| 5. Profondeur d'engagement | 10 | 7 | Ancienneté + nb tontines actives |
+| 6. Vélocité paiement | 10 | 7 | Délai moyen après heure_ouverture |
+| 7. Signaux faibles | 5 | 4 | Suspensions passées + tentatives fraude |
+| 8. Comportement post-bouffage | 20 | 14 | A-t-il continué à cotiser après son dernier bouffage ? |
+| 9. Chute score confiance | 10 | 7 | Chute > 25 pts en 30 jours |
+| 10. Position dans le cycle | 15 | 10 | Position tardive dans la rotation = risque de fugue plus élevé (structurel, non manipulable) |
 
 Niveaux : 0–30 Vert / 31–55 Jaune / 56–75 Orange / 76–100 Rouge → bouffage retardé.
 

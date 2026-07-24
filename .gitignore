@@ -14,6 +14,12 @@ Sample_receipts/
 # Données utilisateurs réelles
 exemple liste de bouffage.txt
 
+# Documents internes / confidentiels — jamais sur GitHub
+.bot_start
+BADF_EXIT_STRATEGY_2026.pdf
+YC_AI_COLLABORATION_LOG.md
+YC_SESSION_EXPORT.md
+
 # Python
 __pycache__/
 *.pyc
