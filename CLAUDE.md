@@ -176,23 +176,15 @@ Niveaux : 0–30 Vert / 31–55 Jaune / 56–75 Orange / 76–100 Rouge → bouf
 
 ---
 
-## Credentials Meta Cloud API
 
-Configurés **exclusivement dans `ENV`** :
-```
-META_PHONE_ID=
-META_TOKEN=
-META_BUSINESS_ID=
-META_APP_SECRET=
-```
 Ne jamais hardcoder dans le code. Ne jamais commiter.
 
 ---
 
 ## Contexte fondateur
 
-- **Âge** : 18 ans
-- **Origine** : Maroua, Cameroun
+- **Âge** : 17 ans
+- **Origine** : Yaoundé, Cameroun
 - **Développement** : solo, 3 mois
 - **Objectif immédiat** : Y Combinator Fall 2026 (deadline 27 juillet 2026)
 - **Priorité 36 jours** : trouver un groupe de 50 membres qui cotisent 750 FCFA/jour → traction réelle pour YC
