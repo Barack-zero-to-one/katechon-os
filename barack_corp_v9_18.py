@@ -1157,8 +1157,9 @@ def init_db():
             c.execute("SAVEPOINT mig")
             c.execute(migration)
             c.execute("RELEASE SAVEPOINT mig")
-        except Exception:
+        except Exception as e:
             c.execute("ROLLBACK TO SAVEPOINT mig")
+            log.error(f"❌ Migration en échec (ignorée, SAVEPOINT isolé) : {migration[:80]} : {e}")
 
 
     # ── INDEX PERFORMANCES ────────────────────────────────────────────────
@@ -1188,13 +1189,20 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_audit_date       ON audit_log(date_heure DESC)",
         "CREATE INDEX IF NOT EXISTS idx_cotis_pending    ON cotisations_manuelles(tontine_id,date_soumission DESC) WHERE statut='En_attente'",
         # Hash unique anti-recyclage déjà UNIQUE mais on confirme l'index
-        "CREATE INDEX IF NOT EXISTS idx_screenshot_date  ON screenshots_hash(date_creation DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_screenshot_date  ON screenshots_hash(created_at DESC)",
     ]
+    # SAVEPOINT par index — sans ça, un seul CREATE INDEX en échec empoisonne
+    # toute la transaction PostgreSQL en cours et le conn.commit() plus bas se
+    # comporte comme un rollback silencieux, annulant TOUTES les migrations et
+    # tous les index précédents sans lever la moindre exception Python.
     for idx in indexes:
         try:
+            c.execute("SAVEPOINT idx")
             c.execute(idx)
-        except Exception:
-            pass
+            c.execute("RELEASE SAVEPOINT idx")
+        except Exception as e:
+            c.execute("ROLLBACK TO SAVEPOINT idx")
+            log.error(f"❌ Index en échec (ignoré, SAVEPOINT isolé) : {idx[:80]} : {e}")
 
     try:
         conn.commit()
@@ -8094,6 +8102,42 @@ def _update_score_confiance(conn, membre_id: int, raison: str,
       (membre_id, avant, apres, apres - avant, raison))
 
 
+POIDS_MAX_TRUST_GRAPH = 145  # somme des poids max des 10 features (25+20+15+15+10+10+5+20+10+15)
+
+
+def _agreger_score_risque_fugue(score_brut: float, features: dict, signaux: list) -> dict:
+    """
+    Fonction pure — aucun accès DB, aucun I/O.
+    Prend le score brut déjà accumulé par les 10 features (échelle 0-145) et
+    produit le résultat final normalisé sur 0-100 : score, niveau, recommandation.
+    Isolée de calculer_score_risque_fugue pour être testable indépendamment
+    du calcul SQL des features (cf. stress_test_katechon.py).
+    """
+    score = score_brut * (100.0 / POIDS_MAX_TRUST_GRAPH)
+    score = min(100, max(0, round(score)))
+
+    if score <= 30:
+        niveau = "vert"
+        recommandation = "Procéder normalement au bouffage."
+    elif score <= 55:
+        niveau = "jaune"
+        recommandation = "Surveillance accrue. Demander confirmation explicite du membre 24h avant."
+    elif score <= 75:
+        niveau = "orange"
+        recommandation = "RISQUE ÉLEVÉ. Recommander caution renforcée à 20%, ou décaler le tour."
+    else:
+        niveau = "rouge"
+        recommandation = "BLOCAGE RECOMMANDÉ. Investigation requise avant tout versement."
+
+    return {
+        "score":          score,
+        "niveau":         niveau,
+        "features":       features,
+        "recommandation": recommandation,
+        "signaux":        signaux,
+    }
+
+
 def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
     """
     Score 0-100 du risque de fugue post-bouffage pour ce membre.
@@ -8109,7 +8153,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
     try:
         membre = fetchone(conn, """
             SELECT id, nom_complet, score_confiance, statut_global,
-                   tentatives_fraude, date_inscription
+                   tentatives_fraude, date_adhesion
             FROM membres WHERE id=%s
         """, (membre_id,))
         tontine = fetchone(conn,
@@ -8194,7 +8238,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
 
         # ── Feature 3 : Score de confiance inversé (poids 15) ──────────────
         # score_confiance va de 0 à 100. On l'inverse en risque.
-        confiance = membre["score_confiance"] or 50
+        confiance = membre["score_confiance"] if membre["score_confiance"] is not None else 50
         confiance_risque = max(0, (50 - confiance) / 50 * 15)
         features["confiance_inversee"] = round(confiance_risque, 1)
         score += confiance_risque
@@ -8225,7 +8269,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             WHERE membre_id=%s AND statut IN ('Actif','Pause')
         """, (membre_id,))["n"]
 
-        anciennete_jours = (datetime.now() - membre["date_inscription"]).days if membre["date_inscription"] else 0
+        anciennete_jours = (datetime.now().date() - membre["date_adhesion"].date()).days if membre["date_adhesion"] else 0
 
         engagement_score = 0
         if nb_tontines == 1 and anciennete_jours < 30:
@@ -8275,8 +8319,8 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
         # Suspensions passées et tentatives de fraude
         nb_suspensions = fetchone(conn, """
             SELECT COUNT(*) AS n FROM sanctions
-            WHERE membre_id=%s AND type_sanction LIKE '%uspension%'
-        """, (membre_id,))["n"]
+            WHERE membre_id=%s AND type_sanction LIKE %s
+        """, (membre_id, "%uspension%"))["n"]
 
         signaux_faibles = 0
         if nb_suspensions > 0:
@@ -8376,36 +8420,10 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             score += position_score
 
         # ── Normalisation et niveau final ───────────────────────────────────
-        # Somme des poids max des 10 features = 145 (25+20+15+15+10+10+5+20+10+15).
-        # On ramène le score brut sur une échelle 0-100 propre avant clamp,
-        # sinon le score plafonnait artificiellement à 100 bien avant que
-        # toutes les features soient au maximum.
-        score = score * (100.0 / 145.0)
-        score = min(100, max(0, round(score)))
-
-        if score <= 30:
-            niveau = "vert"
-            recommandation = "Procéder normalement au bouffage."
-        elif score <= 55:
-            niveau = "jaune"
-            recommandation = "Surveillance accrue. Demander confirmation explicite du membre 24h avant."
-        elif score <= 75:
-            niveau = "orange"
-            recommandation = "RISQUE ÉLEVÉ. Recommander caution renforcée à 20%, ou décaler le tour."
-        else:
-            niveau = "rouge"
-            recommandation = "BLOCAGE RECOMMANDÉ. Investigation requise avant tout versement."
-
-        return {
-            "score":          score,
-            "niveau":         niveau,
-            "features":       features,
-            "recommandation": recommandation,
-            "signaux":        signaux,
-        }
+        return _agreger_score_risque_fugue(score, features, signaux)
 
     except Exception as e:
-        log.error(f"❌ calculer_score_risque_fugue m={membre_id} t={tontine_id} : {e}")
+        log.error(f"❌ calculer_score_risque_fugue m={membre_id} t={tontine_id} : {e}", exc_info=True)
         return {"score": 0, "niveau": "erreur", "features": {}, "recommandation": "", "signaux": []}
 
 
@@ -8445,7 +8463,7 @@ def alerter_risques_bouffage_imminent():
             if score_dict["niveau"] not in ("orange", "rouge"):
                 continue
 
-            jours_avant = (p["date_bouffage"].date() - datetime.now().date()).days
+            jours_avant = (p["date_bouffage"] - datetime.now().date()).days
 
             # Trouve l'admin de la tontine
             admin = fetchone(conn, """
@@ -10169,7 +10187,7 @@ def comptabilite_badf_quotidienne():
         kyc_mois = fetchone(conn, """
             SELECT COUNT(*) AS nb FROM membres
             WHERE kyc_complet=1
-              AND date_inscription::date BETWEEN %s AND %s
+              AND date_adhesion::date BETWEEN %s AND %s
         """, (debut_mois, today))["nb"]
         revenu_kyc_mois = kyc_mois * 2000  # FRAIS_KYC
 
