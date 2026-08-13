@@ -63,7 +63,8 @@ import requests
 from flask import Flask, request, jsonify, Response, session
 from apscheduler.schedulers.background import BackgroundScheduler
 
-import webhook_security as ws  # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
+import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
+import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
 
 # ══════════════════════════════════════════════════════════════════════════
 # CONFIGURATION GÉNÉRALE
@@ -1122,6 +1123,20 @@ def init_db():
            ))""",
         # ── Capture numéro Mobile Money bouffage (BOUFFAGE_VIRE) ────────────
         "ALTER TABLE bouffages_manuels ADD COLUMN IF NOT EXISTS operateur_cashout TEXT",
+        # ── Anti-recyclage renforcé (finding #3) ────────────────────────────
+        # Perceptual hash stocké par screenshot (TEXT hex, évite le débordement
+        # BIGINT signé d'un dHash 64 bits).
+        "ALTER TABLE screenshots_hash ADD COLUMN IF NOT EXISTS dhash TEXT",
+        # Dédup FORTE sur la référence de transaction (unique par paiement réel),
+        # insensible au 1px / re-encodage qui défait le byte-hash.
+        """CREATE TABLE IF NOT EXISTS references_transaction (
+            id             SERIAL PRIMARY KEY,
+            tontine_id     INTEGER NOT NULL REFERENCES tontines(id),
+            reference_norm TEXT    NOT NULL,
+            membre_id      INTEGER REFERENCES membres(id),
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(tontine_id, reference_norm)
+        )""",
     ]:
         try:
             c.execute("SAVEPOINT mig")
@@ -1160,6 +1175,11 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_cotis_pending    ON cotisations_manuelles(tontine_id,date_soumission DESC) WHERE statut='En_attente'",
         # Hash unique anti-recyclage déjà UNIQUE mais on confirme l'index
         "CREATE INDEX IF NOT EXISTS idx_screenshot_date  ON screenshots_hash(created_at DESC)",
+        # Anti-recyclage renforcé (finding #3)
+        "CREATE INDEX IF NOT EXISTS idx_screenshot_mbr   ON screenshots_hash(membre_id,created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_ref_tx           ON references_transaction(tontine_id,reference_norm)",
+        # Anti-TOCTOU double-submit : un screenshot_hash ne peut créer qu'UNE cotisation.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_cotis_screenshot ON cotisations_manuelles(screenshot_hash) WHERE screenshot_hash IS NOT NULL",
     ]
     # SAVEPOINT par index — sans ça, un seul CREATE INDEX en échec empoisonne
     # toute la transaction PostgreSQL en cours et le conn.commit() plus bas se
@@ -1907,15 +1927,63 @@ def screenshot_deja_utilise(conn, image_hash: str) -> bool:
 
 
 def enregistrer_screenshot(conn, image_hash: str,
-                            membre_id: int, tontine_id: int):
-    """Enregistre le hash pour éviter le recyclage."""
+                            membre_id: int, tontine_id: int, dhash_hex: str = ""):
+    """Enregistre le hash brut + le perceptual hash (dHash) pour l'anti-recyclage."""
     try:
         q(conn,
-          """INSERT INTO screenshots_hash (hash, membre_id, tontine_id)
-             VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
-          (image_hash, membre_id, tontine_id))
+          """INSERT INTO screenshots_hash (hash, membre_id, tontine_id, dhash)
+             VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+          (image_hash, membre_id, tontine_id, dhash_hex or None))
     except Exception:
         pass
+
+
+def reference_deja_utilisee(conn, tontine_id: int, ref_norm: str) -> bool:
+    """
+    True si cette référence de transaction a déjà servi dans la tontine.
+    Couche anti-recyclage FORTE : la référence est unique par paiement réel, donc
+    insensible au re-encodage/1px qui défait le byte-hash (finding #3).
+    """
+    if not ref_norm:
+        return False
+    row = fetchone(conn,
+        "SELECT id FROM references_transaction WHERE tontine_id=%s AND reference_norm=%s",
+        (tontine_id, ref_norm))
+    return row is not None
+
+
+def enregistrer_reference(conn, tontine_id: int, ref_norm: str, membre_id: int):
+    """Mémorise une référence de transaction (dédup ON CONFLICT via UNIQUE)."""
+    if not ref_norm:
+        return
+    try:
+        q(conn,
+          """INSERT INTO references_transaction (tontine_id, reference_norm, membre_id)
+             VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+          (tontine_id, ref_norm, membre_id))
+    except Exception:
+        pass
+
+
+def screenshot_near_duplicate(conn, membre_id: int, dh_int) -> bool:
+    """
+    Signal SOUPLE : True si un screenshot perceptuellement identique (dHash à
+    <= SEUIL bits) existe déjà pour ce membre. Sert d'ALERTE admin, jamais de
+    blocage dur — deux reçus MoMo distincts partagent le même template et sont
+    donc naturellement proches en dHash (faux positif inacceptable en blocage).
+    """
+    if dh_int is None:
+        return False
+    rows = fetchall(conn,
+        """SELECT dhash FROM screenshots_hash
+           WHERE membre_id=%s AND dhash IS NOT NULL AND dhash <> ''
+           ORDER BY created_at DESC LIMIT 200""",
+        (membre_id,))
+    for r in rows:
+        autre = si.hex_vers_int(r["dhash"])
+        if si.est_near_duplicate(dh_int, autre):
+            return True
+    return False
 
 
 class MontantAberrantError(ValueError):
@@ -7281,6 +7349,13 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
             incrementer_tentatives_fraude(membre["id"], "Screenshot recyclé")
             return
 
+        # Couche 2 — perceptual hash (dHash), signal SOUPLE : détecte le recyclage
+        # 1px/re-compression que le byte-hash laisse passer. Ne bloque jamais seul.
+        dh       = si.dhash(image_bytes)
+        dh_hex   = "" if dh is None else format(dh, "016x")
+        near_dup = screenshot_near_duplicate(conn, membre["id"], dh)
+        ref_norm = ""   # référence de transaction normalisée (renseignée par l'OCR)
+
         # Récupérer l'adhesion avec nombre_places
         if group_id:
             adhesion = fetchone(conn, """
@@ -7313,6 +7388,23 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
         nb_places       = adhesion["nombre_places"] or 1
         montant_attendu = adhesion["montant_place"] * nb_places
 
+        # Signal SOUPLE near-dup (dHash) → alerte admin, jamais un blocage auto
+        # (deux reçus MoMo distincts partagent le même template).
+        if near_dup:
+            log_audit("SCREENSHOT_NEAR_DUP",
+                      f"Membre:{membre['id']} dHash proche d'un screenshot antérieur", wa)
+            admin_nd = fetchone(conn,
+                "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
+                (adhesion["tontine_id"],))
+            if admin_nd:
+                wa_prive(admin_nd["whatsapp"],
+                    f"⚠️ *SCREENSHOT QUASI-IDENTIQUE — {adhesion['nom']}*\n\n"
+                    f"Membre : *{membre['nom_complet']}*\n"
+                    f"L'image ressemble fortement à un reçu déjà soumis "
+                    f"(possible re-compression d'un ancien). Vérifiez la référence "
+                    f"de transaction avant de confirmer.\n\n"
+                    f"_TontineBot Pro — BADF Ltd_")
+
         # ── Lecture automatique du screenshot (OCR local Tesseract) ───────────
         lecture = lire_screenshot_mobile_money(image_bytes)
         fraude_visuelle = False
@@ -7322,6 +7414,26 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
             confiance   = lecture.get("confiance", "faible")
             operateur   = lecture.get("operateur", "Inconnu")
             ref_lu      = lecture.get("reference", "")
+            ref_norm    = si.normaliser_reference(ref_lu)
+
+            # Couche 3 (FORTE) — la référence de transaction est unique par paiement
+            # réel : insensible au 1px/re-encodage qui défait le byte-hash. Blocage dur.
+            if ref_norm and reference_deja_utilisee(conn, adhesion["tontine_id"], ref_norm):
+                log_audit("SCREENSHOT_RECYCLE",
+                          f"Membre:{membre['id']} Ref:{ref_norm} — transaction déjà utilisée", wa)
+                incrementer_tentatives_fraude(membre["id"],
+                                              f"Référence transaction recyclée: {ref_norm}")
+                admin_r = fetchone(conn,
+                    "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
+                    (adhesion["tontine_id"],))
+                if admin_r:
+                    wa_prive(admin_r["whatsapp"],
+                        f"🚨 *RECYCLAGE BLOQUÉ — {adhesion['nom']}*\n\n"
+                        f"Membre : *{membre['nom_complet']}*\n"
+                        f"Référence de transaction *{ref_norm}* déjà utilisée — "
+                        f"reçu recyclé rejeté automatiquement.\n\n"
+                        f"_TontineBot Pro — BADF Ltd_")
+                return
 
             # Vérification montant : comparaison avec montant attendu
             if montant_lu and montant_attendu:
@@ -7462,7 +7574,8 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
                 f"_TontineBot Pro — BADF Ltd_")
             return
 
-        enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"])
+        enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"], dh_hex)
+        enregistrer_reference(conn, adhesion["tontine_id"], ref_norm, membre["id"])
 
         # Message places multiples si applicable
         places_info = ""
