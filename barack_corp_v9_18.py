@@ -65,6 +65,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
 import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
+from rate_limiter import RateLimiter  # Limiteur per-clé + global, mémoire bornée (module pur)
 
 # ══════════════════════════════════════════════════════════════════════════
 # CONFIGURATION GÉNÉRALE
@@ -91,6 +92,9 @@ NUMERO_BADF_ORANGE = os.getenv("NUMERO_BADF_ORANGE", "+237692100606")  # Orange 
 MAX_TENTATIVES_FRAUDE   = 3
 RATE_LIMIT_MAX          = 10
 RATE_LIMIT_FENETRE      = 60
+# Plafond GLOBAL (tous émetteurs) : garde-fou anti-burst multi-numéros. Doit rester
+# au-dessus du pic légitime (ouverture simultanée de nombreuses tontines) — réglable.
+RATE_LIMIT_GLOBAL_MAX   = int(os.getenv("RATE_LIMIT_GLOBAL_MAX", "3000"))
 DELAI_SUSPENSION_HEURES = 72
 DELAI_ALERTE_FUGUE      = 3
 DELAI_BLOCAGE_FUGUE     = 7
@@ -574,7 +578,8 @@ _sessions_membre: dict = {}   # {wa: {"etape": str, "data": dict, "ts": float}}
 _sessions_admin:  dict = {}   # {wa: {"etape": str, "tontine_id": int, "data": dict, "ts": float}}
 _sessions_kyc:    dict = {}   # {wa: {"etape": str, "data": dict, "ts": float}}
 _sessions_config: dict = {}   # {wa: {"etape": str, "group_id": str, "group_name": str, "data": dict, "ts": float}}
-_rate_buckets:    dict = defaultdict(list)
+_rate_limiter = RateLimiter(max_per_key=RATE_LIMIT_MAX, max_global=RATE_LIMIT_GLOBAL_MAX,
+                            window=RATE_LIMIT_FENETRE)
 _sessions_lock    = threading.RLock()   # protège toutes les mutations _sessions_*
 
 # ── Exécuteur borné pour le traitement des messages webhook ───────────────────
@@ -622,14 +627,15 @@ def session_valide(sessions: dict, wa: str) -> bool:
 
 
 def rate_limit_ok(identifiant: str) -> bool:
-    now   = time_module.time()
-    debut = now - RATE_LIMIT_FENETRE
-    _rate_buckets[identifiant] = [t for t in _rate_buckets[identifiant] if t > debut]
-    if len(_rate_buckets[identifiant]) >= RATE_LIMIT_MAX:
+    """
+    Autorise le message ? Double limite (per-numéro + plafond global), mémoire
+    bornée et thread-safe (cf. rate_limiter.RateLimiter). Le plafond global
+    neutralise le burst multi-numéros que l'ancien limiteur per-clé laissait passer.
+    """
+    ok = _rate_limiter.autorise(identifiant)
+    if not ok:
         audit.warning(f"RATE LIMIT : {identifiant}")
-        return False
-    _rate_buckets[identifiant].append(now)
-    return True
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════════════════
