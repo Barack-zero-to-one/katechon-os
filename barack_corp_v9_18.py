@@ -2111,13 +2111,18 @@ def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> dict:
     if ordre_actuel >= max_ordre:
         return {"ok": False}  # déjà dernier
 
-    # Décaler les membres entre l'ancienne position+1 et la dernière de -1
+    # Sortir d'abord le membre vers une position sentinelle (-1) pour libérer son slot :
+    # sans ça, le décalage `ordre-1` collisionne sur UNIQUE(tontine,cycle,ordre) tant que
+    # le membre occupe encore ordre_actuel (doublon transitoire = UniqueViolation).
+    q(conn, "UPDATE liste_passage SET ordre=-1 WHERE id=%s", (passage["id"],))
+
+    # Décaler les membres entre l'ancienne position+1 et la dernière de -1 (slot libéré)
     q(conn, """
         UPDATE liste_passage SET ordre = ordre - 1
         WHERE tontine_id=%s AND cycle=%s AND ordre > %s AND ordre <= %s
     """, (tontine_id, cycle, ordre_actuel, max_ordre))
 
-    # Mettre le membre en dernière position
+    # Mettre le membre en dernière position (slot max_ordre désormais vacant)
     q(conn, "UPDATE liste_passage SET ordre=%s WHERE id=%s", (max_ordre, passage["id"]))
     return {"ok": True, "position_avant": ordre_actuel, "position_apres": max_ordre}
 
@@ -4529,7 +4534,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         pass_id     = d["modif_pass_id"]
         conn        = get_conn()
         t           = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
-        # Décaler les autres membres
+        # Sortir le membre vers une sentinelle (-1) AVANT le décalage : sinon le shift
+        # collisionne sur UNIQUE(tontine,cycle,ordre) tant que le membre occupe `ancien`.
+        q(conn, "UPDATE liste_passage SET ordre=-1 WHERE id=%s", (pass_id,))
+        # Décaler les autres membres (slot `ancien` désormais libre)
         if nouv_ordre < ancien:
             q(conn, """UPDATE liste_passage SET ordre=ordre+1
                        WHERE tontine_id=%s AND cycle=%s
