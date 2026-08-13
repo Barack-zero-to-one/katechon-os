@@ -439,6 +439,7 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
     Retourne (nb_ok, nb_non_lies).
     """
     conn  = get_conn()
+    verrou_ordre_tontine(conn, tontine_id)  # FORTERESSE : sérialise l'ordre de cette tontine
     cycle = fetchone(conn,
         "SELECT cycle_actuel FROM tontines WHERE id=%s", (tontine_id,))["cycle_actuel"]
 
@@ -476,19 +477,25 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
         if not membre_id:
             nb_non_lies += 1
 
-        # Enregistrer la ligne de passage
-        q(conn, """
-            INSERT INTO liste_passage
-                (tontine_id, membre_id, nickname, date_bouffage, cycle, ordre, soumis_par)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (tontine_id, cycle, ordre) DO UPDATE SET
-                nickname      = EXCLUDED.nickname,
-                date_bouffage = EXCLUDED.date_bouffage,
-                membre_id     = EXCLUDED.membre_id,
-                soumis_par    = EXCLUDED.soumis_par
-        """, (tontine_id, membre_id,
-              item["nickname"], item["date_bouffage"],
-              cycle, item["ordre"], wa_admin))
+        # Enregistrer la ligne de passage — upsert MANUEL (ON CONFLICT retiré :
+        # incompatible avec la contrainte DEFERRABLE ; sérialisé par le verrou).
+        cur_up = q(conn, """
+            UPDATE liste_passage SET
+                nickname      = %s,
+                date_bouffage = %s,
+                membre_id     = %s,
+                soumis_par    = %s
+            WHERE tontine_id=%s AND cycle=%s AND ordre=%s
+        """, (item["nickname"], item["date_bouffage"], membre_id, wa_admin,
+              tontine_id, cycle, item["ordre"]))
+        if cur_up.rowcount == 0:
+            q(conn, """
+                INSERT INTO liste_passage
+                    (tontine_id, membre_id, nickname, date_bouffage, cycle, ordre, soumis_par)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (tontine_id, membre_id,
+                  item["nickname"], item["date_bouffage"],
+                  cycle, item["ordre"], wa_admin))
         nb_ok += 1
 
     # Mettre à jour nombre_places dans adhesions selon les occurrences réelles
@@ -789,6 +796,26 @@ def fetchall(conn, sql: str, params=None) -> list:
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in rows]
+
+
+# ── FORTERESSE concurrence : verrou d'ordre par tontine ────────────────────
+_ORDRE_LOCK_NS = 42   # namespace advisory lock dédié aux mutations d'ordre
+
+def verrou_ordre_tontine(conn, tontine_id: int):
+    """
+    Mutex STRICT par tontine sur les mutations d'ordre de liste_passage
+    (pg_advisory_xact_lock, relâché automatiquement au COMMIT/ROLLBACK).
+
+    Sérialise les writers d'une MÊME tontine (reclassement retard, MODIF_ORDRE,
+    duplication de cycle, saisie de liste) sans jamais bloquer les autres tontines
+    — 100 groupes à 16h05 restent pleinement parallèles.
+
+    À appeler comme PREMIER statement de toute transaction qui modifie `ordre`.
+    Couplé à la contrainte UNIQUE(tontine,cycle,ordre) DEFERRABLE : le lock
+    garantit l'absence de writer concurrent, la contrainte deferrable tolère les
+    doublons transitoires d'une permutation jusqu'au commit. Défense en profondeur.
+    """
+    q(conn, "SELECT pg_advisory_xact_lock(%s, %s)", (_ORDRE_LOCK_NS, int(tontine_id)))
 
 
 def init_db():
@@ -1138,6 +1165,24 @@ def init_db():
            ))""",
         # ── Capture numéro Mobile Money bouffage (BOUFFAGE_VIRE) ────────────
         "ALTER TABLE bouffages_manuels ADD COLUMN IF NOT EXISTS operateur_cashout TEXT",
+        # ── FORTERESSE concurrence : UNIQUE(tontine,cycle,ordre) DEFERRABLE ──
+        # Une permutation d'ordre (reclassement, MODIF_ORDRE, dup cycle) crée des
+        # doublons TRANSITOIRES ; la vérif differée au COMMIT les tolère tant que
+        # l'état final est valide. Couplé à verrou_ordre_tontine (advisory lock).
+        # Idempotent : ne reconstruit l'index qu'une fois (skip si déjà deferrable).
+        """DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                         WHERE conname = 'liste_passage_ordre_uk' AND condeferrable) THEN
+            ALTER TABLE liste_passage
+              DROP CONSTRAINT IF EXISTS liste_passage_tontine_id_cycle_ordre_key;
+            ALTER TABLE liste_passage
+              DROP CONSTRAINT IF EXISTS liste_passage_ordre_uk;
+            ALTER TABLE liste_passage
+              ADD CONSTRAINT liste_passage_ordre_uk
+              UNIQUE (tontine_id, cycle, ordre) DEFERRABLE INITIALLY DEFERRED;
+          END IF;
+        END $$;""",
     ]:
         try:
             c.execute("SAVEPOINT mig")
@@ -2090,6 +2135,9 @@ def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> dict:
     Retourne {"ok": True, "position_avant": N, "position_apres": M}
     ou {"ok": False} si déjà dernier / déjà bouffé.
     """
+    # FORTERESSE : sérialise toute mutation d'ordre de cette tontine (tenu au commit)
+    verrou_ordre_tontine(conn, tontine_id)
+
     passage = fetchone(conn, """
         SELECT id, ordre, cycle FROM liste_passage
         WHERE membre_id=%s AND tontine_id=%s
@@ -2800,6 +2848,7 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
     """
     conn = get_conn()
     try:
+        verrou_ordre_tontine(conn, tontine_id)  # FORTERESSE : sérialise l'ordre de cette tontine
         tontine = fetchone(conn, "SELECT * FROM tontines WHERE id=%s", (tontine_id,))
         if not tontine:
             release_conn(conn)
@@ -2857,11 +2906,12 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
         nb_promus = sum(1 for m in classement if m["tier"] == 0)
 
         for m in classement:
+            # Ordres 1..N distincts par construction + nouveau cycle vierge sous
+            # verrou → INSERT direct (ON CONFLICT retiré : incompatible DEFERRABLE).
             q(conn, """
                 INSERT INTO liste_passage
                     (tontine_id, membre_id, nickname, cycle, ordre, soumis_par)
                 VALUES (%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (tontine_id, cycle, ordre) DO NOTHING
             """, (tontine_id, m["membre_id"], m["nickname"],
                   nouveau_cycle, m["ordre_nouveau"], m["soumis_par"]))
 
@@ -4533,6 +4583,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         ancien      = d["modif_ordre_actuel"]
         pass_id     = d["modif_pass_id"]
         conn        = get_conn()
+        verrou_ordre_tontine(conn, tid)   # FORTERESSE : sérialise l'ordre de cette tontine
         t           = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
         # Sortir le membre vers une sentinelle (-1) AVANT le décalage : sinon le shift
         # collisionne sur UNIQUE(tontine,cycle,ordre) tant que le membre occupe `ancien`.
