@@ -3160,7 +3160,6 @@ def traiter_kyc(wa: str, texte: str, est_media: bool = False) -> bool:
 
     sess  = _sessions_kyc[wa]
     etape = sess["etape"]
-    est_mineur = sess.get("mineur")  # None = pas encore déterminé
 
     # Commande annulation
     if texte.strip().upper() == "STOP":
