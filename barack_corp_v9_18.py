@@ -116,6 +116,9 @@ GREENAPI_BASE           = os.getenv("GREENAPI_BASE", "https://api.green-api.com"
 WEBHOOK_REPLAY_TTL = int(os.getenv("WEBHOOK_REPLAY_TTL", "900"))  # secondes
 _replay_guard = ws.ReplayGuard(ttl=WEBHOOK_REPLAY_TTL, max_size=50_000)
 
+# Plafond de taille d'un média téléchargé (anti-DoS mémoire côté SSRF).
+MEDIA_MAX_BYTES = int(os.getenv("MEDIA_MAX_BYTES", str(15 * 1024 * 1024)))  # 15 Mo
+
 # ── Validation credentials Green API au démarrage ─────────────────────────
 if not GREENAPI_WEBHOOK_SECRET:
     logging.getLogger(__name__).error(
@@ -7101,24 +7104,46 @@ def webhook_whatsapp_greenapi():
 
 def _greenapi_telecharger_media(url_media: str) -> bytes:
     """Télécharge un média depuis l'URL Green API et retourne le contenu en bytes.
-    2 tentatives max. Timeout 15s par tentative. Détecte 403/404 = lien expiré."""
+    2 tentatives max. Timeout 15s par tentative. Détecte 403/404 = lien expiré.
+
+    Durcissement SSRF (finding #2) :
+      - whitelist sur le HOSTNAME avec frontière de label (ws.media_url_autorisee) ;
+      - allow_redirects=False + rejet explicite de tout 3xx : la whitelist ne
+        valide que le 1er hop ; une redirection mènerait vers 169.254.169.254,
+        127.0.0.1:4040 (API ngrok locale), Postgres, etc. ;
+      - streaming + plafond MEDIA_MAX_BYTES : pas de chargement mémoire illimité.
+    """
     if not url_media:
         return b""
+    if not ws.media_url_autorisee(url_media):
+        log.warning(f"⚠️ URL média rejetée (hors whitelist/scheme) : {url_media[:80]}")
+        return b""
     try:
-        from urllib.parse import urlparse as _urlparse
-        _p = _urlparse(url_media)
-        _domaines_ok = (".green-api.com", ".sms.by", ".whatsapp.net")
-        if _p.scheme != "https" or not any(_p.netloc.endswith(d) for d in _domaines_ok):
-            log.warning(f"⚠️ URL média Green API suspecte rejetée : {_p.netloc}")
-            return b""
         for attempt in range(2):
             try:
-                r = requests.get(url_media, timeout=15)
-                if r.status_code == 200:
-                    return r.content
-                if r.status_code in (403, 404):
-                    log.warning(f"⚠️ Média Green API {r.status_code} — lien expiré ou introuvable")
-                    return b""
+                r = requests.get(url_media, timeout=15,
+                                  allow_redirects=False, stream=True)
+                try:
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        log.warning(f"⚠️ Média Green API redirige ({r.status_code}) "
+                                    f"→ rejeté (anti-SSRF)")
+                        return b""
+                    if r.status_code == 200:
+                        buf = bytearray()
+                        for chunk in r.iter_content(65536):
+                            if not chunk:
+                                continue
+                            buf.extend(chunk)
+                            if len(buf) > MEDIA_MAX_BYTES:
+                                log.warning("⚠️ Média Green API dépasse la limite "
+                                            "de taille → rejeté")
+                                return b""
+                        return bytes(buf)
+                    if r.status_code in (403, 404):
+                        log.warning(f"⚠️ Média Green API {r.status_code} — lien expiré ou introuvable")
+                        return b""
+                finally:
+                    r.close()
                 if attempt == 0:
                     time_module.sleep(1)
             except (requests.ConnectionError, requests.Timeout):
