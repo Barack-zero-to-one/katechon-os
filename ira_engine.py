@@ -39,8 +39,8 @@ Reward : priorité de rotation (moteur Phase 1, float 0). Pool cash = hooks Phas
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import date, datetime, time, timedelta
+from typing import Callable, Optional
 
 # ──────────────────────────────────────────────────────────────────────────
 # Paramètres par défaut du barème (surchargés par les constantes du bot).
@@ -139,6 +139,68 @@ def calculer_ira(
         "plafonnee": plafonnee,
         "ira": ira,
     }
+
+
+def echeance_periode(
+    dt_paiement: datetime,
+    est_jour_collecte: Callable[[date], bool],
+    heure_ouverture: time,
+    heure_limite: time,
+    *,
+    max_recul_jours: int = 400,
+) -> datetime:
+    """
+    Échéance DATÉE (heure limite) de la période de collecte à laquelle appartient
+    dt_paiement. C'est le point de référence UNIQUE du retard : IRA et gate de
+    reclassement s'y indexent tous les deux, donc ne peuvent plus diverger.
+
+    ── RACINE DU FIX (findings #1 & #2) ────────────────────────────────────
+    L'ancien câblage ancrait la deadline sur le JOUR DE SOUMISSION
+    (`datetime.combine(dt_paiement.date(), heure_limite)`). Deux ruptures :
+      • une cotisation hebdo due lundi et payée mercredi voyait sa deadline
+        remise à mercredi → 0 jour de retard : l'accrual 2%/jour et le cap 50%
+        étaient structurellement INATTEIGNABLES (seul le cliff 15% tombait) ;
+      • un paiement à 00h30 comparé en heure-du-jour (`00:30 > 18:05` = faux)
+        échappait à IRA / slip / reclassement.
+    On mesure désormais le retard contre la deadline de la PÉRIODE DUE.
+
+    ── Règle déterministe ──────────────────────────────────────────────────
+      1. Si le paiement précède l'heure d'ouverture de son propre jour, la
+         fenêtre du jour n'est pas encore ouverte → jour de référence = veille.
+      2. On recule jour par jour jusqu'au dernier jour de collecte <= référence.
+      3. Échéance = heure_limite sur ce jour de collecte, même tzinfo que le
+         paiement (aware→aware, naive→naive : jamais de mélange).
+
+    Args:
+        dt_paiement       : datetime du paiement effectif (aware de préférence).
+        est_jour_collecte : prédicat d -> bool. Journalière = tout jour ;
+                            Hebdomadaire = jour_semaine ; Mensuelle = jour_mois.
+                            Injecté par le bot pour garder ce module PUR.
+        heure_ouverture   : ouverture de la fenêtre de dépôt (borne early-morning).
+        heure_limite      : heure limite du jour de collecte (AVANT la grâce).
+        max_recul_jours   : borne de recherche (>= 366 couvre le pas mensuel).
+
+    Returns:
+        datetime d'échéance. Config aberrante (aucun jour de collecte trouvé
+        dans la fenêtre) → fail-safe sur le jour de référence : on ne laisse
+        jamais un retard réel passer inaperçu faute de calendrier.
+
+    Propriété : monotone en dt_paiement à l'intérieur d'une même période, et
+    l'échéance renvoyée est toujours <= dt_paiement dès que le paiement est réel-
+    lement postérieur à l'ouverture d'une période — donc composable avec
+    calculer_ira sans jamais produire de retard négatif.
+    """
+    jour_ref = dt_paiement.date()
+    if dt_paiement.time() < heure_ouverture:
+        jour_ref -= timedelta(days=1)
+
+    d = jour_ref
+    for _ in range(max_recul_jours + 1):
+        if est_jour_collecte(d):
+            return datetime.combine(d, heure_limite, tzinfo=dt_paiement.tzinfo)
+        d -= timedelta(days=1)
+
+    return datetime.combine(jour_ref, heure_limite, tzinfo=dt_paiement.tzinfo)
 
 
 def eligibilite_apres_slip(slips_avant: int) -> dict:

@@ -174,9 +174,10 @@ One protocol. Every informal economy. No competitor has built cross-ROSCA infras
 | # | Source | Model |
 |---|--------|-------|
 | 1 | **FMP 2%** | Automatically deducted from each confirmed contribution |
-| 2 | **IRA** | 150 FCFA/day late fee, cumulated and deducted from cashout |
-| 3 | **Reactivation fee** | 1,000 FCFA after 72h suspension |
-| 4 | **Number change fee** | 250 FCFA (CHGNUM command) |
+| 2 | **Reactivation fee** | 1,000 FCFA after 72h suspension |
+| 3 | **Number change fee** | 250 FCFA (CHGNUM command) |
+
+> **IRA is not a revenue stream.** It is a behavioral-regulation mechanism — a late penalty indexed on the stake (Schelling cliff + daily accrual, capped at 50%) whose sole purpose is to make lateness irrational. Collected IRA is redistributed to punctual members as a rotation-priority reward, not booked as company revenue.
 
 ---
 

@@ -1532,46 +1532,24 @@ def format_montant(montant: int, pays_code: str = "CM") -> str:
 
 
 def calculer_ira_mise(montant_mise: int, dt_paiement: datetime,
-                      heure_limite_str: str = "18:00") -> dict:
+                      dt_echeance: datetime) -> dict:
     """
     IRA v2 indexée sur la mise (falaise 15% + 2%/jour, plafond 50%, plancher 200).
     Barème pur délégué à ira_engine — calcul côté serveur, incontournable.
 
     Args:
-        montant_mise     : montant de la cotisation attendue (la mise), FCFA.
-        dt_paiement      : datetime local du paiement effectif.
-        heure_limite_str : heure limite "HH:MM" du jour de dt_paiement.
+        montant_mise : montant de la cotisation attendue (la mise), FCFA.
+        dt_paiement  : datetime du paiement effectif (aware WAT).
+        dt_echeance  : échéance DATÉE de la période due (heure limite du jour de
+                       collecte, AVANT la grâce). Calculée par
+                       ira_engine.echeance_periode — jamais reconstruite ici sur
+                       le jour de soumission (c'était la racine des findings #1/#2).
     """
-    try:
-        h, m   = map(int, heure_limite_str.split(":"))
-        limite = time(h, m)
-    except Exception:
-        limite = HEURE_LIMITE_DEF
-    dt_limite = datetime.combine(dt_paiement.date(), limite)
-    if dt_paiement.tzinfo is not None:
-        dt_limite = dt_limite.replace(tzinfo=dt_paiement.tzinfo)
     return ira_engine.calculer_ira(
-        montant_mise, dt_paiement, dt_limite,
+        montant_mise, dt_paiement, dt_echeance,
         cliff=IRA_CLIFF_PCT, daily=IRA_DAILY_PCT, hourly=IRA_HOURLY_PCT,
         cap=IRA_CAP_PCT, floor=IRA_FLOOR, grace_min=IRA_GRACE_MIN,
     )
-
-
-def calculer_frais(montant_brut: int, heure: time,
-                   heure_limite_str: str = "18:00") -> dict:
-    """
-    FMP = prélèvement invisible (0% au lancement).
-    IRA = pénalité retard v2 indexée sur la mise (voir calculer_ira_mise / ira_engine).
-    Calcul côté serveur = incontournable, le membre ne peut pas tricher.
-    """
-    fmp = int(montant_brut * FRAIS_FMP)
-    dt_paiement = datetime.combine(_date.today(), heure)
-    ira = calculer_ira_mise(montant_brut, dt_paiement, heure_limite_str)["ira"]
-    return {
-        "frais_fmp":   fmp,
-        "frais_ira":   ira,
-        "montant_net": montant_brut - fmp - ira,
-    }
 
 
 def get_membre_by_wa(wa: str) -> Optional[dict]:
@@ -2238,7 +2216,8 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
         "SELECT nom_complet, whatsapp FROM membres WHERE id=%s",
         (cotis["membre_id"],))
     tontine = fetchone(conn,
-        "SELECT nom, heure_limite, montant_place, cycle_actuel "
+        "SELECT id, nom, heure_limite, heure_ouverture, montant_place, cycle_actuel, "
+        "       type_tontine, jour_semaine, jour_mois "
         "FROM tontines WHERE id=%s", (cotis["tontine_id"],))
 
     if membre and tontine:
@@ -2251,25 +2230,41 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
             f"_TontineBot Pro — BADF Ltd_"
         )
 
-    # ── Reclassement si screenshot soumis après heure_limite + 5 min ────────
+    # ── Reclassement : retard mesuré contre l'ÉCHÉANCE DATÉE de la période due ──
+    #    (pas l'heure limite du jour de soumission — cf. ira_engine.echeance_periode).
+    #    Gate ET calcul IRA partagent la MÊME échéance → impossible de diverger.
     try:
-        from datetime import timezone, timedelta as _td, datetime as _dt
+        from datetime import timezone, timedelta as _td
+        WAT   = timezone(_td(hours=1))            # tz de collecte (Africa/Douala, +1)
         h_lim = (tontine or {}).get("heure_limite") or "18:00"
-        hh, mm = map(int, h_lim.split(":"))
-        # Grace period : heure_limite + 5 minutes
-        limite_grace = (_dt.combine(_dt.today(), time(hh, mm)) + _td(minutes=5)).time()
-        WAT = timezone(_td(hours=1))
-        soumis_local = cotis["date_soumission"].astimezone(WAT).time()
+        h_ouv = (tontine or {}).get("heure_ouverture") or "05:00"
+        try:
+            _lh, _lm = map(int, h_lim.split(":")); t_limite = time(_lh, _lm)
+        except Exception:
+            t_limite = HEURE_LIMITE_DEF
+        try:
+            _oh, _om = map(int, h_ouv.split(":")); t_ouverture = time(_oh, _om)
+        except Exception:
+            t_ouverture = time(5, 0)
 
-        if soumis_local > limite_grace:
+        soumis_dt    = cotis["date_soumission"].astimezone(WAT)
+        soumis_local = soumis_dt.time()  # conservé pour l'affichage groupe/audit
+        dt_echeance  = ira_engine.echeance_periode(
+            soumis_dt,
+            lambda d: _est_jour_collecte(tontine, d),
+            t_ouverture, t_limite,
+        )
+        grace_fin = dt_echeance + _td(minutes=IRA_GRACE_MIN)
+
+        if soumis_dt > grace_fin:
             # 1. IRA v2 indexée sur la mise — collecte À LA SOURCE (à ce paiement).
             mise    = tontine["montant_place"]
             cycle   = tontine["cycle_actuel"]
-            soumis_dt = cotis["date_soumission"].astimezone(WAT)
-            calc_ira  = calculer_ira_mise(mise, soumis_dt, h_lim)
+            calc_ira  = calculer_ira_mise(mise, soumis_dt, dt_echeance)
             montant_ira = calc_ira["ira"]
             motif_ira = (
-                f"Retard cotisation — soumis {soumis_local.strftime('%H:%M')} > limite {h_lim} "
+                f"Retard cotisation — payé {soumis_dt.strftime('%d/%m %H:%M')} "
+                f"> échéance {dt_echeance.strftime('%d/%m %H:%M')} "
                 f"| J+{calc_ira['jours_retard']}"
                 + (" | plafond 50%" if calc_ira["plafonnee"] else "")
             )
@@ -2672,9 +2667,13 @@ def _rapport_ponctualite_cycle(conn, tontine_id: int, cycle: int) -> dict:
         ORDER BY lp.ordre
     """, (cycle, tontine_id, cycle))
 
-    parfaits = [m for m in membres if m["slips"] == 0]
-    mulligan = [m for m in membres if m["slips"] == 1]
-    ejectes  = [m for m in membres if m["slips"] >= 2]
+    # Un placeholder non lié (membre_id NULL) n'a pas de ponctualité mesurable :
+    # il ne doit PAS compter comme "parfait" (sinon promu à tort en tête).
+    lies      = [m for m in membres if m["membre_id"] is not None]
+    parfaits  = [m for m in lies if m["slips"] == 0]
+    mulligan  = [m for m in lies if m["slips"] == 1]
+    ejectes   = [m for m in lies if m["slips"] >= 2]
+    non_lies  = [m for m in membres if m["membre_id"] is None]
 
     def _bloc(titre, emoji, lst, suffixe=""):
         if not lst:
@@ -2685,14 +2684,15 @@ def _rapport_ponctualite_cycle(conn, tontine_id: int, cycle: int) -> dict:
     rapport_txt = (
         _bloc("Parfaits — 0 retard", "🏅", parfaits)
         + _bloc("Mulligan consommé — 1 retard toléré", "🎟️", mulligan)
-        + _bloc("Éjectés — 2+ retards", "❌", ejectes,
-                suffixe="")
+        + _bloc("Éjectés — 2+ retards", "❌", ejectes)
+        + _bloc("Non liés (nickname seul)", "🔗", non_lies)
     ) or "   (aucune donnée de ponctualité ce cycle)\n"
 
-    # Ordre proposé pour le prochain cycle (parfaits en tête).
+    # Ordre proposé pour le prochain cycle (parfaits en tête ; non-liés en dernier tier).
     classement = ira_engine.ordre_priorite_next_cycle([
         {"membre_id": m["membre_id"], "nom": m["nom"],
-         "slips": m["slips"], "ordre_actuel": m["ordre"]}
+         "slips": (m["slips"] if m["membre_id"] is not None else 99),
+         "ordre_actuel": m["ordre"]}
         for m in membres
     ])
     propose_txt = "\n".join(
@@ -2899,7 +2899,11 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
 
         classement = ira_engine.ordre_priorite_next_cycle([
             {"membre_id": p["membre_id"], "nickname": p["nickname"],
-             "soumis_par": p["soumis_par"], "slips": p["slips"],
+             "soumis_par": p["soumis_par"],
+             # Placeholder non lié (membre_id NULL) : jamais "parfait" — il n'a pas de
+             # ligne ponctualite, donc slips=0 le hisserait à tort en tête. On le
+             # classe en dernier tier (slips élevé) pour ne pas polluer la récompense.
+             "slips": (p["slips"] if p["membre_id"] is not None else 99),
              "ordre_actuel": p["ordre"]}
             for p in passages
         ])
@@ -9012,27 +9016,41 @@ def _restaurer_sessions():
 
 _JOURS_SEMAINE = {"Lundi":0,"Mardi":1,"Mercredi":2,"Jeudi":3,"Vendredi":4,"Samedi":5,"Dimanche":6}
 
-def _est_jour_cotisation(t: dict) -> bool:
-    """True si aujourd'hui est un jour de cotisation pour cette tontine."""
+def _est_jour_collecte(t: dict, d: _date) -> bool:
+    """
+    True si la date `d` est un jour de cotisation pour cette tontine.
+    Source UNIQUE du calendrier de collecte (rappels + échéance IRA) :
+      • Journaliere  → tout jour
+      • Hebdomadaire → jour_semaine
+      • Mensuelle    → jour_mois (1-28)
+    Date-paramétrique : sert aussi à ira_engine.echeance_periode pour dater
+    l'échéance d'un paiement en retard, pas seulement à tester "aujourd'hui".
+    """
     tt = t.get("type_tontine", "Journaliere")
     if tt == "Journaliere":
         return True
-    # Heure locale du pays de la tontine
-    tz_name = t.get("timezone") or "Africa/Douala"
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo(tz_name))
-    except Exception:
-        now = datetime.now()
     if tt == "Hebdomadaire":
         jour_cible = _JOURS_SEMAINE.get(t.get("jour_semaine"))
         if jour_cible is None:
-            log.warning(f"jour_semaine invalide '{t.get('jour_semaine')}' tontine#{t.get('id')} — rappel ignoré")
+            log.warning(f"jour_semaine invalide '{t.get('jour_semaine')}' tontine#{t.get('id')}")
             return False
-        return now.weekday() == jour_cible
+        return d.weekday() == jour_cible
     if tt == "Mensuelle":
-        return now.day == (t.get("jour_mois") or 1)
+        return d.day == (t.get("jour_mois") or 1)
     return True
+
+
+def _est_jour_cotisation(t: dict) -> bool:
+    """True si aujourd'hui (tz de la tontine) est un jour de cotisation."""
+    if t.get("type_tontine", "Journaliere") == "Journaliere":
+        return True
+    tz_name = t.get("timezone") or "Africa/Douala"
+    try:
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo(tz_name)).date()
+    except Exception:
+        today = datetime.now().date()
+    return _est_jour_collecte(t, today)
 
 
 def rappel_ouverture():

@@ -4,7 +4,7 @@ Tests du moteur IRA v2 (module pur ira_engine). Aucune DB requise.
 Lancer :  python -m pytest test_ira_engine.py -v
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 
@@ -175,3 +175,115 @@ def test_bonus_zero_parfait_rollover_total():
 def test_bonus_frais_superieurs_pool():
     r = ie.bonus_par_parfait(100, 3, frais_dispatch=500)
     assert r["pool_net"] == 0 and r["bonus_tete"] == 0 and r["reliquat_rollover"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# echeance_periode — RACINE des findings #1 (accrual mort) et #2 (00h30 impuni)
+# ══════════════════════════════════════════════════════════════════════════
+WAT      = timezone(timedelta(hours=1))
+OUV      = time(5, 0)    # heure_ouverture
+LIM      = time(18, 0)   # heure_limite
+
+# Prédicats de collecte (mêmes règles que _est_jour_collecte du bot).
+_JOURS = {"Lundi": 0, "Mardi": 1, "Mercredi": 2, "Jeudi": 3,
+          "Vendredi": 4, "Samedi": 5, "Dimanche": 6}
+tous_les_jours = lambda d: True                                    # Journalière
+def hebdo(jour):     return lambda d: d.weekday() == _JOURS[jour]  # Hebdomadaire
+def mensuel(jm):     return lambda d: d.day == jm                  # Mensuelle
+
+
+def _dt(y, mo, day, h, mi=0):
+    return datetime(y, mo, day, h, mi, tzinfo=WAT)
+
+
+# ── Journalière : le jour même ──────────────────────────────────────────────
+def test_echeance_journaliere_apres_ouverture_meme_jour():
+    # Paiement 10h le 13 (après ouverture 05h) → échéance = 13 à 18h.
+    e = ie.echeance_periode(_dt(2026, 8, 13, 10), tous_les_jours, OUV, LIM)
+    assert e == _dt(2026, 8, 13, 18)
+
+
+def test_echeance_journaliere_avant_ouverture_recule_a_la_veille():
+    # BUG #2 : paiement à 00h30 le 14 (avant ouverture 05h) → la fenêtre du 14
+    # n'est pas ouverte, l'échéance due est celle du 13 à 18h. L'ancien code
+    # comparait 00:30 > 18:05 (faux) et laissait passer le retard.
+    e = ie.echeance_periode(_dt(2026, 8, 14, 0, 30), tous_les_jours, OUV, LIM)
+    assert e == _dt(2026, 8, 13, 18)
+
+
+# ── Hebdomadaire : la deadline reste ancrée au jour de collecte ─────────────
+def test_echeance_hebdo_paye_deux_jours_apres():
+    # BUG #1 : collecte le lundi. Payé le mercredi 12h → échéance = LUNDI 18h,
+    # pas mercredi. C'est ce qui rend l'accrual 2%/jour atteignable.
+    # 2026-08-10 = lundi, 2026-08-12 = mercredi.
+    e = ie.echeance_periode(_dt(2026, 8, 12, 12), hebdo("Lundi"), OUV, LIM)
+    assert e == _dt(2026, 8, 10, 18)
+
+
+def test_echeance_hebdo_meme_jour_avant_limite():
+    # Payé lundi 09h (jour de collecte, avant limite) → échéance lundi 18h (à l'heure).
+    e = ie.echeance_periode(_dt(2026, 8, 10, 9), hebdo("Lundi"), OUV, LIM)
+    assert e == _dt(2026, 8, 10, 18)
+
+
+# ── Mensuelle : recule jusqu'au jour_mois du mois courant/précédent ────────
+def test_echeance_mensuelle_paye_apres_le_5():
+    # Collecte le 5 du mois. Payé le 20 → échéance = 5 du mois, 18h.
+    e = ie.echeance_periode(_dt(2026, 8, 20, 14), mensuel(5), OUV, LIM)
+    assert e == _dt(2026, 8, 5, 18)
+
+
+def test_echeance_mensuelle_recule_au_mois_precedent():
+    # Payé le 3 alors que la collecte est le 5 → dernière collecte = 5 du mois
+    # précédent (juillet). Recul multi-jours au-delà de la frontière de mois.
+    e = ie.echeance_periode(_dt(2026, 8, 3, 14), mensuel(5), OUV, LIM)
+    assert e == _dt(2026, 7, 5, 18)
+
+
+# ── tz préservé + fail-safe ─────────────────────────────────────────────────
+def test_echeance_preserve_tzinfo():
+    e = ie.echeance_periode(_dt(2026, 8, 13, 10), tous_les_jours, OUV, LIM)
+    assert e.tzinfo is WAT
+
+
+def test_echeance_naive_reste_naive():
+    p = datetime(2026, 8, 13, 10, 0)  # naive
+    e = ie.echeance_periode(p, tous_les_jours, OUV, LIM)
+    assert e.tzinfo is None and e == datetime(2026, 8, 13, 18, 0)
+
+
+def test_echeance_failsafe_aucun_jour_collecte():
+    # Calendrier aberrant (prédicat toujours faux) → fail-safe sur le jour de
+    # référence, jamais None ni exception : on ne laisse pas un retard filer.
+    e = ie.echeance_periode(_dt(2026, 8, 13, 10), lambda d: False, OUV, LIM)
+    assert e == _dt(2026, 8, 13, 18)
+
+
+# ── INTÉGRATION : echeance_periode ∘ calculer_ira ressuscite l'accrual ─────
+def test_integration_hebdo_accrual_reel():
+    # Hebdo lundi, mise 50 000, payé mercredi 12h.
+    paiement = _dt(2026, 8, 12, 12)
+    ech = ie.echeance_periode(paiement, hebdo("Lundi"), OUV, LIM)
+    r = ie.calculer_ira(50_000, paiement, ech)
+    # Mardi 18h05 → J+1 franchi ; 15% + 2%·? Le mercredi midi est à ~1j18h de la
+    # grâce du lundi → 1 jour plein.
+    assert r["en_grace"] is False
+    assert r["jours_retard"] == 1
+    assert r["ira"] == 8_500  # 15% + 2% = 17% de 50 000
+
+
+def test_integration_00h30_journaliere_paye_le_cliff():
+    # BUG #2 vivant : 00h30 le 14, daily → échéance 13 18h → retard réel → cliff 15%.
+    paiement = _dt(2026, 8, 14, 0, 30)
+    ech = ie.echeance_periode(paiement, tous_les_jours, OUV, LIM)
+    r = ie.calculer_ira(50_000, paiement, ech)
+    assert r["en_grace"] is False
+    assert r["ira"] == 7_500
+
+
+def test_integration_journaliere_a_lheure_pas_dira():
+    # Payé 10h le jour même → en grâce (avant 18h05), IRA nulle.
+    paiement = _dt(2026, 8, 13, 10)
+    ech = ie.echeance_periode(paiement, tous_les_jours, OUV, LIM)
+    r = ie.calculer_ira(50_000, paiement, ech)
+    assert r["en_grace"] is True and r["ira"] == 0
