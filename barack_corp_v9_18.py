@@ -63,6 +63,8 @@ import requests
 from flask import Flask, request, jsonify, Response, session
 from apscheduler.schedulers.background import BackgroundScheduler
 
+import webhook_security as ws  # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
+
 # ══════════════════════════════════════════════════════════════════════════
 # CONFIGURATION GÉNÉRALE
 # ══════════════════════════════════════════════════════════════════════════
@@ -108,6 +110,11 @@ GREENAPI_INSTANCE_ID    = os.getenv("GREENAPI_INSTANCE_ID",    "")  # Ex: 123456
 GREENAPI_TOKEN          = os.getenv("GREENAPI_TOKEN",          "")  # API token Green API
 GREENAPI_WEBHOOK_SECRET = os.getenv("GREENAPI_WEBHOOK_SECRET", "")  # Token secret webhook (256 bits)
 GREENAPI_BASE           = os.getenv("GREENAPI_BASE", "https://api.green-api.com")
+
+# Anti-rejeu webhook : le token statique dans l'URL n'empêche pas de rejouer une
+# requête capturée. On déduplique les idMessage sur une fenêtre glissante, borné.
+WEBHOOK_REPLAY_TTL = int(os.getenv("WEBHOOK_REPLAY_TTL", "900"))  # secondes
+_replay_guard = ws.ReplayGuard(ttl=WEBHOOK_REPLAY_TTL, max_size=50_000)
 
 # ── Validation credentials Green API au démarrage ─────────────────────────
 if not GREENAPI_WEBHOOK_SECRET:
@@ -7014,8 +7021,14 @@ def webhook_whatsapp_greenapi():
     if not GREENAPI_WEBHOOK_SECRET:
         log.error("🔴 GREENAPI_WEBHOOK_SECRET non configuré — webhook refusé")
         return jsonify({"status": "misconfigured"}), 503
+    # Token accepté en query (mode Green API) OU en header Authorization: Bearer
+    # (le header ne fuite pas dans les access logs comme le query string).
     incoming_token = request.args.get("token", "")
-    if not hmac.compare_digest(incoming_token, GREENAPI_WEBHOOK_SECRET):
+    if not incoming_token:
+        _auth = request.headers.get("Authorization", "")
+        if _auth.startswith("Bearer "):
+            incoming_token = _auth[7:]
+    if not ws.constant_time_equal(incoming_token, GREENAPI_WEBHOOK_SECRET):
         log_audit("GREENAPI_TOKEN_INVALIDE", "Webhook token mismatch", request.remote_addr)
         return jsonify({"status": "forbidden"}), 403
 
@@ -7024,6 +7037,13 @@ def webhook_whatsapp_greenapi():
         payload = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"status": "bad_json"}), 400
+
+    # ── 2b) Anti-rejeu : un idMessage déjà vu = requête rejouée → drop ─────
+    #        Tue le replay d'une requête capturée (le token seul ne l'empêche pas).
+    if _replay_guard.est_rejeu(payload.get("idMessage", "")):
+        log_audit("WEBHOOK_REPLAY",
+                  f"idMessage rejoué: {payload.get('idMessage', '')}", request.remote_addr)
+        return jsonify({"status": "ok"}), 200
 
     # ── 3) Router par type d'événement ──────────────────────────────────
     type_webhook = payload.get("typeWebhook", "")
