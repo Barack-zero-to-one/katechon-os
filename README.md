@@ -63,7 +63,7 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 | Priority | Vulnerability | Fix Applied |
 |----------|--------------|-------------|
 | **P0** | SQL Injection — fetchall/fetchone | Systematic bind parameters, zero f-string SQL |
-| **P0** | Webhook without HMAC validation | X-Hub-Signature-256 validated before any payload parsing |
+| **P0** | Webhook without authentication | Shared-secret token required on every webhook — constant-time comparison, fail-closed (503 if unset, 403 on mismatch) |
 | **P0** | Race condition double-confirm contribution | `SELECT FOR UPDATE` PostgreSQL — native pessimistic lock |
 | **P0** | Screenshot recycling — no hash | SHA-256 + `UNIQUE INDEX` DB + 24h max delay |
 | **P0** | SSRF via arbitrary URL | Whitelisted domains only, all other URLs rejected |
@@ -80,7 +80,7 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 |----------|-------|-------------|
 | GV — Govern | 65% | Owner / Admin / Member hierarchy, permission gating, blocking debt |
 | ID — Identify | 88% | 17-table asset inventory, name-only instant onboarding, `requirements.txt` SBOM |
-| PR — Protect | 82% | HMAC-SHA256, rate limiting, network blacklist, SHA-256, SSRF whitelist |
+| PR — Protect | 82% | Constant-time token auth, rate limiting, network blacklist, SHA-256, SSRF whitelist |
 | DE — Detect | 93% | 68+ event types in `audit_log`, Trust Graph fugue model, burst fraud alert ≥5/h |
 | RS — Respond | 80% | Auto-ban ×3 fraud, automatic 72h suspension, 3 fugue stages + ANIF/COBAC deterrence |
 | RC — Recover | 84% | `pg_dump` daily 7-day rotation + integrity check, outbox JSON, session backup, `@healed`, watchdog |
@@ -91,7 +91,7 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 
 | # | Layer | Mechanism |
 |---|-------|-----------|
-| 1 | **HMAC-SHA256 Webhook Auth** | Every inbound webhook signed and validated before payload read |
+| 1 | **Authenticated Webhook** | Shared-secret token required on every inbound webhook — constant-time comparison (`compare_digest`), fail-closed, validated before payload processing |
 | 2 | **Parameterized SQL** | All queries use `%s` bind params — zero f-string SQL, zero injection surface |
 | 3 | **SELECT FOR UPDATE** | Pessimistic PostgreSQL lock on cashout — concurrent double-confirm impossible |
 | 4 | **SHA-256 Screenshot Anti-Replay** | Unique fingerprint per image; rejected if seen before or >24h old |

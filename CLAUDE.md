@@ -97,7 +97,7 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 
 ## 26 Couches de sécurité
 
-1. **HMAC-SHA256 Webhook Auth** — chaque webhook entrant est signé et validé avant lecture du payload.
+1. **Webhook authentifié (token secret)** — chaque webhook entrant exige un token secret partagé (`GREENAPI_WEBHOOK_SECRET`), comparé en temps constant (`hmac.compare_digest`), fail-closed (503 si absent, 403 si invalide), validé avant traitement du payload. ⚠️ Ce n'est **pas** une signature HMAC du payload : Green API ne signe pas ses webhooks, le token est un bearer partagé. Durcissement anti-rejeu (dédup `idMessage`) ajouté en PR sécu.
 2. **SQL paramétré** — toutes les requêtes utilisent des bind params `%s` — zéro f-string SQL, zéro surface d'injection.
 3. **SELECT FOR UPDATE PostgreSQL** — verrou pessimiste natif DB sur le bouffage. Deux admins tapent OUI simultanément → un seul passe.
 4. **SHA-256 hash anti-recyclage screenshots** — empreinte unique par image ; rejet si déjà vue ou modifiée, délai max 24h.
