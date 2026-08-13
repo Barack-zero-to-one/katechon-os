@@ -63,6 +63,8 @@ import requests
 from flask import Flask, request, jsonify, Response, session
 from apscheduler.schedulers.background import BackgroundScheduler
 
+import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
+
 # ══════════════════════════════════════════════════════════════════════════
 # CONFIGURATION GÉNÉRALE
 # ══════════════════════════════════════════════════════════════════════════
@@ -75,8 +77,18 @@ BOT_NOM = os.getenv("BOT_NOM", "TontineBot Pro")
 
 # ── Frais BADF Ltd ────────────────────────────────────────────────────────
 FRAIS_FMP        = 0.00    # Gratuit au lancement — modèle 2% activable (une ligne)
-MONTANT_IRA      = 150     # Pénalité retard (FCFA/jour)
 HEURE_LIMITE_DEF = time(18, 0)
+
+# ── IRA v2 — Katechon comportemental (barème indexé sur la mise) ───────────
+# Modèle : falaise 15% dès la 6e min + 2%/jour linéaire, plafond 50%, plancher 200,
+# arrondi bas 100. Rampe horaire optionnelle (IRA_HOURLY_PCT>0). Voir ira_engine.py.
+IRA_CLIFF_PCT    = 0.15    # Socle Schelling : % de la mise dès la 6e minute de retard
+IRA_DAILY_PCT    = 0.02    # Accrual journalier linéaire
+IRA_HOURLY_PCT   = 0.00    # Rampe intra-day (0 = falaise plate ; 0.01 = urgence horaire)
+IRA_CAP_PCT      = 0.50    # Plafond anti-usure (optics ANIF/COBAC)
+IRA_FLOOR        = 200     # Plancher aligné grille 100 (protège les petits groupes)
+IRA_GRACE_MIN    = 5       # Tolérance réseau MTN/Orange (minutes)
+MONTANT_IRA      = 150     # DÉPRÉCIÉ — conservé le temps de migrer les anciens messages
 FRAIS_REACTIV    = 1_000   # Réactivation après suspension
 FRAIS_CHGNUM     = 250     # Changement de numéro Mobile Money
 
@@ -1023,6 +1035,20 @@ def init_db():
         prelevee_le TIMESTAMPTZ
     )""")
 
+    # ── PONCTUALITÉ / MULLIGAN (IRA v2) ───────────────────────────────────
+    # 1 slip réseau toléré par cycle : le 1er retard préserve bonus+position,
+    # le 2e éjecte. Pilote la priorité de rotation du cycle suivant (ira_engine).
+    c.execute("""CREATE TABLE IF NOT EXISTS ponctualite_cycle (
+        id          SERIAL PRIMARY KEY,
+        membre_id   INTEGER NOT NULL REFERENCES membres(id),
+        tontine_id  INTEGER NOT NULL REFERENCES tontines(id),
+        cycle       INTEGER NOT NULL,
+        slips       INTEGER NOT NULL DEFAULT 0,
+        eligible    BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(membre_id, tontine_id, cycle)
+    )""")
+
     # ── ALERTES FUGUE ─────────────────────────────────────────────────────
     c.execute("""CREATE TABLE IF NOT EXISTS alertes_fugue (
         id          SERIAL PRIMARY KEY,
@@ -1460,21 +1486,42 @@ def format_montant(montant: int, pays_code: str = "CM") -> str:
     return f"{montant:,} {devise}".replace(",", " ")
 
 
-def calculer_frais(montant_brut: int, heure: time,
-                   heure_limite_str: str = "18:00") -> dict:
+def calculer_ira_mise(montant_mise: int, dt_paiement: datetime,
+                      heure_limite_str: str = "18:00") -> dict:
     """
-    FMP = 2% prélevé invisiblement.
-    IRA = 150 FCFA si paiement APRÈS l'heure limite.
-    Calcul côté serveur = incontournable, le membre ne peut pas tricher.
+    IRA v2 indexée sur la mise (falaise 15% + 2%/jour, plafond 50%, plancher 200).
+    Barème pur délégué à ira_engine — calcul côté serveur, incontournable.
+
+    Args:
+        montant_mise     : montant de la cotisation attendue (la mise), FCFA.
+        dt_paiement      : datetime local du paiement effectif.
+        heure_limite_str : heure limite "HH:MM" du jour de dt_paiement.
     """
-    fmp = int(montant_brut * FRAIS_FMP)
     try:
         h, m   = map(int, heure_limite_str.split(":"))
         limite = time(h, m)
     except Exception:
         limite = HEURE_LIMITE_DEF
-    grace = (datetime.combine(_date.today(), limite) + timedelta(minutes=5)).time()
-    ira = MONTANT_IRA if heure >= grace else 0
+    dt_limite = datetime.combine(dt_paiement.date(), limite)
+    if dt_paiement.tzinfo is not None:
+        dt_limite = dt_limite.replace(tzinfo=dt_paiement.tzinfo)
+    return ira_engine.calculer_ira(
+        montant_mise, dt_paiement, dt_limite,
+        cliff=IRA_CLIFF_PCT, daily=IRA_DAILY_PCT, hourly=IRA_HOURLY_PCT,
+        cap=IRA_CAP_PCT, floor=IRA_FLOOR, grace_min=IRA_GRACE_MIN,
+    )
+
+
+def calculer_frais(montant_brut: int, heure: time,
+                   heure_limite_str: str = "18:00") -> dict:
+    """
+    FMP = prélèvement invisible (0% au lancement).
+    IRA = pénalité retard v2 indexée sur la mise (voir calculer_ira_mise / ira_engine).
+    Calcul côté serveur = incontournable, le membre ne peut pas tricher.
+    """
+    fmp = int(montant_brut * FRAIS_FMP)
+    dt_paiement = datetime.combine(_date.today(), heure)
+    ira = calculer_ira_mise(montant_brut, dt_paiement, heure_limite_str)["ira"]
     return {
         "frais_fmp":   fmp,
         "frais_ira":   ira,
@@ -2015,6 +2062,27 @@ def enregistrer_cotisation_manuelle(conn, membre_id: int, tontine_id: int,
         )
 
 
+def _incrementer_slip_cycle(conn, membre_id: int, tontine_id: int, cycle: int) -> int:
+    """
+    Enregistre un slip (retard hors grâce) pour ce membre/cycle et retourne le
+    nombre de slips AVANT celui-ci (0 => ce slip est le mulligan).
+
+    Upsert atomique : la ligne ponctualite_cycle pilote l'éligibilité bonus et la
+    priorité de rotation du cycle suivant (voir ira_engine.eligibilite_apres_slip).
+    """
+    row = fetchone(conn, """
+        INSERT INTO ponctualite_cycle (membre_id, tontine_id, cycle, slips, eligible)
+        VALUES (%s, %s, %s, 1, TRUE)
+        ON CONFLICT (membre_id, tontine_id, cycle)
+        DO UPDATE SET slips      = ponctualite_cycle.slips + 1,
+                      eligible   = (ponctualite_cycle.slips + 1) <= 1,
+                      updated_at = NOW()
+        RETURNING slips
+    """, (membre_id, tontine_id, cycle))
+    slips_apres = row["slips"] if row else 1
+    return slips_apres - 1
+
+
 def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> dict:
     """
     Paiement après heure_limite → déplace le membre en dernière position
@@ -2117,7 +2185,8 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
         "SELECT nom_complet, whatsapp FROM membres WHERE id=%s",
         (cotis["membre_id"],))
     tontine = fetchone(conn,
-        "SELECT nom, heure_limite FROM tontines WHERE id=%s", (cotis["tontine_id"],))
+        "SELECT nom, heure_limite, montant_place, cycle_actuel "
+        "FROM tontines WHERE id=%s", (cotis["tontine_id"],))
 
     if membre and tontine:
         wa_prive(membre["whatsapp"],
@@ -2140,28 +2209,60 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
         soumis_local = cotis["date_soumission"].astimezone(WAT).time()
 
         if soumis_local > limite_grace:
-            # 1. IRA 150 FCFA — dette enregistrée en DB
+            # 1. IRA v2 indexée sur la mise — collecte À LA SOURCE (à ce paiement).
+            mise    = tontine["montant_place"]
+            cycle   = tontine["cycle_actuel"]
+            soumis_dt = cotis["date_soumission"].astimezone(WAT)
+            calc_ira  = calculer_ira_mise(mise, soumis_dt, h_lim)
+            montant_ira = calc_ira["ira"]
+            motif_ira = (
+                f"Retard cotisation — soumis {soumis_local.strftime('%H:%M')} > limite {h_lim} "
+                f"| J+{calc_ira['jours_retard']}"
+                + (" | plafond 50%" if calc_ira["plafonnee"] else "")
+            )
             q(conn, """INSERT INTO dettes_ira (membre_id, tontine_id, montant, motif)
                        VALUES (%s, %s, %s, %s)""",
-              (cotis["membre_id"], cotis["tontine_id"], MONTANT_IRA,
-               f"Retard cotisation — soumis {soumis_local.strftime('%H:%M')} > limite {h_lim}"))
+              (cotis["membre_id"], cotis["tontine_id"], montant_ira, motif_ira))
             conn.commit()
 
-            # 2. Reclassement en dernière position
-            reclasse = _reclasser_en_dernier(conn, cotis["membre_id"], cotis["tontine_id"])
-            if reclasse["ok"]:
-                conn.commit()
+            # 1bis. Tracking mulligan/éligibilité (1 slip réseau toléré/cycle).
+            slips_avant = _incrementer_slip_cycle(conn, cotis["membre_id"],
+                                                  cotis["tontine_id"], cycle)
+            elig = ira_engine.eligibilite_apres_slip(slips_avant)
+            conn.commit()
 
-            # 3. Notification membre (IRA + reclassement)
+            # 2. Reclassement en dernière position — SEULEMENT à l'éjection (2e slip).
+            #    Le mulligan (1er slip) préserve la position ; le cliff IRA suffit.
+            reclasse = {"ok": False}
+            if elig["ejecte"]:
+                reclasse = _reclasser_en_dernier(conn, cotis["membre_id"], cotis["tontine_id"])
+                if reclasse["ok"]:
+                    conn.commit()
+
+            # 3. Notification membre (IRA indexée + statut mulligan/éjection)
             if membre and tontine:
+                pct_cliff = int(IRA_CLIFF_PCT * 100)
                 msg_retard = (
                     f"⚠️ *COTISATION EN RETARD — {tontine['nom']}*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"Votre cotisation a été enregistrée ✅, mais elle est "
                     f"arrivée après l'heure limite (*{h_lim}*).\n\n"
                     f"📌 *Conséquences :*\n"
-                    f"• Pénalité IRA : *{MONTANT_IRA:,} FCFA* ajoutée à votre dette\n"
+                    f"• Pénalité IRA : *{montant_ira:,} FCFA* ajoutée à votre dette "
+                    f"({pct_cliff}% de la mise"
+                    + (f" +{int(IRA_DAILY_PCT*100)}%/jour" if calc_ira["jours_retard"] else "")
+                    + (", *plafond atteint*" if calc_ira["plafonnee"] else "") + ")\n"
                 )
+                if elig["mulligan_utilise"]:
+                    msg_retard += (
+                        f"• 🎟️ *Retard réseau toléré* (1/cycle) — votre bonus de "
+                        f"ponctualité et votre position sont *préservés*. "
+                        f"Un 2e retard ce cycle vous éjecte.\n"
+                    )
+                elif elig["ejecte"]:
+                    msg_retard += (
+                        f"• ❌ *2e retard du cycle* — éjecté du bonus de ponctualité.\n"
+                    )
                 if reclasse["ok"]:
                     msg_retard += (
                         f"• Reclassement : *position {reclasse['position_avant']}*"
@@ -2199,9 +2300,11 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
                 wa_groupe(tontine_full["whatsapp_groupe"], "\n".join(lines))
 
             pos_log = (f"position {reclasse['position_avant']} → position {reclasse['position_apres']}"
-                       if reclasse["ok"] else "déjà dernière position")
-            log_audit("RECLASSEMENT_RETARD",
-                      f"Membre#{cotis['membre_id']} | {pos_log} | IRA {MONTANT_IRA} FCFA | "
+                       if reclasse["ok"] else "position préservée (mulligan)")
+            log_audit("RETARD_COTISATION",
+                      f"Membre#{cotis['membre_id']} | {pos_log} | IRA {montant_ira} FCFA "
+                      f"(J+{calc_ira['jours_retard']}{', cap' if calc_ira['plafonnee'] else ''}) | "
+                      f"slip#{elig['slips_apres']} {'ÉJECTÉ' if elig['ejecte'] else 'toléré'} | "
                       f"Tontine#{cotis['tontine_id']} | Soumis:{soumis_local.strftime('%H:%M')} > {h_lim}+5min")
     except Exception as _re:
         log.warning(f"⚠️ Reclassement retard non bloquant : {_re}")
@@ -2491,6 +2594,72 @@ def confirmer_bouffage_vire(conn, bouffage_id: int, admin_wa: str) -> dict:
     return {"ok": True, "msg": "✅ Bouffage confirmé et enregistré."}
 
 
+def _rapport_ponctualite_cycle(conn, tontine_id: int, cycle: int) -> dict:
+    """
+    Construit le rapport de ponctualité d'un cycle + l'ordre PROPOSÉ pour le suivant.
+
+    Bot = moteur de calcul + mémoire impartiale ; l'admin reste juge final. Ce rapport
+    est de la situational awareness (qui parfait / mulligan / fugitif) + carburant Trust
+    Graph, et sert de PROPOSITION que l'admin validera via NOUVEAU_CYCLE.
+
+    Absence de ligne ponctualite_cycle = 0 slip = parfait.
+
+    Returns: {"rapport_txt", "propose_txt", "stats": {parfaits, mulligan, ejectes, total}}
+    """
+    membres = fetchall(conn, """
+        SELECT lp.membre_id, lp.ordre,
+               COALESCE(m.nom_complet, lp.nickname, '???') AS nom,
+               COALESCE(pc.slips, 0) AS slips
+        FROM liste_passage lp
+        LEFT JOIN membres m           ON m.id = lp.membre_id
+        LEFT JOIN ponctualite_cycle pc ON pc.membre_id = lp.membre_id
+                                      AND pc.tontine_id = lp.tontine_id
+                                      AND pc.cycle = %s
+        WHERE lp.tontine_id=%s AND lp.cycle=%s
+        ORDER BY lp.ordre
+    """, (cycle, tontine_id, cycle))
+
+    parfaits = [m for m in membres if m["slips"] == 0]
+    mulligan = [m for m in membres if m["slips"] == 1]
+    ejectes  = [m for m in membres if m["slips"] >= 2]
+
+    def _bloc(titre, emoji, lst, suffixe=""):
+        if not lst:
+            return ""
+        lignes = "\n".join(f"   {emoji} {x['nom']}{suffixe}" for x in lst)
+        return f"*{titre}* ({len(lst)})\n{lignes}\n"
+
+    rapport_txt = (
+        _bloc("Parfaits — 0 retard", "🏅", parfaits)
+        + _bloc("Mulligan consommé — 1 retard toléré", "🎟️", mulligan)
+        + _bloc("Éjectés — 2+ retards", "❌", ejectes,
+                suffixe="")
+    ) or "   (aucune donnée de ponctualité ce cycle)\n"
+
+    # Ordre proposé pour le prochain cycle (parfaits en tête).
+    classement = ira_engine.ordre_priorite_next_cycle([
+        {"membre_id": m["membre_id"], "nom": m["nom"],
+         "slips": m["slips"], "ordre_actuel": m["ordre"]}
+        for m in membres
+    ])
+    propose_txt = "\n".join(
+        f"   {m['ordre_nouveau']:>2}. {m['nom']}"
+        + ("  🏅" if m["tier"] == 0 else "  🎟️" if m["tier"] == 1 else "  ❌")
+        for m in classement
+    ) or "   (liste vide)"
+
+    return {
+        "rapport_txt": rapport_txt,
+        "propose_txt": propose_txt,
+        "stats": {
+            "parfaits": len(parfaits),
+            "mulligan": len(mulligan),
+            "ejectes": len(ejectes),
+            "total": len(membres),
+        },
+    }
+
+
 def _verifier_fin_cycle(conn, tontine_id: int):
     """
     Appelée après chaque bouffage confirmé.
@@ -2520,6 +2689,24 @@ def _verifier_fin_cycle(conn, tontine_id: int):
     log_audit("FIN_CYCLE",
               f"Tontine:{tontine['nom']} | Cycle:{nb_cycles} terminé")
 
+    # ── PHASE 2 — Dispatch Bonus de Ponctualité (compte marchand MoMo/OM) ──
+    # INACTIF tant que pas d'API de mouvement de fonds (roadmap Q1 2027).
+    # La récompense Phase 1 = priorité de rotation (appliquée dans demarrer_nouveau_cycle).
+    # À l'arrivée du compte marchand, décommenter : le pool = Σ IRA COLLECTÉES
+    # (statut='Prelevee', pas 'Due'), netté des frais MoMo/OM, réparti entre les
+    # membres éligibles (0-1 slip). Invariant dur : Redistribué ≤ Collecté.
+    # Voir mémoire projet : project_merchant_account_rubicon.
+    #
+    #   pool = fetchone(conn, "SELECT COALESCE(SUM(montant),0) t FROM dettes_ira "
+    #                         "WHERE tontine_id=%s AND statut='Prelevee'",
+    #                         (tontine_id,))["t"]
+    #   n_parfaits = fetchone(conn, "SELECT COUNT(*) n FROM ponctualite_cycle "
+    #                               "WHERE tontine_id=%s AND cycle=%s AND eligible",
+    #                               (tontine_id, nb_cycles))["n"]
+    #   dispatch = ira_engine.bonus_par_parfait(pool, n_parfaits,
+    #                                           frais_dispatch=_frais_momo(pool, n_parfaits))
+    #   # reliquat_rollover → pot du cycle suivant (dynamique jackpot)
+
     # Annonce dans le groupe
     if tontine.get("whatsapp_groupe"):
         wa_groupe(tontine["whatsapp_groupe"],
@@ -2533,20 +2720,42 @@ def _verifier_fin_cycle(conn, tontine_id: int):
             f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
         )
 
-    # DM aux admins — leur demander la décision
+    # Rapport de ponctualité + ordre PROPOSÉ (bot propose, admin dispose).
+    try:
+        rap = _rapport_ponctualite_cycle(conn, tontine_id, nb_cycles)
+    except Exception as _re:
+        log.warning(f"⚠️ Rapport ponctualité non bloquant : {_re}")
+        rap = None
+
+    # DM aux admins — rapport + proposition + demande de décision
     admins = fetchall(conn,
         "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s", (tontine_id,))
     for adm in admins:
-        wa_prive(adm["whatsapp"],
+        msg = (
             f"🎉 *CYCLE {nb_cycles} TERMINÉ — {tontine['nom']}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Tous les membres ont bouffé. Le cycle {nb_cycles} est clôturé.\n\n"
+        )
+        if rap:
+            s = rap["stats"]
+            msg += (
+                f"📊 *PONCTUALITÉ DU CYCLE*\n"
+                f"{rap['rapport_txt']}\n"
+                f"🔄 *ORDRE PROPOSÉ — prochain cycle*\n"
+                f"_(parfaits promus en tête — proposition, vous restez juge)_\n"
+                f"{rap['propose_txt']}\n\n"
+                f"💡 Le classement s'applique si vous lancez *NOUVEAU_CYCLE*. "
+                f"Vous pouvez l'ajuster ensuite (option *modifier la liste*) — "
+                f"toute modification est tracée.\n\n"
+            )
+        msg += (
             f"Que souhaitez-vous faire ?\n\n"
             f"  1. Tapez *admin {tontine['nom']}*\n"
             f"  2. Puis tapez *NOUVEAU_CYCLE* pour repartir avec les mêmes membres\n"
             f"     ou *CLOTURER* pour clôturer définitivement cette tontine\n\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
+        wa_prive(adm["whatsapp"], msg)
 
     # Notifier le owner
     wa_owner(
@@ -2619,22 +2828,37 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
                    WHERE tontine_id=%s AND cycle=%s""",
           (tontine_id, ancien_cycle))
 
-        # Dupliquer la liste pour le nouveau cycle avec les mêmes membres
+        # Dupliquer la liste pour le nouveau cycle — REWARD : priorité de rotation.
+        # Les membres parfaits (0 slip) sont promus en tête, mulligan (1 slip) ensuite,
+        # éjectés (2+) en fin. Absence de ligne ponctualite = jamais en retard = parfait.
         passages = fetchall(conn, """
-            SELECT membre_id, nickname, ordre, soumis_par
-            FROM liste_passage
-            WHERE tontine_id=%s AND cycle=%s
-            ORDER BY ordre
-        """, (tontine_id, ancien_cycle))
+            SELECT lp.membre_id, lp.nickname, lp.ordre, lp.soumis_par,
+                   COALESCE(pc.slips, 0) AS slips
+            FROM liste_passage lp
+            LEFT JOIN ponctualite_cycle pc
+                   ON pc.membre_id = lp.membre_id
+                  AND pc.tontine_id = lp.tontine_id
+                  AND pc.cycle = %s
+            WHERE lp.tontine_id=%s AND lp.cycle=%s
+            ORDER BY lp.ordre
+        """, (ancien_cycle, tontine_id, ancien_cycle))
 
-        for p in passages:
+        classement = ira_engine.ordre_priorite_next_cycle([
+            {"membre_id": p["membre_id"], "nickname": p["nickname"],
+             "soumis_par": p["soumis_par"], "slips": p["slips"],
+             "ordre_actuel": p["ordre"]}
+            for p in passages
+        ])
+        nb_promus = sum(1 for m in classement if m["tier"] == 0)
+
+        for m in classement:
             q(conn, """
                 INSERT INTO liste_passage
                     (tontine_id, membre_id, nickname, cycle, ordre, soumis_par)
                 VALUES (%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (tontine_id, cycle, ordre) DO NOTHING
-            """, (tontine_id, p["membre_id"], p["nickname"],
-                  nouveau_cycle, p["ordre"], p["soumis_par"]))
+            """, (tontine_id, m["membre_id"], m["nickname"],
+                  nouveau_cycle, m["ordre_nouveau"], m["soumis_par"]))
 
         # Remettre adhesions en Actif
         q(conn, """UPDATE adhesions SET statut='Actif', jours_avance=0
@@ -2666,13 +2890,27 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
         log_audit("NOUVEAU_CYCLE",
                   f"Tontine:{tontine['nom']} | Cycle {ancien_cycle}→{nouveau_cycle} | Admin:{admin_wa}")
 
+        # Traçabilité : le tri algorithmique de ponctualité est le DÉFAUT appliqué.
+        # Toute déviation ultérieure de l'admin est loggée séparément (MODIF_ORDRE).
+        nb_mulligan = sum(1 for m in classement if m["tier"] == 1)
+        nb_ejectes  = sum(1 for m in classement if m["tier"] == 2)
+        ordre_applique = " | ".join(
+            f"{m['ordre_nouveau']}.{m.get('nickname') or ('#'+str(m['membre_id']) if m['membre_id'] else '?')}"
+            for m in classement)
+        log_audit("REORDER_PONCTUALITE",
+                  f"Tontine:{tontine['nom']} | Cycle {nouveau_cycle} | "
+                  f"parfaits:{nb_promus} mulligan:{nb_mulligan} éjectés:{nb_ejectes} | "
+                  f"ordre appliqué (défaut algo) : {ordre_applique}", admin_wa)
+
         # Annonce dans le groupe
         if tontine.get("whatsapp_groupe"):
             wa_groupe(tontine["whatsapp_groupe"],
                 f"🚀 *CYCLE {nouveau_cycle} LANCÉ — {tontine['nom']}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Le cycle {nouveau_cycle} démarre maintenant !\n\n"
-                f"👥 *{nb_membres} membres* repartent pour un nouveau cycle.\n\n"
+                f"👥 *{nb_membres} membres* repartent pour un nouveau cycle.\n"
+                f"🏅 *{nb_promus} membre(s) parfait(s)* (zéro retard) promus en tête "
+                f"de la liste de bouffage — la ponctualité paie.\n\n"
                 f"Les cotisations reprennent normalement.\n"
                 f"Envoyez vos screenshots dans ce groupe après chaque virement.\n\n"
                 f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
@@ -3131,7 +3369,8 @@ def wa_mentionner_retardataires(nom_groupe: str, retardataires: list,
             f"📸 Effectuez votre virement vers le numéro de votre admin,\n"
             f"   puis envoyez le *screenshot de confirmation* dans le groupe.\n\n"
             f"⏱ Heure limite : *{tontine['heure_limite']}*\n"
-            f"💸 Passé ce délai : pénalité *{MONTANT_IRA} FCFA/jour*"
+            f"💸 Passé ce délai : IRA *{int(IRA_CLIFF_PCT*100)}% de la mise* dès le retard "
+            f"+{int(IRA_DAILY_PCT*100)}%/jour (plafond {int(IRA_CAP_PCT*100)}%)"
         )
         wa_prive(r["whatsapp"], msg)
 
@@ -4927,7 +5166,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             "1": ("heure_ouverture", "Ouverture cotisations",
                   "Les membres seront informés que les dépôts sont ouverts."),
             "2": ("heure_limite",    "Limite cotisations",
-                  "Après cette heure : pénalité IRA de {:,} FCFA.".format(MONTANT_IRA)),
+                  "Après cette heure : IRA = {}% de la mise + {}%/jour (plafond {}%).".format(
+                      int(IRA_CLIFF_PCT*100), int(IRA_DAILY_PCT*100), int(IRA_CAP_PCT*100))),
             "3": ("heure_rappel",    "Rappel non-cotisants",
                   "Liste des non-cotisants publiée dans le groupe."),
             "4": ("heure_bouffage",  "Bouffage",
@@ -8797,7 +9037,8 @@ def rappel_matin():
             f"📱 Virez vers : *{num_collecte}*\n"
             f"📸 Puis envoyez votre screenshot dans ce groupe.\n\n"
             f"⏰ Heure limite : *{t['heure_limite']}*\n"
-            f"Passé ce délai : pénalité *{MONTANT_IRA} FCFA* (IRA)\n"
+            f"Passé ce délai : IRA *{int(t['montant_place']*IRA_CLIFF_PCT):,} FCFA* "
+            f"({int(IRA_CLIFF_PCT*100)}% de la mise) +{int(IRA_DAILY_PCT*100)}%/jour\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
@@ -8872,7 +9113,7 @@ def rappel_non_cotisants():
                 f"📸 Envoyez le screenshot dans ce groupe.\n\n"
                 f"_{phrase}_\n\n"
                 f"⏰ Limite : *{t['heure_limite']}* | "
-                f"Retard → *{MONTANT_IRA} FCFA/jour*\n\n"
+                f"Retard → IRA *{int(IRA_CLIFF_PCT*100)}% de la mise* +{int(IRA_DAILY_PCT*100)}%/jour\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"_TontineBot Pro — BADF Ltd_"
             )
