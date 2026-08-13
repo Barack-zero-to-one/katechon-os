@@ -60,7 +60,7 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 import requests
-from flask import Flask, request, jsonify, Response, session
+from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # ══════════════════════════════════════════════════════════════════════════
