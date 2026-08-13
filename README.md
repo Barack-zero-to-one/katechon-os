@@ -177,7 +177,17 @@ One protocol. Every informal economy. No competitor has built cross-ROSCA infras
 | 2 | **Reactivation fee** | 1,000 FCFA after 72h suspension |
 | 3 | **Number change fee** | 250 FCFA (CHGNUM command) |
 
-> **IRA is not a revenue stream.** It is a behavioral-regulation mechanism — a late penalty indexed on the stake (Schelling cliff + daily accrual, capped at 50%) whose sole purpose is to make lateness irrational. Collected IRA is redistributed to punctual members as a rotation-priority reward, not booked as company revenue.
+---
+
+## IRA — A Behavioral-Regulation Lever, Not a Revenue Stream
+
+The IRA (late penalty) is deliberately excluded from the revenue model above. It is not a way for BADF to make money on lateness — it is the enforcement layer of the protocol: the mechanism that substitutes law for social pressure and makes honest behavior financially rational *before the temptation to default even forms*.
+
+**Indexed on the stake, not flat.** A flat 150 FCFA/day fee is trivial against a 50,000 FCFA stake (3 days = 0.9% of the withheld cash) — keeping your money stays rational. IRA v2 is indexed on the contribution itself: a Schelling cliff from the sixth minute of lateness, a linear daily accrual on top, capped at 50% of the stake to stay clear of usury optics (ANIF/COBAC). The penalty is strictly monotone in time — a longer delay never costs less — so lateness is irrational at any group size.
+
+**Redistributed, not pocketed.** Collected IRA does not book as company revenue. It funds the punctuality reward: punctual members are promoted in the rotation order, and (Phase 2, merchant-account float) share the collected pool as a rebate — the exact symmetric of the penalty. The latecomer is reclassed to last; the punctual member is moved to first. The invariant holds at all times: *redistributed ≤ collected* — BADF never advances cash.
+
+**A single network slip is forgiven.** One late payment per cycle is tolerated (a mulligan) for eligibility to the reward, absorbing MTN/Orange Money network stalls; the IRA still applies, but position and bonus are preserved. The second slip ejects. The result is a system that is hard on defaulters and forgiving of honest members hit by 2G friction — which is the whole point of a *katechon*: it restrains the chaos without punishing the faithful.
 
 ---
 
