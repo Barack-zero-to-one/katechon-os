@@ -28,6 +28,13 @@ __pycache__/
 .Python
 *.egg-info/
 
+# Tests — local only, keep out of the public repo
+test_dashboard.py
+test_ira_engine.py
+test_rate_limiter.py
+test_screenshot_integrity.py
+test_webhook_security.py
+
 # Node
 node_modules/
 
