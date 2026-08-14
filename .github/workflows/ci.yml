@@ -6,10 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: the CI never needs write access to the repo.
+permissions:
+  contents: read
+
+# A newer push to the same ref cancels the superseded run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   syntax:
     name: Python Syntax Check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,12 +42,22 @@ jobs:
   secrets-audit:
     name: No Hardcoded Secrets
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Scan for hardcoded Meta credentials
+      - name: Scan tracked files for hardcoded credentials
         run: |
-          if grep -P "(META_PHONE_ID|META_TOKEN|META_BUSINESS_ID|META_APP_SECRET)\s*=\s*['\"][A-Za-z0-9]" barack_corp_v9_18.py; then
+          # Fail if any real secret is assigned a literal value in tracked code.
+          # Covers Meta Cloud API, Green API, PostgreSQL and the webhook secret.
+          # POSIX ERE (grep -E): [[:space:]] instead of \s, ['\"] matches either quote.
+          PATTERN="(META_PHONE_ID|META_TOKEN|META_BUSINESS_ID|META_APP_SECRET|GREENAPI_TOKEN|GREENAPI_ID_INSTANCE|GREENAPI_WEBHOOK_SECRET|PG_PASS|PG_PASSWORD|DB_PASSWORD|DASHBOARD_TOKEN)[[:space:]]*=[[:space:]]*['\"][A-Za-z0-9_-]{6,}"
+          # Scan every tracked file except this workflow (which names the vars on purpose).
+          MATCHES=$(git ls-files -z \
+            | grep -zv '^\.github/workflows/' \
+            | xargs -0 grep -nEH "$PATTERN" 2>/dev/null || true)
+          if [ -n "$MATCHES" ]; then
             echo "FAIL: hardcoded secret detected"
+            echo "$MATCHES"
             exit 1
           fi
           echo "OK: no hardcoded secrets"
@@ -45,11 +65,13 @@ jobs:
   dependencies:
     name: Dependency Install
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
       - name: System deps (Tesseract + libpq)
         run: sudo apt-get update -qq && sudo apt-get install -y tesseract-ocr libpq-dev
       - name: pip install
@@ -61,3 +83,20 @@ jobs:
           import PIL, pytesseract, cv2, numpy
           print('All imports OK')
           "
+
+  # Single required status check for branch protection. Green only if every
+  # upstream job succeeded — protects main behind one stable context name.
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    needs: [syntax, secrets-audit, dependencies]
+    if: always()
+    steps:
+      - name: Verify all checks passed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more CI jobs failed or were cancelled."
+            exit 1
+          fi
+          echo "All CI jobs passed."
