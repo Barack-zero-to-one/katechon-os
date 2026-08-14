@@ -60,10 +60,13 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 import requests
-from flask import Flask, request, jsonify, Response, session
+from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
+import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
+import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
+from rate_limiter import RateLimiter  # Limiteur per-clé + global, mémoire bornée (module pur)
 
 # ══════════════════════════════════════════════════════════════════════════
 # CONFIGURATION GÉNÉRALE
@@ -100,6 +103,9 @@ NUMERO_BADF_ORANGE = os.getenv("NUMERO_BADF_ORANGE", "+237692100606")  # Orange 
 MAX_TENTATIVES_FRAUDE   = 3
 RATE_LIMIT_MAX          = 10
 RATE_LIMIT_FENETRE      = 60
+# Plafond GLOBAL (tous émetteurs) : garde-fou anti-burst multi-numéros. Doit rester
+# au-dessus du pic légitime (ouverture simultanée de nombreuses tontines) — réglable.
+RATE_LIMIT_GLOBAL_MAX   = int(os.getenv("RATE_LIMIT_GLOBAL_MAX", "3000"))
 DELAI_SUSPENSION_HEURES = 72
 DELAI_ALERTE_FUGUE      = 3
 DELAI_BLOCAGE_FUGUE     = 7
@@ -120,6 +126,14 @@ GREENAPI_INSTANCE_ID    = os.getenv("GREENAPI_INSTANCE_ID",    "")  # Ex: 123456
 GREENAPI_TOKEN          = os.getenv("GREENAPI_TOKEN",          "")  # API token Green API
 GREENAPI_WEBHOOK_SECRET = os.getenv("GREENAPI_WEBHOOK_SECRET", "")  # Token secret webhook (256 bits)
 GREENAPI_BASE           = os.getenv("GREENAPI_BASE", "https://api.green-api.com")
+
+# Anti-rejeu webhook : le token statique dans l'URL n'empêche pas de rejouer une
+# requête capturée. On déduplique les idMessage sur une fenêtre glissante, borné.
+WEBHOOK_REPLAY_TTL = int(os.getenv("WEBHOOK_REPLAY_TTL", "900"))  # secondes
+_replay_guard = ws.ReplayGuard(ttl=WEBHOOK_REPLAY_TTL, max_size=50_000)
+
+# Plafond de taille d'un média téléchargé (anti-DoS mémoire côté SSRF).
+MEDIA_MAX_BYTES = int(os.getenv("MEDIA_MAX_BYTES", str(15 * 1024 * 1024)))  # 15 Mo
 
 # ── Validation credentials Green API au démarrage ─────────────────────────
 if not GREENAPI_WEBHOOK_SECRET:
@@ -582,7 +596,8 @@ _sessions_membre: dict = {}   # {wa: {"etape": str, "data": dict, "ts": float}}
 _sessions_admin:  dict = {}   # {wa: {"etape": str, "tontine_id": int, "data": dict, "ts": float}}
 _sessions_kyc:    dict = {}   # {wa: {"etape": str, "data": dict, "ts": float}}
 _sessions_config: dict = {}   # {wa: {"etape": str, "group_id": str, "group_name": str, "data": dict, "ts": float}}
-_rate_buckets:    dict = defaultdict(list)
+_rate_limiter = RateLimiter(max_per_key=RATE_LIMIT_MAX, max_global=RATE_LIMIT_GLOBAL_MAX,
+                            window=RATE_LIMIT_FENETRE)
 _sessions_lock    = threading.RLock()   # protège toutes les mutations _sessions_*
 
 # ── Exécuteur borné pour le traitement des messages webhook ───────────────────
@@ -630,14 +645,15 @@ def session_valide(sessions: dict, wa: str) -> bool:
 
 
 def rate_limit_ok(identifiant: str) -> bool:
-    now   = time_module.time()
-    debut = now - RATE_LIMIT_FENETRE
-    _rate_buckets[identifiant] = [t for t in _rate_buckets[identifiant] if t > debut]
-    if len(_rate_buckets[identifiant]) >= RATE_LIMIT_MAX:
+    """
+    Autorise le message ? Double limite (per-numéro + plafond global), mémoire
+    bornée et thread-safe (cf. rate_limiter.RateLimiter). Le plafond global
+    neutralise le burst multi-numéros que l'ancien limiteur per-clé laissait passer.
+    """
+    ok = _rate_limiter.autorise(identifiant)
+    if not ok:
         audit.warning(f"RATE LIMIT : {identifiant}")
-        return False
-    _rate_buckets[identifiant].append(now)
-    return True
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1183,6 +1199,20 @@ def init_db():
               UNIQUE (tontine_id, cycle, ordre) DEFERRABLE INITIALLY DEFERRED;
           END IF;
         END $$;""",
+        # ── Anti-recyclage renforcé (finding #3) ────────────────────────────
+        # Perceptual hash stocké par screenshot (TEXT hex, évite le débordement
+        # BIGINT signé d'un dHash 64 bits).
+        "ALTER TABLE screenshots_hash ADD COLUMN IF NOT EXISTS dhash TEXT",
+        # Dédup FORTE sur la référence de transaction (unique par paiement réel),
+        # insensible au 1px / re-encodage qui défait le byte-hash.
+        """CREATE TABLE IF NOT EXISTS references_transaction (
+            id             SERIAL PRIMARY KEY,
+            tontine_id     INTEGER NOT NULL REFERENCES tontines(id),
+            reference_norm TEXT    NOT NULL,
+            membre_id      INTEGER REFERENCES membres(id),
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(tontine_id, reference_norm)
+        )""",
     ]:
         try:
             c.execute("SAVEPOINT mig")
@@ -1221,6 +1251,11 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_cotis_pending    ON cotisations_manuelles(tontine_id,date_soumission DESC) WHERE statut='En_attente'",
         # Hash unique anti-recyclage déjà UNIQUE mais on confirme l'index
         "CREATE INDEX IF NOT EXISTS idx_screenshot_date  ON screenshots_hash(created_at DESC)",
+        # Anti-recyclage renforcé (finding #3)
+        "CREATE INDEX IF NOT EXISTS idx_screenshot_mbr   ON screenshots_hash(membre_id,created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_ref_tx           ON references_transaction(tontine_id,reference_norm)",
+        # Anti-TOCTOU double-submit : un screenshot_hash ne peut créer qu'UNE cotisation.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_cotis_screenshot ON cotisations_manuelles(screenshot_hash) WHERE screenshot_hash IS NOT NULL",
     ]
     # SAVEPOINT par index — sans ça, un seul CREATE INDEX en échec empoisonne
     # toute la transaction PostgreSQL en cours et le conn.commit() plus bas se
@@ -1967,15 +2002,63 @@ def screenshot_deja_utilise(conn, image_hash: str) -> bool:
 
 
 def enregistrer_screenshot(conn, image_hash: str,
-                            membre_id: int, tontine_id: int):
-    """Enregistre le hash pour éviter le recyclage."""
+                            membre_id: int, tontine_id: int, dhash_hex: str = ""):
+    """Enregistre le hash brut + le perceptual hash (dHash) pour l'anti-recyclage."""
     try:
         q(conn,
-          """INSERT INTO screenshots_hash (hash, membre_id, tontine_id)
-             VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
-          (image_hash, membre_id, tontine_id))
+          """INSERT INTO screenshots_hash (hash, membre_id, tontine_id, dhash)
+             VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+          (image_hash, membre_id, tontine_id, dhash_hex or None))
     except Exception:
         pass
+
+
+def reference_deja_utilisee(conn, tontine_id: int, ref_norm: str) -> bool:
+    """
+    True si cette référence de transaction a déjà servi dans la tontine.
+    Couche anti-recyclage FORTE : la référence est unique par paiement réel, donc
+    insensible au re-encodage/1px qui défait le byte-hash (finding #3).
+    """
+    if not ref_norm:
+        return False
+    row = fetchone(conn,
+        "SELECT id FROM references_transaction WHERE tontine_id=%s AND reference_norm=%s",
+        (tontine_id, ref_norm))
+    return row is not None
+
+
+def enregistrer_reference(conn, tontine_id: int, ref_norm: str, membre_id: int):
+    """Mémorise une référence de transaction (dédup ON CONFLICT via UNIQUE)."""
+    if not ref_norm:
+        return
+    try:
+        q(conn,
+          """INSERT INTO references_transaction (tontine_id, reference_norm, membre_id)
+             VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+          (tontine_id, ref_norm, membre_id))
+    except Exception:
+        pass
+
+
+def screenshot_near_duplicate(conn, membre_id: int, dh_int) -> bool:
+    """
+    Signal SOUPLE : True si un screenshot perceptuellement identique (dHash à
+    <= SEUIL bits) existe déjà pour ce membre. Sert d'ALERTE admin, jamais de
+    blocage dur — deux reçus MoMo distincts partagent le même template et sont
+    donc naturellement proches en dHash (faux positif inacceptable en blocage).
+    """
+    if dh_int is None:
+        return False
+    rows = fetchall(conn,
+        """SELECT dhash FROM screenshots_hash
+           WHERE membre_id=%s AND dhash IS NOT NULL AND dhash <> ''
+           ORDER BY created_at DESC LIMIT 200""",
+        (membre_id,))
+    for r in rows:
+        autre = si.hex_vers_int(r["dhash"])
+        if si.est_near_duplicate(dh_int, autre):
+            return True
+    return False
 
 
 class MontantAberrantError(ValueError):
@@ -7317,8 +7400,14 @@ def webhook_whatsapp_greenapi():
     if not GREENAPI_WEBHOOK_SECRET:
         log.error("🔴 GREENAPI_WEBHOOK_SECRET non configuré — webhook refusé")
         return jsonify({"status": "misconfigured"}), 503
+    # Token accepté en query (mode Green API) OU en header Authorization: Bearer
+    # (le header ne fuite pas dans les access logs comme le query string).
     incoming_token = request.args.get("token", "")
-    if not hmac.compare_digest(incoming_token, GREENAPI_WEBHOOK_SECRET):
+    if not incoming_token:
+        _auth = request.headers.get("Authorization", "")
+        if _auth.startswith("Bearer "):
+            incoming_token = _auth[7:]
+    if not ws.constant_time_equal(incoming_token, GREENAPI_WEBHOOK_SECRET):
         log_audit("GREENAPI_TOKEN_INVALIDE", "Webhook token mismatch", request.remote_addr)
         return jsonify({"status": "forbidden"}), 403
 
@@ -7327,6 +7416,13 @@ def webhook_whatsapp_greenapi():
         payload = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"status": "bad_json"}), 400
+
+    # ── 2b) Anti-rejeu : un idMessage déjà vu = requête rejouée → drop ─────
+    #        Tue le replay d'une requête capturée (le token seul ne l'empêche pas).
+    if _replay_guard.est_rejeu(payload.get("idMessage", "")):
+        log_audit("WEBHOOK_REPLAY",
+                  f"idMessage rejoué: {payload.get('idMessage', '')}", request.remote_addr)
+        return jsonify({"status": "ok"}), 200
 
     # ── 3) Router par type d'événement ──────────────────────────────────
     type_webhook = payload.get("typeWebhook", "")
@@ -7384,24 +7480,46 @@ def webhook_whatsapp_greenapi():
 
 def _greenapi_telecharger_media(url_media: str) -> bytes:
     """Télécharge un média depuis l'URL Green API et retourne le contenu en bytes.
-    2 tentatives max. Timeout 15s par tentative. Détecte 403/404 = lien expiré."""
+    2 tentatives max. Timeout 15s par tentative. Détecte 403/404 = lien expiré.
+
+    Durcissement SSRF (finding #2) :
+      - whitelist sur le HOSTNAME avec frontière de label (ws.media_url_autorisee) ;
+      - allow_redirects=False + rejet explicite de tout 3xx : la whitelist ne
+        valide que le 1er hop ; une redirection mènerait vers 169.254.169.254,
+        127.0.0.1:4040 (API ngrok locale), Postgres, etc. ;
+      - streaming + plafond MEDIA_MAX_BYTES : pas de chargement mémoire illimité.
+    """
     if not url_media:
         return b""
+    if not ws.media_url_autorisee(url_media):
+        log.warning(f"⚠️ URL média rejetée (hors whitelist/scheme) : {url_media[:80]}")
+        return b""
     try:
-        from urllib.parse import urlparse as _urlparse
-        _p = _urlparse(url_media)
-        _domaines_ok = (".green-api.com", ".sms.by", ".whatsapp.net")
-        if _p.scheme != "https" or not any(_p.netloc.endswith(d) for d in _domaines_ok):
-            log.warning(f"⚠️ URL média Green API suspecte rejetée : {_p.netloc}")
-            return b""
         for attempt in range(2):
             try:
-                r = requests.get(url_media, timeout=15)
-                if r.status_code == 200:
-                    return r.content
-                if r.status_code in (403, 404):
-                    log.warning(f"⚠️ Média Green API {r.status_code} — lien expiré ou introuvable")
-                    return b""
+                r = requests.get(url_media, timeout=15,
+                                  allow_redirects=False, stream=True)
+                try:
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        log.warning(f"⚠️ Média Green API redirige ({r.status_code}) "
+                                    f"→ rejeté (anti-SSRF)")
+                        return b""
+                    if r.status_code == 200:
+                        buf = bytearray()
+                        for chunk in r.iter_content(65536):
+                            if not chunk:
+                                continue
+                            buf.extend(chunk)
+                            if len(buf) > MEDIA_MAX_BYTES:
+                                log.warning("⚠️ Média Green API dépasse la limite "
+                                            "de taille → rejeté")
+                                return b""
+                        return bytes(buf)
+                    if r.status_code in (403, 404):
+                        log.warning(f"⚠️ Média Green API {r.status_code} — lien expiré ou introuvable")
+                        return b""
+                finally:
+                    r.close()
                 if attempt == 0:
                     time_module.sleep(1)
             except (requests.ConnectionError, requests.Timeout):
@@ -7539,6 +7657,13 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
             incrementer_tentatives_fraude(membre["id"], "Screenshot recyclé")
             return
 
+        # Couche 2 — perceptual hash (dHash), signal SOUPLE : détecte le recyclage
+        # 1px/re-compression que le byte-hash laisse passer. Ne bloque jamais seul.
+        dh       = si.dhash(image_bytes)
+        dh_hex   = "" if dh is None else format(dh, "016x")
+        near_dup = screenshot_near_duplicate(conn, membre["id"], dh)
+        ref_norm = ""   # référence de transaction normalisée (renseignée par l'OCR)
+
         # Récupérer l'adhesion avec nombre_places
         if group_id:
             adhesion = fetchone(conn, """
@@ -7571,6 +7696,23 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
         nb_places       = adhesion["nombre_places"] or 1
         montant_attendu = adhesion["montant_place"] * nb_places
 
+        # Signal SOUPLE near-dup (dHash) → alerte admin, jamais un blocage auto
+        # (deux reçus MoMo distincts partagent le même template).
+        if near_dup:
+            log_audit("SCREENSHOT_NEAR_DUP",
+                      f"Membre:{membre['id']} dHash proche d'un screenshot antérieur", wa)
+            admin_nd = fetchone(conn,
+                "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
+                (adhesion["tontine_id"],))
+            if admin_nd:
+                wa_prive(admin_nd["whatsapp"],
+                    f"⚠️ *SCREENSHOT QUASI-IDENTIQUE — {adhesion['nom']}*\n\n"
+                    f"Membre : *{membre['nom_complet']}*\n"
+                    f"L'image ressemble fortement à un reçu déjà soumis "
+                    f"(possible re-compression d'un ancien). Vérifiez la référence "
+                    f"de transaction avant de confirmer.\n\n"
+                    f"_TontineBot Pro — BADF Ltd_")
+
         # ── Lecture automatique du screenshot (OCR local Tesseract) ───────────
         lecture = lire_screenshot_mobile_money(image_bytes)
         fraude_visuelle = False
@@ -7580,6 +7722,26 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
             confiance   = lecture.get("confiance", "faible")
             operateur   = lecture.get("operateur", "Inconnu")
             ref_lu      = lecture.get("reference", "")
+            ref_norm    = si.normaliser_reference(ref_lu)
+
+            # Couche 3 (FORTE) — la référence de transaction est unique par paiement
+            # réel : insensible au 1px/re-encodage qui défait le byte-hash. Blocage dur.
+            if ref_norm and reference_deja_utilisee(conn, adhesion["tontine_id"], ref_norm):
+                log_audit("SCREENSHOT_RECYCLE",
+                          f"Membre:{membre['id']} Ref:{ref_norm} — transaction déjà utilisée", wa)
+                incrementer_tentatives_fraude(membre["id"],
+                                              f"Référence transaction recyclée: {ref_norm}")
+                admin_r = fetchone(conn,
+                    "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
+                    (adhesion["tontine_id"],))
+                if admin_r:
+                    wa_prive(admin_r["whatsapp"],
+                        f"🚨 *RECYCLAGE BLOQUÉ — {adhesion['nom']}*\n\n"
+                        f"Membre : *{membre['nom_complet']}*\n"
+                        f"Référence de transaction *{ref_norm}* déjà utilisée — "
+                        f"reçu recyclé rejeté automatiquement.\n\n"
+                        f"_TontineBot Pro — BADF Ltd_")
+                return
 
             # Vérification montant : comparaison avec montant attendu
             if montant_lu and montant_attendu:
@@ -7720,7 +7882,8 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
                 f"_TontineBot Pro — BADF Ltd_")
             return
 
-        enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"])
+        enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"], dh_hex)
+        enregistrer_reference(conn, adhesion["tontine_id"], ref_norm, membre["id"])
 
         # Message places multiples si applicable
         places_info = ""
@@ -9818,160 +9981,14 @@ def verifier_dettes_badf_impayees():
 # ══════════════════════════════════════════════════════════════════════════
 # DASHBOARD LOCAL — http://localhost:5000/dashboard
 # ══════════════════════════════════════════════════════════════════════════
-
-@app.route("/dashboard/data", methods=["GET"])
-def dashboard_data():
-    """Données temps réel pour le dashboard — JSON."""
-    if not session.get("dash_ok"):
-        return jsonify({"error": "unauthorized"}), 401
-    try:
-        conn = get_conn()
-        try:
-            delta = datetime.now() - _BOT_START
-            h, rem = divmod(int(delta.total_seconds()), 3600)
-            m, s   = divmod(rem, 60)
-            uptime = f"{h}h {m:02d}m {s:02d}s"
-
-            cur = conn.cursor()
-            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-
-            cur.execute("""
-                SELECT t.nom, t.montant_place,
-                       t.cycle_actuel, t.heure_bouffage,
-                       COUNT(a.id) FILTER (WHERE a.statut='Actif') AS nb_membres
-                FROM tontines t
-                LEFT JOIN adhesions a ON a.tontine_id = t.id
-                WHERE t.statut = 'Active'
-                GROUP BY t.id
-                ORDER BY t.nom
-            """)
-            cols     = [d[0] for d in cur.description]
-            tontines = [dict(zip(cols, row)) for row in cur.fetchall()]
-
-            cur.execute("""
-                SELECT
-                    t.nom,
-                    t.montant_place,
-                    t.capacite_max,
-                    (SELECT COUNT(*)
-                     FROM adhesions a WHERE a.tontine_id=t.id AND a.statut='Actif') AS nb_membres,
-                    (SELECT COALESCE(SUM(a2.nombre_places),0)
-                     FROM adhesions a2 WHERE a2.tontine_id=t.id AND a2.statut='Actif') AS nb_places,
-                    (SELECT COALESCE(SUM(tx.frais_fmp),0)
-                     FROM transactions tx WHERE tx.tontine_id=t.id AND tx.statut='Confirmee') AS fmp_reel,
-                    (SELECT COALESCE(SUM(di.montant),0)
-                     FROM dettes_ira di WHERE di.tontine_id=t.id AND di.statut='Due') AS ira_du
-                FROM tontines t
-                WHERE t.statut='Active'
-                ORDER BY t.nom
-            """)
-            _proj_rows = cur.fetchall()
-            _proj_list, _fmp_reel_tot, _fmp_jour_tot, _ira_du_tot = [], 0.0, 0.0, 0.0
-            for _r in _proj_rows:
-                _nom, _mp, _cap, _nb_m, _nb_p, _fmp_r, _ira = _r
-                _fj = float(_nb_p) * float(_mp) * 0.02
-                _fmp_reel_tot += float(_fmp_r)
-                _fmp_jour_tot += _fj
-                _ira_du_tot   += float(_ira)
-                _proj_list.append({"nom": _nom, "nb_membres": int(_nb_m),
-                    "capacite_max": int(_cap), "fmp_jour": _fj,
-                    "fmp_reel": float(_fmp_r), "ira_du": float(_ira)})
-            projection = {"par_tontine": _proj_list, "fmp_reel": _fmp_reel_tot,
-                          "fmp_jour": _fmp_jour_tot, "fmp_30j": _fmp_jour_tot * 30,
-                          "ira_du": _ira_du_tot}
-
-            cur.execute("""
-                SELECT
-                    COALESCE(SUM(frais_fmp)    FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(montant_brut) FILTER (WHERE type_transaction = 'Adhesion'
-                                                       AND date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(frais_ira)    FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(montant_brut) FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(montant_brut), 0)
-                FROM transactions
-                WHERE statut = 'Confirmee'
-            """)
-            r         = cur.fetchone()
-            revenus   = {"fmp": r[0], "adhesions": r[1], "ira": r[2], "total": r[0]+r[1]+r[2]}
-            gmv_jour  = r[3]
-            gmv_total = r[4]
-
-            cur.execute("SELECT COUNT(*) FROM cotisations_manuelles WHERE statut='En_attente'")
-            cotis_attente = cur.fetchone()[0]
-
-            cur.execute("""
-                SELECT m.nom_complet, bm.montant_net, t.nom AS tontine
-                FROM bouffages_manuels bm
-                JOIN membres m  ON m.id  = bm.membre_id
-                JOIN tontines t ON t.id  = bm.tontine_id
-                WHERE bm.statut = 'En_attente'
-                ORDER BY bm.date_declenchement DESC
-                LIMIT 5
-            """)
-            bouffages = [{"nom": row[0], "montant": row[1], "tontine": row[2]}
-                         for row in cur.fetchall()]
-
-            cur.execute("SELECT COALESCE(SUM(montant), 0) FROM dettes_ira WHERE statut='Due'")
-            ira_total = cur.fetchone()[0]
-
-            cur.execute("""
-                SELECT type_event, details, date_heure
-                FROM audit_log
-                ORDER BY date_heure DESC
-                LIMIT 15
-            """)
-            activite = [
-                {"type": row[0],
-                 "details": (row[1] or "")[:60],
-                 "ts": row[2].strftime("%H:%M:%S") if row[2] else ""}
-                for row in cur.fetchall()
-            ]
-
-            resp = jsonify({
-                "uptime":       uptime,
-                "ts":           datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                "tontines":     tontines,
-                "projection":   projection,
-                "revenus":      revenus,
-                "cotis_attente": cotis_attente,
-                "bouffages":    bouffages,
-                "ira_total":    ira_total,
-                "gmv_jour":     gmv_jour,
-                "gmv_total":    gmv_total,
-                "activite":     activite,
-            })
-            resp.headers["Cache-Control"] = "no-store"
-            return resp
-        finally:
-            release_conn(conn)
-    except Exception as e:
-        log.error(f"Dashboard data error: {e}")
-        return jsonify({"error": "internal_error"}), 500
-
-
-_DASHBOARD_HTML = open(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html"),
-    encoding="utf-8"
-).read()
-
-
-@app.route("/dashboard", methods=["GET"])
-def dashboard():
-    """Dashboard local temps réel — Bloomberg terminal UI."""
-    tok = request.args.get("token", "")
-    if not session.get("dash_ok"):
-        if not _DASH_TOKEN or not hmac.compare_digest(tok, _DASH_TOKEN):
-            return Response(
-                '<html><body style="background:#060606;color:#ff4444;'
-                'font-family:monospace;padding:40px">'
-                '<h2>&#9679; ACC&#200;S REFUS&#201;</h2>'
-                '<p>Ajoutez <code>?token=DASHBOARD_TOKEN</code> '
-                '\u00e0 l\'URL.</p></body></html>',
-                content_type="text/html; charset=utf-8",
-                status=401
-            )
-        session["dash_ok"] = True
-    return Response(_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
+# Sous-système périphérique extrait dans dashboard.py (routes /dashboard,
+# /dashboard/data). Câblage par injection — aucune logique dashboard inline ici.
+import dashboard
+dashboard.register_dashboard(
+    app,
+    get_conn=get_conn, release_conn=release_conn,
+    bot_start=_BOT_START, dash_token=_DASH_TOKEN, logger=log,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════
