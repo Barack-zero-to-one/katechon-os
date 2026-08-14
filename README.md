@@ -178,34 +178,7 @@ One protocol. Every informal economy. No competitor has built cross-ROSCA infras
 | 3 | **Number change fee** | 250 FCFA (CHGNUM command) |
 | 4 | **IRA (late penalty)** | Disabled |
 
----
-
-## Phase 2 — The USDC Layer: Inflation Shield + Yield Engine
-
-Every ROSCA has a structural vulnerability that no coordination software has ever solved: the pot sits idle in fiat currency between the day contributions are collected and the day the winner receives the cashout. In economies where inflation runs at 20–30% annually, this idle period silently erodes the real value of every member's contribution. In high-volatility environments like Nigeria (NGN depreciated 70% in 2023–2024) or Ghana (GHS lost over 50% against the dollar in 2022), the problem is existential.
-
-Phase 2 solves this by making USDC the invisible settlement layer underneath every ROSCA managed by KATECHON OS.
-
-When a contribution is confirmed, KATECHON OS automatically converts the local currency amount to USDC at the interbank rate. The pot is held in USDC, not in fiat. When the cashout window opens, the USDC balance is converted back to local currency and delivered to the winner. Members experience zero friction: they send FCFA or NGN or GHS as they always have, via mobile money or SwitchN. The USD peg works silently underneath.
-
-The yield layer activates the moment the pot exceeds a protocol-defined threshold. Idle USDC is deployed into institutional-grade yield protocols — Circle's yield products, Aave, or equivalent DeFi infrastructure — generating passive returns on the float. This yield is distributed proportionally to contributing members at the end of each ROSCA cycle, effectively acting as a rebate that reduces the net cost of the FMP 2% fee. In a 20-member tontine running for 20 days, even a conservative 5% annualized yield on the average float produces a meaningful per-member return that exceeds what any local savings account would offer to this population.
-
-The Trust Graph becomes the credit layer. After 12–24 months of behavioral data, a member with a Green Trust Score (0–30) holds a cryptographically-verifiable track record that no traditional bank has ever assessed. KATECHON OS uses this as on-chain collateral to underwrite micro-credit at USDC rates. A member who has contributed on time for 18 months across three tontines can access a USDC micro-loan priced proportionally to their Trust Graph score, without a bank account, without a credit history, without collateral beyond their own demonstrated behavior.
-
-Parametric insurance closes the loop. Smart contract oracles monitor commodity price indices, rainfall data, and regional economic shock indicators. When a trigger condition is met, a drought index crossing a threshold or a commodity price falling below a floor, affected members receive automatic USDC payouts. No claims process. No adjuster. No paperwork. Settlement in seconds, on-chain, auditable by any party.
-
-Members never need to know what USDC is. They participate in their tontine as they always have. KATECHON OS handles the conversion, the yield deployment, the credit scoring, and the insurance settlement transparently. The result is a financial product that outperforms anything a retail bank in Cameroon, Nigeria, or Ghana has ever offered to this population, at zero marginal infrastructure cost.
-
----
-
-## Revenue Streams (Phase 2)
-
-| # | Source | Model |
-|---|--------|-------|
-| 1 | **USDC conversion spread** | Basis-point margin on each fiat ↔ USDC conversion |
-| 2 | **Yield share** | Protocol retains a portion of DeFi yield generated on idle ROSCA float |
-| 3 | **Credit underwriting** | Origination fee on USDC micro-loans priced by Trust Graph score |
-| 4 | **Parametric insurance premiums** | Subscription-based coverage per ROSCA cycle |
+**Phase 2:** USDC transaction fees · non-bank credit underwriting · parametric insurance
 
 ---
 
