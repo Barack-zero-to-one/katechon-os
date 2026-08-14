@@ -176,12 +176,7 @@ One protocol. Every informal economy. No competitor has built cross-ROSCA infras
 | 1 | **FMP 2%** | Automatically deducted from each confirmed contribution |
 | 2 | **Reactivation fee** | 1,000 FCFA after 72h suspension |
 | 3 | **Number change fee** | 250 FCFA (CHGNUM command) |
-
----
-
-## IRA
-
-The IRA (late penalty) is not part of the revenue model. It is an internal enforcement lever, never booked as company revenue. Amounts collected on lateness are redistributed to punctual members, so BADF makes no money on late payments.
+| 4 | **IRA (late penalty)** | Disabled |
 
 ---
 
