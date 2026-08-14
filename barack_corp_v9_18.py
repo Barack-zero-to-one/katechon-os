@@ -60,8 +60,13 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 import requests
-from flask import Flask, request, jsonify, Response, session
+from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
+
+import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
+import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
+import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
+from rate_limiter import RateLimiter  # Limiteur per-clé + global, mémoire bornée (module pur)
 
 # ══════════════════════════════════════════════════════════════════════════
 # CONFIGURATION GÉNÉRALE
@@ -75,8 +80,18 @@ BOT_NOM = os.getenv("BOT_NOM", "TontineBot Pro")
 
 # ── Frais BADF Ltd ────────────────────────────────────────────────────────
 FRAIS_FMP        = 0.00    # Gratuit au lancement — modèle 2% activable (une ligne)
-MONTANT_IRA      = 150     # Pénalité retard (FCFA/jour)
 HEURE_LIMITE_DEF = time(18, 0)
+
+# ── IRA v2 — Katechon comportemental (barème indexé sur la mise) ───────────
+# Modèle : falaise 15% dès la 6e min + 2%/jour linéaire, plafond 50%, plancher 200,
+# arrondi bas 100. Rampe horaire optionnelle (IRA_HOURLY_PCT>0). Voir ira_engine.py.
+IRA_CLIFF_PCT    = 0.15    # Socle Schelling : % de la mise dès la 6e minute de retard
+IRA_DAILY_PCT    = 0.02    # Accrual journalier linéaire
+IRA_HOURLY_PCT   = 0.00    # Rampe intra-day (0 = falaise plate ; 0.01 = urgence horaire)
+IRA_CAP_PCT      = 0.50    # Plafond anti-usure (optics ANIF/COBAC)
+IRA_FLOOR        = 200     # Plancher aligné grille 100 (protège les petits groupes)
+IRA_GRACE_MIN    = 5       # Tolérance réseau MTN/Orange (minutes)
+MONTANT_IRA      = 150     # DÉPRÉCIÉ — conservé le temps de migrer les anciens messages
 FRAIS_REACTIV    = 1_000   # Réactivation après suspension
 FRAIS_CHGNUM     = 250     # Changement de numéro Mobile Money
 
@@ -88,6 +103,9 @@ NUMERO_BADF_ORANGE = os.getenv("NUMERO_BADF_ORANGE", "+237692100606")  # Orange 
 MAX_TENTATIVES_FRAUDE   = 3
 RATE_LIMIT_MAX          = 10
 RATE_LIMIT_FENETRE      = 60
+# Plafond GLOBAL (tous émetteurs) : garde-fou anti-burst multi-numéros. Doit rester
+# au-dessus du pic légitime (ouverture simultanée de nombreuses tontines) — réglable.
+RATE_LIMIT_GLOBAL_MAX   = int(os.getenv("RATE_LIMIT_GLOBAL_MAX", "3000"))
 DELAI_SUSPENSION_HEURES = 72
 DELAI_ALERTE_FUGUE      = 3
 DELAI_BLOCAGE_FUGUE     = 7
@@ -108,6 +126,14 @@ GREENAPI_INSTANCE_ID    = os.getenv("GREENAPI_INSTANCE_ID",    "")  # Ex: 123456
 GREENAPI_TOKEN          = os.getenv("GREENAPI_TOKEN",          "")  # API token Green API
 GREENAPI_WEBHOOK_SECRET = os.getenv("GREENAPI_WEBHOOK_SECRET", "")  # Token secret webhook (256 bits)
 GREENAPI_BASE           = os.getenv("GREENAPI_BASE", "https://api.green-api.com")
+
+# Anti-rejeu webhook : le token statique dans l'URL n'empêche pas de rejouer une
+# requête capturée. On déduplique les idMessage sur une fenêtre glissante, borné.
+WEBHOOK_REPLAY_TTL = int(os.getenv("WEBHOOK_REPLAY_TTL", "900"))  # secondes
+_replay_guard = ws.ReplayGuard(ttl=WEBHOOK_REPLAY_TTL, max_size=50_000)
+
+# Plafond de taille d'un média téléchargé (anti-DoS mémoire côté SSRF).
+MEDIA_MAX_BYTES = int(os.getenv("MEDIA_MAX_BYTES", str(15 * 1024 * 1024)))  # 15 Mo
 
 # ── Validation credentials Green API au démarrage ─────────────────────────
 if not GREENAPI_WEBHOOK_SECRET:
@@ -427,6 +453,7 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
     Retourne (nb_ok, nb_non_lies).
     """
     conn  = get_conn()
+    verrou_ordre_tontine(conn, tontine_id)  # FORTERESSE : sérialise l'ordre de cette tontine
     cycle = fetchone(conn,
         "SELECT cycle_actuel FROM tontines WHERE id=%s", (tontine_id,))["cycle_actuel"]
 
@@ -464,19 +491,25 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
         if not membre_id:
             nb_non_lies += 1
 
-        # Enregistrer la ligne de passage
-        q(conn, """
-            INSERT INTO liste_passage
-                (tontine_id, membre_id, nickname, date_bouffage, cycle, ordre, soumis_par)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (tontine_id, cycle, ordre) DO UPDATE SET
-                nickname      = EXCLUDED.nickname,
-                date_bouffage = EXCLUDED.date_bouffage,
-                membre_id     = EXCLUDED.membre_id,
-                soumis_par    = EXCLUDED.soumis_par
-        """, (tontine_id, membre_id,
-              item["nickname"], item["date_bouffage"],
-              cycle, item["ordre"], wa_admin))
+        # Enregistrer la ligne de passage — upsert MANUEL (ON CONFLICT retiré :
+        # incompatible avec la contrainte DEFERRABLE ; sérialisé par le verrou).
+        cur_up = q(conn, """
+            UPDATE liste_passage SET
+                nickname      = %s,
+                date_bouffage = %s,
+                membre_id     = %s,
+                soumis_par    = %s
+            WHERE tontine_id=%s AND cycle=%s AND ordre=%s
+        """, (item["nickname"], item["date_bouffage"], membre_id, wa_admin,
+              tontine_id, cycle, item["ordre"]))
+        if cur_up.rowcount == 0:
+            q(conn, """
+                INSERT INTO liste_passage
+                    (tontine_id, membre_id, nickname, date_bouffage, cycle, ordre, soumis_par)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (tontine_id, membre_id,
+                  item["nickname"], item["date_bouffage"],
+                  cycle, item["ordre"], wa_admin))
         nb_ok += 1
 
     # Mettre à jour nombre_places dans adhesions selon les occurrences réelles
@@ -563,7 +596,8 @@ _sessions_membre: dict = {}   # {wa: {"etape": str, "data": dict, "ts": float}}
 _sessions_admin:  dict = {}   # {wa: {"etape": str, "tontine_id": int, "data": dict, "ts": float}}
 _sessions_kyc:    dict = {}   # {wa: {"etape": str, "data": dict, "ts": float}}
 _sessions_config: dict = {}   # {wa: {"etape": str, "group_id": str, "group_name": str, "data": dict, "ts": float}}
-_rate_buckets:    dict = defaultdict(list)
+_rate_limiter = RateLimiter(max_per_key=RATE_LIMIT_MAX, max_global=RATE_LIMIT_GLOBAL_MAX,
+                            window=RATE_LIMIT_FENETRE)
 _sessions_lock    = threading.RLock()   # protège toutes les mutations _sessions_*
 
 # ── Exécuteur borné pour le traitement des messages webhook ───────────────────
@@ -611,14 +645,15 @@ def session_valide(sessions: dict, wa: str) -> bool:
 
 
 def rate_limit_ok(identifiant: str) -> bool:
-    now   = time_module.time()
-    debut = now - RATE_LIMIT_FENETRE
-    _rate_buckets[identifiant] = [t for t in _rate_buckets[identifiant] if t > debut]
-    if len(_rate_buckets[identifiant]) >= RATE_LIMIT_MAX:
+    """
+    Autorise le message ? Double limite (per-numéro + plafond global), mémoire
+    bornée et thread-safe (cf. rate_limiter.RateLimiter). Le plafond global
+    neutralise le burst multi-numéros que l'ancien limiteur per-clé laissait passer.
+    """
+    ok = _rate_limiter.autorise(identifiant)
+    if not ok:
         audit.warning(f"RATE LIMIT : {identifiant}")
-        return False
-    _rate_buckets[identifiant].append(now)
-    return True
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -777,6 +812,26 @@ def fetchall(conn, sql: str, params=None) -> list:
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in rows]
+
+
+# ── FORTERESSE concurrence : verrou d'ordre par tontine ────────────────────
+_ORDRE_LOCK_NS = 42   # namespace advisory lock dédié aux mutations d'ordre
+
+def verrou_ordre_tontine(conn, tontine_id: int):
+    """
+    Mutex STRICT par tontine sur les mutations d'ordre de liste_passage
+    (pg_advisory_xact_lock, relâché automatiquement au COMMIT/ROLLBACK).
+
+    Sérialise les writers d'une MÊME tontine (reclassement retard, MODIF_ORDRE,
+    duplication de cycle, saisie de liste) sans jamais bloquer les autres tontines
+    — 100 groupes à 16h05 restent pleinement parallèles.
+
+    À appeler comme PREMIER statement de toute transaction qui modifie `ordre`.
+    Couplé à la contrainte UNIQUE(tontine,cycle,ordre) DEFERRABLE : le lock
+    garantit l'absence de writer concurrent, la contrainte deferrable tolère les
+    doublons transitoires d'une permutation jusqu'au commit. Défense en profondeur.
+    """
+    q(conn, "SELECT pg_advisory_xact_lock(%s, %s)", (_ORDRE_LOCK_NS, int(tontine_id)))
 
 
 def init_db():
@@ -1023,6 +1078,20 @@ def init_db():
         prelevee_le TIMESTAMPTZ
     )""")
 
+    # ── PONCTUALITÉ / MULLIGAN (IRA v2) ───────────────────────────────────
+    # 1 slip réseau toléré par cycle : le 1er retard préserve bonus+position,
+    # le 2e éjecte. Pilote la priorité de rotation du cycle suivant (ira_engine).
+    c.execute("""CREATE TABLE IF NOT EXISTS ponctualite_cycle (
+        id          SERIAL PRIMARY KEY,
+        membre_id   INTEGER NOT NULL REFERENCES membres(id),
+        tontine_id  INTEGER NOT NULL REFERENCES tontines(id),
+        cycle       INTEGER NOT NULL,
+        slips       INTEGER NOT NULL DEFAULT 0,
+        eligible    BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(membre_id, tontine_id, cycle)
+    )""")
+
     # ── ALERTES FUGUE ─────────────────────────────────────────────────────
     c.execute("""CREATE TABLE IF NOT EXISTS alertes_fugue (
         id          SERIAL PRIMARY KEY,
@@ -1112,6 +1181,38 @@ def init_db():
            ))""",
         # ── Capture numéro Mobile Money bouffage (BOUFFAGE_VIRE) ────────────
         "ALTER TABLE bouffages_manuels ADD COLUMN IF NOT EXISTS operateur_cashout TEXT",
+        # ── FORTERESSE concurrence : UNIQUE(tontine,cycle,ordre) DEFERRABLE ──
+        # Une permutation d'ordre (reclassement, MODIF_ORDRE, dup cycle) crée des
+        # doublons TRANSITOIRES ; la vérif differée au COMMIT les tolère tant que
+        # l'état final est valide. Couplé à verrou_ordre_tontine (advisory lock).
+        # Idempotent : ne reconstruit l'index qu'une fois (skip si déjà deferrable).
+        """DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                         WHERE conname = 'liste_passage_ordre_uk' AND condeferrable) THEN
+            ALTER TABLE liste_passage
+              DROP CONSTRAINT IF EXISTS liste_passage_tontine_id_cycle_ordre_key;
+            ALTER TABLE liste_passage
+              DROP CONSTRAINT IF EXISTS liste_passage_ordre_uk;
+            ALTER TABLE liste_passage
+              ADD CONSTRAINT liste_passage_ordre_uk
+              UNIQUE (tontine_id, cycle, ordre) DEFERRABLE INITIALLY DEFERRED;
+          END IF;
+        END $$;""",
+        # ── Anti-recyclage renforcé (finding #3) ────────────────────────────
+        # Perceptual hash stocké par screenshot (TEXT hex, évite le débordement
+        # BIGINT signé d'un dHash 64 bits).
+        "ALTER TABLE screenshots_hash ADD COLUMN IF NOT EXISTS dhash TEXT",
+        # Dédup FORTE sur la référence de transaction (unique par paiement réel),
+        # insensible au 1px / re-encodage qui défait le byte-hash.
+        """CREATE TABLE IF NOT EXISTS references_transaction (
+            id             SERIAL PRIMARY KEY,
+            tontine_id     INTEGER NOT NULL REFERENCES tontines(id),
+            reference_norm TEXT    NOT NULL,
+            membre_id      INTEGER REFERENCES membres(id),
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(tontine_id, reference_norm)
+        )""",
     ]:
         try:
             c.execute("SAVEPOINT mig")
@@ -1150,6 +1251,11 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_cotis_pending    ON cotisations_manuelles(tontine_id,date_soumission DESC) WHERE statut='En_attente'",
         # Hash unique anti-recyclage déjà UNIQUE mais on confirme l'index
         "CREATE INDEX IF NOT EXISTS idx_screenshot_date  ON screenshots_hash(created_at DESC)",
+        # Anti-recyclage renforcé (finding #3)
+        "CREATE INDEX IF NOT EXISTS idx_screenshot_mbr   ON screenshots_hash(membre_id,created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_ref_tx           ON references_transaction(tontine_id,reference_norm)",
+        # Anti-TOCTOU double-submit : un screenshot_hash ne peut créer qu'UNE cotisation.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_cotis_screenshot ON cotisations_manuelles(screenshot_hash) WHERE screenshot_hash IS NOT NULL",
     ]
     # SAVEPOINT par index — sans ça, un seul CREATE INDEX en échec empoisonne
     # toute la transaction PostgreSQL en cours et le conn.commit() plus bas se
@@ -1460,26 +1566,25 @@ def format_montant(montant: int, pays_code: str = "CM") -> str:
     return f"{montant:,} {devise}".replace(",", " ")
 
 
-def calculer_frais(montant_brut: int, heure: time,
-                   heure_limite_str: str = "18:00") -> dict:
+def calculer_ira_mise(montant_mise: int, dt_paiement: datetime,
+                      dt_echeance: datetime) -> dict:
     """
-    FMP = 2% prélevé invisiblement.
-    IRA = 150 FCFA si paiement APRÈS l'heure limite.
-    Calcul côté serveur = incontournable, le membre ne peut pas tricher.
+    IRA v2 indexée sur la mise (falaise 15% + 2%/jour, plafond 50%, plancher 200).
+    Barème pur délégué à ira_engine — calcul côté serveur, incontournable.
+
+    Args:
+        montant_mise : montant de la cotisation attendue (la mise), FCFA.
+        dt_paiement  : datetime du paiement effectif (aware WAT).
+        dt_echeance  : échéance DATÉE de la période due (heure limite du jour de
+                       collecte, AVANT la grâce). Calculée par
+                       ira_engine.echeance_periode — jamais reconstruite ici sur
+                       le jour de soumission (c'était la racine des findings #1/#2).
     """
-    fmp = int(montant_brut * FRAIS_FMP)
-    try:
-        h, m   = map(int, heure_limite_str.split(":"))
-        limite = time(h, m)
-    except Exception:
-        limite = HEURE_LIMITE_DEF
-    grace = (datetime.combine(_date.today(), limite) + timedelta(minutes=5)).time()
-    ira = MONTANT_IRA if heure >= grace else 0
-    return {
-        "frais_fmp":   fmp,
-        "frais_ira":   ira,
-        "montant_net": montant_brut - fmp - ira,
-    }
+    return ira_engine.calculer_ira(
+        montant_mise, dt_paiement, dt_echeance,
+        cliff=IRA_CLIFF_PCT, daily=IRA_DAILY_PCT, hourly=IRA_HOURLY_PCT,
+        cap=IRA_CAP_PCT, floor=IRA_FLOOR, grace_min=IRA_GRACE_MIN,
+    )
 
 
 def get_membre_by_wa(wa: str) -> Optional[dict]:
@@ -1897,15 +2002,63 @@ def screenshot_deja_utilise(conn, image_hash: str) -> bool:
 
 
 def enregistrer_screenshot(conn, image_hash: str,
-                            membre_id: int, tontine_id: int):
-    """Enregistre le hash pour éviter le recyclage."""
+                            membre_id: int, tontine_id: int, dhash_hex: str = ""):
+    """Enregistre le hash brut + le perceptual hash (dHash) pour l'anti-recyclage."""
     try:
         q(conn,
-          """INSERT INTO screenshots_hash (hash, membre_id, tontine_id)
-             VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
-          (image_hash, membre_id, tontine_id))
+          """INSERT INTO screenshots_hash (hash, membre_id, tontine_id, dhash)
+             VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+          (image_hash, membre_id, tontine_id, dhash_hex or None))
     except Exception:
         pass
+
+
+def reference_deja_utilisee(conn, tontine_id: int, ref_norm: str) -> bool:
+    """
+    True si cette référence de transaction a déjà servi dans la tontine.
+    Couche anti-recyclage FORTE : la référence est unique par paiement réel, donc
+    insensible au re-encodage/1px qui défait le byte-hash (finding #3).
+    """
+    if not ref_norm:
+        return False
+    row = fetchone(conn,
+        "SELECT id FROM references_transaction WHERE tontine_id=%s AND reference_norm=%s",
+        (tontine_id, ref_norm))
+    return row is not None
+
+
+def enregistrer_reference(conn, tontine_id: int, ref_norm: str, membre_id: int):
+    """Mémorise une référence de transaction (dédup ON CONFLICT via UNIQUE)."""
+    if not ref_norm:
+        return
+    try:
+        q(conn,
+          """INSERT INTO references_transaction (tontine_id, reference_norm, membre_id)
+             VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+          (tontine_id, ref_norm, membre_id))
+    except Exception:
+        pass
+
+
+def screenshot_near_duplicate(conn, membre_id: int, dh_int) -> bool:
+    """
+    Signal SOUPLE : True si un screenshot perceptuellement identique (dHash à
+    <= SEUIL bits) existe déjà pour ce membre. Sert d'ALERTE admin, jamais de
+    blocage dur — deux reçus MoMo distincts partagent le même template et sont
+    donc naturellement proches en dHash (faux positif inacceptable en blocage).
+    """
+    if dh_int is None:
+        return False
+    rows = fetchall(conn,
+        """SELECT dhash FROM screenshots_hash
+           WHERE membre_id=%s AND dhash IS NOT NULL AND dhash <> ''
+           ORDER BY created_at DESC LIMIT 200""",
+        (membre_id,))
+    for r in rows:
+        autre = si.hex_vers_int(r["dhash"])
+        if si.est_near_duplicate(dh_int, autre):
+            return True
+    return False
 
 
 class MontantAberrantError(ValueError):
@@ -2015,6 +2168,27 @@ def enregistrer_cotisation_manuelle(conn, membre_id: int, tontine_id: int,
         )
 
 
+def _incrementer_slip_cycle(conn, membre_id: int, tontine_id: int, cycle: int) -> int:
+    """
+    Enregistre un slip (retard hors grâce) pour ce membre/cycle et retourne le
+    nombre de slips AVANT celui-ci (0 => ce slip est le mulligan).
+
+    Upsert atomique : la ligne ponctualite_cycle pilote l'éligibilité bonus et la
+    priorité de rotation du cycle suivant (voir ira_engine.eligibilite_apres_slip).
+    """
+    row = fetchone(conn, """
+        INSERT INTO ponctualite_cycle (membre_id, tontine_id, cycle, slips, eligible)
+        VALUES (%s, %s, %s, 1, TRUE)
+        ON CONFLICT (membre_id, tontine_id, cycle)
+        DO UPDATE SET slips      = ponctualite_cycle.slips + 1,
+                      eligible   = (ponctualite_cycle.slips + 1) <= 1,
+                      updated_at = NOW()
+        RETURNING slips
+    """, (membre_id, tontine_id, cycle))
+    slips_apres = row["slips"] if row else 1
+    return slips_apres - 1
+
+
 def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> dict:
     """
     Paiement après heure_limite → déplace le membre en dernière position
@@ -2022,6 +2196,9 @@ def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> dict:
     Retourne {"ok": True, "position_avant": N, "position_apres": M}
     ou {"ok": False} si déjà dernier / déjà bouffé.
     """
+    # FORTERESSE : sérialise toute mutation d'ordre de cette tontine (tenu au commit)
+    verrou_ordre_tontine(conn, tontine_id)
+
     passage = fetchone(conn, """
         SELECT id, ordre, cycle FROM liste_passage
         WHERE membre_id=%s AND tontine_id=%s
@@ -2043,13 +2220,18 @@ def _reclasser_en_dernier(conn, membre_id: int, tontine_id: int) -> dict:
     if ordre_actuel >= max_ordre:
         return {"ok": False}  # déjà dernier
 
-    # Décaler les membres entre l'ancienne position+1 et la dernière de -1
+    # Sortir d'abord le membre vers une position sentinelle (-1) pour libérer son slot :
+    # sans ça, le décalage `ordre-1` collisionne sur UNIQUE(tontine,cycle,ordre) tant que
+    # le membre occupe encore ordre_actuel (doublon transitoire = UniqueViolation).
+    q(conn, "UPDATE liste_passage SET ordre=-1 WHERE id=%s", (passage["id"],))
+
+    # Décaler les membres entre l'ancienne position+1 et la dernière de -1 (slot libéré)
     q(conn, """
         UPDATE liste_passage SET ordre = ordre - 1
         WHERE tontine_id=%s AND cycle=%s AND ordre > %s AND ordre <= %s
     """, (tontine_id, cycle, ordre_actuel, max_ordre))
 
-    # Mettre le membre en dernière position
+    # Mettre le membre en dernière position (slot max_ordre désormais vacant)
     q(conn, "UPDATE liste_passage SET ordre=%s WHERE id=%s", (max_ordre, passage["id"]))
     return {"ok": True, "position_avant": ordre_actuel, "position_apres": max_ordre}
 
@@ -2117,7 +2299,9 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
         "SELECT nom_complet, whatsapp FROM membres WHERE id=%s",
         (cotis["membre_id"],))
     tontine = fetchone(conn,
-        "SELECT nom, heure_limite FROM tontines WHERE id=%s", (cotis["tontine_id"],))
+        "SELECT id, nom, heure_limite, heure_ouverture, montant_place, cycle_actuel, "
+        "       type_tontine, jour_semaine, jour_mois "
+        "FROM tontines WHERE id=%s", (cotis["tontine_id"],))
 
     if membre and tontine:
         wa_prive(membre["whatsapp"],
@@ -2129,39 +2313,87 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
             f"_TontineBot Pro — BADF Ltd_"
         )
 
-    # ── Reclassement si screenshot soumis après heure_limite + 5 min ────────
+    # ── Reclassement : retard mesuré contre l'ÉCHÉANCE DATÉE de la période due ──
+    #    (pas l'heure limite du jour de soumission — cf. ira_engine.echeance_periode).
+    #    Gate ET calcul IRA partagent la MÊME échéance → impossible de diverger.
     try:
-        from datetime import timezone, timedelta as _td, datetime as _dt
+        from datetime import timezone, timedelta as _td
+        WAT   = timezone(_td(hours=1))            # tz de collecte (Africa/Douala, +1)
         h_lim = (tontine or {}).get("heure_limite") or "18:00"
-        hh, mm = map(int, h_lim.split(":"))
-        # Grace period : heure_limite + 5 minutes
-        limite_grace = (_dt.combine(_dt.today(), time(hh, mm)) + _td(minutes=5)).time()
-        WAT = timezone(_td(hours=1))
-        soumis_local = cotis["date_soumission"].astimezone(WAT).time()
+        h_ouv = (tontine or {}).get("heure_ouverture") or "05:00"
+        try:
+            _lh, _lm = map(int, h_lim.split(":")); t_limite = time(_lh, _lm)
+        except Exception:
+            t_limite = HEURE_LIMITE_DEF
+        try:
+            _oh, _om = map(int, h_ouv.split(":")); t_ouverture = time(_oh, _om)
+        except Exception:
+            t_ouverture = time(5, 0)
 
-        if soumis_local > limite_grace:
-            # 1. IRA 150 FCFA — dette enregistrée en DB
+        soumis_dt    = cotis["date_soumission"].astimezone(WAT)
+        soumis_local = soumis_dt.time()  # conservé pour l'affichage groupe/audit
+        dt_echeance  = ira_engine.echeance_periode(
+            soumis_dt,
+            lambda d: _est_jour_collecte(tontine, d),
+            t_ouverture, t_limite,
+        )
+        grace_fin = dt_echeance + _td(minutes=IRA_GRACE_MIN)
+
+        if soumis_dt > grace_fin:
+            # 1. IRA v2 indexée sur la mise — collecte À LA SOURCE (à ce paiement).
+            mise    = tontine["montant_place"]
+            cycle   = tontine["cycle_actuel"]
+            calc_ira  = calculer_ira_mise(mise, soumis_dt, dt_echeance)
+            montant_ira = calc_ira["ira"]
+            motif_ira = (
+                f"Retard cotisation — payé {soumis_dt.strftime('%d/%m %H:%M')} "
+                f"> échéance {dt_echeance.strftime('%d/%m %H:%M')} "
+                f"| J+{calc_ira['jours_retard']}"
+                + (" | plafond 50%" if calc_ira["plafonnee"] else "")
+            )
             q(conn, """INSERT INTO dettes_ira (membre_id, tontine_id, montant, motif)
                        VALUES (%s, %s, %s, %s)""",
-              (cotis["membre_id"], cotis["tontine_id"], MONTANT_IRA,
-               f"Retard cotisation — soumis {soumis_local.strftime('%H:%M')} > limite {h_lim}"))
+              (cotis["membre_id"], cotis["tontine_id"], montant_ira, motif_ira))
             conn.commit()
 
-            # 2. Reclassement en dernière position
-            reclasse = _reclasser_en_dernier(conn, cotis["membre_id"], cotis["tontine_id"])
-            if reclasse["ok"]:
-                conn.commit()
+            # 1bis. Tracking mulligan/éligibilité (1 slip réseau toléré/cycle).
+            slips_avant = _incrementer_slip_cycle(conn, cotis["membre_id"],
+                                                  cotis["tontine_id"], cycle)
+            elig = ira_engine.eligibilite_apres_slip(slips_avant)
+            conn.commit()
 
-            # 3. Notification membre (IRA + reclassement)
+            # 2. Reclassement en dernière position — SEULEMENT à l'éjection (2e slip).
+            #    Le mulligan (1er slip) préserve la position ; le cliff IRA suffit.
+            reclasse = {"ok": False}
+            if elig["ejecte"]:
+                reclasse = _reclasser_en_dernier(conn, cotis["membre_id"], cotis["tontine_id"])
+                if reclasse["ok"]:
+                    conn.commit()
+
+            # 3. Notification membre (IRA indexée + statut mulligan/éjection)
             if membre and tontine:
+                pct_cliff = int(IRA_CLIFF_PCT * 100)
                 msg_retard = (
                     f"⚠️ *COTISATION EN RETARD — {tontine['nom']}*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"Votre cotisation a été enregistrée ✅, mais elle est "
                     f"arrivée après l'heure limite (*{h_lim}*).\n\n"
                     f"📌 *Conséquences :*\n"
-                    f"• Pénalité IRA : *{MONTANT_IRA:,} FCFA* ajoutée à votre dette\n"
+                    f"• Pénalité IRA : *{montant_ira:,} FCFA* ajoutée à votre dette "
+                    f"({pct_cliff}% de la mise"
+                    + (f" +{int(IRA_DAILY_PCT*100)}%/jour" if calc_ira["jours_retard"] else "")
+                    + (", *plafond atteint*" if calc_ira["plafonnee"] else "") + ")\n"
                 )
+                if elig["mulligan_utilise"]:
+                    msg_retard += (
+                        f"• 🎟️ *Retard réseau toléré* (1/cycle) — votre bonus de "
+                        f"ponctualité et votre position sont *préservés*. "
+                        f"Un 2e retard ce cycle vous éjecte.\n"
+                    )
+                elif elig["ejecte"]:
+                    msg_retard += (
+                        f"• ❌ *2e retard du cycle* — éjecté du bonus de ponctualité.\n"
+                    )
                 if reclasse["ok"]:
                     msg_retard += (
                         f"• Reclassement : *position {reclasse['position_avant']}*"
@@ -2199,9 +2431,11 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
                 wa_groupe(tontine_full["whatsapp_groupe"], "\n".join(lines))
 
             pos_log = (f"position {reclasse['position_avant']} → position {reclasse['position_apres']}"
-                       if reclasse["ok"] else "déjà dernière position")
-            log_audit("RECLASSEMENT_RETARD",
-                      f"Membre#{cotis['membre_id']} | {pos_log} | IRA {MONTANT_IRA} FCFA | "
+                       if reclasse["ok"] else "position préservée (mulligan)")
+            log_audit("RETARD_COTISATION",
+                      f"Membre#{cotis['membre_id']} | {pos_log} | IRA {montant_ira} FCFA "
+                      f"(J+{calc_ira['jours_retard']}{', cap' if calc_ira['plafonnee'] else ''}) | "
+                      f"slip#{elig['slips_apres']} {'ÉJECTÉ' if elig['ejecte'] else 'toléré'} | "
                       f"Tontine#{cotis['tontine_id']} | Soumis:{soumis_local.strftime('%H:%M')} > {h_lim}+5min")
     except Exception as _re:
         log.warning(f"⚠️ Reclassement retard non bloquant : {_re}")
@@ -2491,6 +2725,77 @@ def confirmer_bouffage_vire(conn, bouffage_id: int, admin_wa: str) -> dict:
     return {"ok": True, "msg": "✅ Bouffage confirmé et enregistré."}
 
 
+def _rapport_ponctualite_cycle(conn, tontine_id: int, cycle: int) -> dict:
+    """
+    Construit le rapport de ponctualité d'un cycle + l'ordre PROPOSÉ pour le suivant.
+
+    Bot = moteur de calcul + mémoire impartiale ; l'admin reste juge final. Ce rapport
+    est de la situational awareness (qui parfait / mulligan / fugitif) + carburant Trust
+    Graph, et sert de PROPOSITION que l'admin validera via NOUVEAU_CYCLE.
+
+    Absence de ligne ponctualite_cycle = 0 slip = parfait.
+
+    Returns: {"rapport_txt", "propose_txt", "stats": {parfaits, mulligan, ejectes, total}}
+    """
+    membres = fetchall(conn, """
+        SELECT lp.membre_id, lp.ordre,
+               COALESCE(m.nom_complet, lp.nickname, '???') AS nom,
+               COALESCE(pc.slips, 0) AS slips
+        FROM liste_passage lp
+        LEFT JOIN membres m           ON m.id = lp.membre_id
+        LEFT JOIN ponctualite_cycle pc ON pc.membre_id = lp.membre_id
+                                      AND pc.tontine_id = lp.tontine_id
+                                      AND pc.cycle = %s
+        WHERE lp.tontine_id=%s AND lp.cycle=%s
+        ORDER BY lp.ordre
+    """, (cycle, tontine_id, cycle))
+
+    # Un placeholder non lié (membre_id NULL) n'a pas de ponctualité mesurable :
+    # il ne doit PAS compter comme "parfait" (sinon promu à tort en tête).
+    lies      = [m for m in membres if m["membre_id"] is not None]
+    parfaits  = [m for m in lies if m["slips"] == 0]
+    mulligan  = [m for m in lies if m["slips"] == 1]
+    ejectes   = [m for m in lies if m["slips"] >= 2]
+    non_lies  = [m for m in membres if m["membre_id"] is None]
+
+    def _bloc(titre, emoji, lst, suffixe=""):
+        if not lst:
+            return ""
+        lignes = "\n".join(f"   {emoji} {x['nom']}{suffixe}" for x in lst)
+        return f"*{titre}* ({len(lst)})\n{lignes}\n"
+
+    rapport_txt = (
+        _bloc("Parfaits — 0 retard", "🏅", parfaits)
+        + _bloc("Mulligan consommé — 1 retard toléré", "🎟️", mulligan)
+        + _bloc("Éjectés — 2+ retards", "❌", ejectes)
+        + _bloc("Non liés (nickname seul)", "🔗", non_lies)
+    ) or "   (aucune donnée de ponctualité ce cycle)\n"
+
+    # Ordre proposé pour le prochain cycle (parfaits en tête ; non-liés en dernier tier).
+    classement = ira_engine.ordre_priorite_next_cycle([
+        {"membre_id": m["membre_id"], "nom": m["nom"],
+         "slips": (m["slips"] if m["membre_id"] is not None else 99),
+         "ordre_actuel": m["ordre"]}
+        for m in membres
+    ])
+    propose_txt = "\n".join(
+        f"   {m['ordre_nouveau']:>2}. {m['nom']}"
+        + ("  🏅" if m["tier"] == 0 else "  🎟️" if m["tier"] == 1 else "  ❌")
+        for m in classement
+    ) or "   (liste vide)"
+
+    return {
+        "rapport_txt": rapport_txt,
+        "propose_txt": propose_txt,
+        "stats": {
+            "parfaits": len(parfaits),
+            "mulligan": len(mulligan),
+            "ejectes": len(ejectes),
+            "total": len(membres),
+        },
+    }
+
+
 def _verifier_fin_cycle(conn, tontine_id: int):
     """
     Appelée après chaque bouffage confirmé.
@@ -2520,6 +2825,24 @@ def _verifier_fin_cycle(conn, tontine_id: int):
     log_audit("FIN_CYCLE",
               f"Tontine:{tontine['nom']} | Cycle:{nb_cycles} terminé")
 
+    # ── PHASE 2 — Dispatch Bonus de Ponctualité (compte marchand MoMo/OM) ──
+    # INACTIF tant que pas d'API de mouvement de fonds (roadmap Q1 2027).
+    # La récompense Phase 1 = priorité de rotation (appliquée dans demarrer_nouveau_cycle).
+    # À l'arrivée du compte marchand, décommenter : le pool = Σ IRA COLLECTÉES
+    # (statut='Prelevee', pas 'Due'), netté des frais MoMo/OM, réparti entre les
+    # membres éligibles (0-1 slip). Invariant dur : Redistribué ≤ Collecté.
+    # Voir mémoire projet : project_merchant_account_rubicon.
+    #
+    #   pool = fetchone(conn, "SELECT COALESCE(SUM(montant),0) t FROM dettes_ira "
+    #                         "WHERE tontine_id=%s AND statut='Prelevee'",
+    #                         (tontine_id,))["t"]
+    #   n_parfaits = fetchone(conn, "SELECT COUNT(*) n FROM ponctualite_cycle "
+    #                               "WHERE tontine_id=%s AND cycle=%s AND eligible",
+    #                               (tontine_id, nb_cycles))["n"]
+    #   dispatch = ira_engine.bonus_par_parfait(pool, n_parfaits,
+    #                                           frais_dispatch=_frais_momo(pool, n_parfaits))
+    #   # reliquat_rollover → pot du cycle suivant (dynamique jackpot)
+
     # Annonce dans le groupe
     if tontine.get("whatsapp_groupe"):
         wa_groupe(tontine["whatsapp_groupe"],
@@ -2533,20 +2856,42 @@ def _verifier_fin_cycle(conn, tontine_id: int):
             f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
         )
 
-    # DM aux admins — leur demander la décision
+    # Rapport de ponctualité + ordre PROPOSÉ (bot propose, admin dispose).
+    try:
+        rap = _rapport_ponctualite_cycle(conn, tontine_id, nb_cycles)
+    except Exception as _re:
+        log.warning(f"⚠️ Rapport ponctualité non bloquant : {_re}")
+        rap = None
+
+    # DM aux admins — rapport + proposition + demande de décision
     admins = fetchall(conn,
         "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s", (tontine_id,))
     for adm in admins:
-        wa_prive(adm["whatsapp"],
+        msg = (
             f"🎉 *CYCLE {nb_cycles} TERMINÉ — {tontine['nom']}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Tous les membres ont bouffé. Le cycle {nb_cycles} est clôturé.\n\n"
+        )
+        if rap:
+            s = rap["stats"]
+            msg += (
+                f"📊 *PONCTUALITÉ DU CYCLE*\n"
+                f"{rap['rapport_txt']}\n"
+                f"🔄 *ORDRE PROPOSÉ — prochain cycle*\n"
+                f"_(parfaits promus en tête — proposition, vous restez juge)_\n"
+                f"{rap['propose_txt']}\n\n"
+                f"💡 Le classement s'applique si vous lancez *NOUVEAU_CYCLE*. "
+                f"Vous pouvez l'ajuster ensuite (option *modifier la liste*) — "
+                f"toute modification est tracée.\n\n"
+            )
+        msg += (
             f"Que souhaitez-vous faire ?\n\n"
             f"  1. Tapez *admin {tontine['nom']}*\n"
             f"  2. Puis tapez *NOUVEAU_CYCLE* pour repartir avec les mêmes membres\n"
             f"     ou *CLOTURER* pour clôturer définitivement cette tontine\n\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
+        wa_prive(adm["whatsapp"], msg)
 
     # Notifier le owner
     wa_owner(
@@ -2586,6 +2931,7 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
     """
     conn = get_conn()
     try:
+        verrou_ordre_tontine(conn, tontine_id)  # FORTERESSE : sérialise l'ordre de cette tontine
         tontine = fetchone(conn, "SELECT * FROM tontines WHERE id=%s", (tontine_id,))
         if not tontine:
             release_conn(conn)
@@ -2619,22 +2965,42 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
                    WHERE tontine_id=%s AND cycle=%s""",
           (tontine_id, ancien_cycle))
 
-        # Dupliquer la liste pour le nouveau cycle avec les mêmes membres
+        # Dupliquer la liste pour le nouveau cycle — REWARD : priorité de rotation.
+        # Les membres parfaits (0 slip) sont promus en tête, mulligan (1 slip) ensuite,
+        # éjectés (2+) en fin. Absence de ligne ponctualite = jamais en retard = parfait.
         passages = fetchall(conn, """
-            SELECT membre_id, nickname, ordre, soumis_par
-            FROM liste_passage
-            WHERE tontine_id=%s AND cycle=%s
-            ORDER BY ordre
-        """, (tontine_id, ancien_cycle))
+            SELECT lp.membre_id, lp.nickname, lp.ordre, lp.soumis_par,
+                   COALESCE(pc.slips, 0) AS slips
+            FROM liste_passage lp
+            LEFT JOIN ponctualite_cycle pc
+                   ON pc.membre_id = lp.membre_id
+                  AND pc.tontine_id = lp.tontine_id
+                  AND pc.cycle = %s
+            WHERE lp.tontine_id=%s AND lp.cycle=%s
+            ORDER BY lp.ordre
+        """, (ancien_cycle, tontine_id, ancien_cycle))
 
-        for p in passages:
+        classement = ira_engine.ordre_priorite_next_cycle([
+            {"membre_id": p["membre_id"], "nickname": p["nickname"],
+             "soumis_par": p["soumis_par"],
+             # Placeholder non lié (membre_id NULL) : jamais "parfait" — il n'a pas de
+             # ligne ponctualite, donc slips=0 le hisserait à tort en tête. On le
+             # classe en dernier tier (slips élevé) pour ne pas polluer la récompense.
+             "slips": (p["slips"] if p["membre_id"] is not None else 99),
+             "ordre_actuel": p["ordre"]}
+            for p in passages
+        ])
+        nb_promus = sum(1 for m in classement if m["tier"] == 0)
+
+        for m in classement:
+            # Ordres 1..N distincts par construction + nouveau cycle vierge sous
+            # verrou → INSERT direct (ON CONFLICT retiré : incompatible DEFERRABLE).
             q(conn, """
                 INSERT INTO liste_passage
                     (tontine_id, membre_id, nickname, cycle, ordre, soumis_par)
                 VALUES (%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (tontine_id, cycle, ordre) DO NOTHING
-            """, (tontine_id, p["membre_id"], p["nickname"],
-                  nouveau_cycle, p["ordre"], p["soumis_par"]))
+            """, (tontine_id, m["membre_id"], m["nickname"],
+                  nouveau_cycle, m["ordre_nouveau"], m["soumis_par"]))
 
         # Remettre adhesions en Actif
         q(conn, """UPDATE adhesions SET statut='Actif', jours_avance=0
@@ -2666,13 +3032,27 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
         log_audit("NOUVEAU_CYCLE",
                   f"Tontine:{tontine['nom']} | Cycle {ancien_cycle}→{nouveau_cycle} | Admin:{admin_wa}")
 
+        # Traçabilité : le tri algorithmique de ponctualité est le DÉFAUT appliqué.
+        # Toute déviation ultérieure de l'admin est loggée séparément (MODIF_ORDRE).
+        nb_mulligan = sum(1 for m in classement if m["tier"] == 1)
+        nb_ejectes  = sum(1 for m in classement if m["tier"] == 2)
+        ordre_applique = " | ".join(
+            f"{m['ordre_nouveau']}.{m.get('nickname') or ('#'+str(m['membre_id']) if m['membre_id'] else '?')}"
+            for m in classement)
+        log_audit("REORDER_PONCTUALITE",
+                  f"Tontine:{tontine['nom']} | Cycle {nouveau_cycle} | "
+                  f"parfaits:{nb_promus} mulligan:{nb_mulligan} éjectés:{nb_ejectes} | "
+                  f"ordre appliqué (défaut algo) : {ordre_applique}", admin_wa)
+
         # Annonce dans le groupe
         if tontine.get("whatsapp_groupe"):
             wa_groupe(tontine["whatsapp_groupe"],
                 f"🚀 *CYCLE {nouveau_cycle} LANCÉ — {tontine['nom']}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Le cycle {nouveau_cycle} démarre maintenant !\n\n"
-                f"👥 *{nb_membres} membres* repartent pour un nouveau cycle.\n\n"
+                f"👥 *{nb_membres} membres* repartent pour un nouveau cycle.\n"
+                f"🏅 *{nb_promus} membre(s) parfait(s)* (zéro retard) promus en tête "
+                f"de la liste de bouffage — la ponctualité paie.\n\n"
                 f"Les cotisations reprennent normalement.\n"
                 f"Envoyez vos screenshots dans ce groupe après chaque virement.\n\n"
                 f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
@@ -3131,7 +3511,8 @@ def wa_mentionner_retardataires(nom_groupe: str, retardataires: list,
             f"📸 Effectuez votre virement vers le numéro de votre admin,\n"
             f"   puis envoyez le *screenshot de confirmation* dans le groupe.\n\n"
             f"⏱ Heure limite : *{tontine['heure_limite']}*\n"
-            f"💸 Passé ce délai : pénalité *{MONTANT_IRA} FCFA/jour*"
+            f"💸 Passé ce délai : IRA *{int(IRA_CLIFF_PCT*100)}% de la mise* dès le retard "
+            f"+{int(IRA_DAILY_PCT*100)}%/jour (plafond {int(IRA_CAP_PCT*100)}%)"
         )
         wa_prive(r["whatsapp"], msg)
 
@@ -4289,8 +4670,12 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         ancien      = d["modif_ordre_actuel"]
         pass_id     = d["modif_pass_id"]
         conn        = get_conn()
+        verrou_ordre_tontine(conn, tid)   # FORTERESSE : sérialise l'ordre de cette tontine
         t           = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
-        # Décaler les autres membres
+        # Sortir le membre vers une sentinelle (-1) AVANT le décalage : sinon le shift
+        # collisionne sur UNIQUE(tontine,cycle,ordre) tant que le membre occupe `ancien`.
+        q(conn, "UPDATE liste_passage SET ordre=-1 WHERE id=%s", (pass_id,))
+        # Décaler les autres membres (slot `ancien` désormais libre)
         if nouv_ordre < ancien:
             q(conn, """UPDATE liste_passage SET ordre=ordre+1
                        WHERE tontine_id=%s AND cycle=%s
@@ -4927,7 +5312,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             "1": ("heure_ouverture", "Ouverture cotisations",
                   "Les membres seront informés que les dépôts sont ouverts."),
             "2": ("heure_limite",    "Limite cotisations",
-                  "Après cette heure : pénalité IRA de {:,} FCFA.".format(MONTANT_IRA)),
+                  "Après cette heure : IRA = {}% de la mise + {}%/jour (plafond {}%).".format(
+                      int(IRA_CLIFF_PCT*100), int(IRA_DAILY_PCT*100), int(IRA_CAP_PCT*100))),
             "3": ("heure_rappel",    "Rappel non-cotisants",
                   "Liste des non-cotisants publiée dans le groupe."),
             "4": ("heure_bouffage",  "Bouffage",
@@ -7014,8 +7400,14 @@ def webhook_whatsapp_greenapi():
     if not GREENAPI_WEBHOOK_SECRET:
         log.error("🔴 GREENAPI_WEBHOOK_SECRET non configuré — webhook refusé")
         return jsonify({"status": "misconfigured"}), 503
+    # Token accepté en query (mode Green API) OU en header Authorization: Bearer
+    # (le header ne fuite pas dans les access logs comme le query string).
     incoming_token = request.args.get("token", "")
-    if not hmac.compare_digest(incoming_token, GREENAPI_WEBHOOK_SECRET):
+    if not incoming_token:
+        _auth = request.headers.get("Authorization", "")
+        if _auth.startswith("Bearer "):
+            incoming_token = _auth[7:]
+    if not ws.constant_time_equal(incoming_token, GREENAPI_WEBHOOK_SECRET):
         log_audit("GREENAPI_TOKEN_INVALIDE", "Webhook token mismatch", request.remote_addr)
         return jsonify({"status": "forbidden"}), 403
 
@@ -7024,6 +7416,13 @@ def webhook_whatsapp_greenapi():
         payload = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"status": "bad_json"}), 400
+
+    # ── 2b) Anti-rejeu : un idMessage déjà vu = requête rejouée → drop ─────
+    #        Tue le replay d'une requête capturée (le token seul ne l'empêche pas).
+    if _replay_guard.est_rejeu(payload.get("idMessage", "")):
+        log_audit("WEBHOOK_REPLAY",
+                  f"idMessage rejoué: {payload.get('idMessage', '')}", request.remote_addr)
+        return jsonify({"status": "ok"}), 200
 
     # ── 3) Router par type d'événement ──────────────────────────────────
     type_webhook = payload.get("typeWebhook", "")
@@ -7081,24 +7480,46 @@ def webhook_whatsapp_greenapi():
 
 def _greenapi_telecharger_media(url_media: str) -> bytes:
     """Télécharge un média depuis l'URL Green API et retourne le contenu en bytes.
-    2 tentatives max. Timeout 15s par tentative. Détecte 403/404 = lien expiré."""
+    2 tentatives max. Timeout 15s par tentative. Détecte 403/404 = lien expiré.
+
+    Durcissement SSRF (finding #2) :
+      - whitelist sur le HOSTNAME avec frontière de label (ws.media_url_autorisee) ;
+      - allow_redirects=False + rejet explicite de tout 3xx : la whitelist ne
+        valide que le 1er hop ; une redirection mènerait vers 169.254.169.254,
+        127.0.0.1:4040 (API ngrok locale), Postgres, etc. ;
+      - streaming + plafond MEDIA_MAX_BYTES : pas de chargement mémoire illimité.
+    """
     if not url_media:
         return b""
+    if not ws.media_url_autorisee(url_media):
+        log.warning(f"⚠️ URL média rejetée (hors whitelist/scheme) : {url_media[:80]}")
+        return b""
     try:
-        from urllib.parse import urlparse as _urlparse
-        _p = _urlparse(url_media)
-        _domaines_ok = (".green-api.com", ".sms.by", ".whatsapp.net")
-        if _p.scheme != "https" or not any(_p.netloc.endswith(d) for d in _domaines_ok):
-            log.warning(f"⚠️ URL média Green API suspecte rejetée : {_p.netloc}")
-            return b""
         for attempt in range(2):
             try:
-                r = requests.get(url_media, timeout=15)
-                if r.status_code == 200:
-                    return r.content
-                if r.status_code in (403, 404):
-                    log.warning(f"⚠️ Média Green API {r.status_code} — lien expiré ou introuvable")
-                    return b""
+                r = requests.get(url_media, timeout=15,
+                                  allow_redirects=False, stream=True)
+                try:
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        log.warning(f"⚠️ Média Green API redirige ({r.status_code}) "
+                                    f"→ rejeté (anti-SSRF)")
+                        return b""
+                    if r.status_code == 200:
+                        buf = bytearray()
+                        for chunk in r.iter_content(65536):
+                            if not chunk:
+                                continue
+                            buf.extend(chunk)
+                            if len(buf) > MEDIA_MAX_BYTES:
+                                log.warning("⚠️ Média Green API dépasse la limite "
+                                            "de taille → rejeté")
+                                return b""
+                        return bytes(buf)
+                    if r.status_code in (403, 404):
+                        log.warning(f"⚠️ Média Green API {r.status_code} — lien expiré ou introuvable")
+                        return b""
+                finally:
+                    r.close()
                 if attempt == 0:
                     time_module.sleep(1)
             except (requests.ConnectionError, requests.Timeout):
@@ -7236,6 +7657,13 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
             incrementer_tentatives_fraude(membre["id"], "Screenshot recyclé")
             return
 
+        # Couche 2 — perceptual hash (dHash), signal SOUPLE : détecte le recyclage
+        # 1px/re-compression que le byte-hash laisse passer. Ne bloque jamais seul.
+        dh       = si.dhash(image_bytes)
+        dh_hex   = "" if dh is None else format(dh, "016x")
+        near_dup = screenshot_near_duplicate(conn, membre["id"], dh)
+        ref_norm = ""   # référence de transaction normalisée (renseignée par l'OCR)
+
         # Récupérer l'adhesion avec nombre_places
         if group_id:
             adhesion = fetchone(conn, """
@@ -7268,6 +7696,23 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
         nb_places       = adhesion["nombre_places"] or 1
         montant_attendu = adhesion["montant_place"] * nb_places
 
+        # Signal SOUPLE near-dup (dHash) → alerte admin, jamais un blocage auto
+        # (deux reçus MoMo distincts partagent le même template).
+        if near_dup:
+            log_audit("SCREENSHOT_NEAR_DUP",
+                      f"Membre:{membre['id']} dHash proche d'un screenshot antérieur", wa)
+            admin_nd = fetchone(conn,
+                "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
+                (adhesion["tontine_id"],))
+            if admin_nd:
+                wa_prive(admin_nd["whatsapp"],
+                    f"⚠️ *SCREENSHOT QUASI-IDENTIQUE — {adhesion['nom']}*\n\n"
+                    f"Membre : *{membre['nom_complet']}*\n"
+                    f"L'image ressemble fortement à un reçu déjà soumis "
+                    f"(possible re-compression d'un ancien). Vérifiez la référence "
+                    f"de transaction avant de confirmer.\n\n"
+                    f"_TontineBot Pro — BADF Ltd_")
+
         # ── Lecture automatique du screenshot (OCR local Tesseract) ───────────
         lecture = lire_screenshot_mobile_money(image_bytes)
         fraude_visuelle = False
@@ -7277,6 +7722,26 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
             confiance   = lecture.get("confiance", "faible")
             operateur   = lecture.get("operateur", "Inconnu")
             ref_lu      = lecture.get("reference", "")
+            ref_norm    = si.normaliser_reference(ref_lu)
+
+            # Couche 3 (FORTE) — la référence de transaction est unique par paiement
+            # réel : insensible au 1px/re-encodage qui défait le byte-hash. Blocage dur.
+            if ref_norm and reference_deja_utilisee(conn, adhesion["tontine_id"], ref_norm):
+                log_audit("SCREENSHOT_RECYCLE",
+                          f"Membre:{membre['id']} Ref:{ref_norm} — transaction déjà utilisée", wa)
+                incrementer_tentatives_fraude(membre["id"],
+                                              f"Référence transaction recyclée: {ref_norm}")
+                admin_r = fetchone(conn,
+                    "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s LIMIT 1",
+                    (adhesion["tontine_id"],))
+                if admin_r:
+                    wa_prive(admin_r["whatsapp"],
+                        f"🚨 *RECYCLAGE BLOQUÉ — {adhesion['nom']}*\n\n"
+                        f"Membre : *{membre['nom_complet']}*\n"
+                        f"Référence de transaction *{ref_norm}* déjà utilisée — "
+                        f"reçu recyclé rejeté automatiquement.\n\n"
+                        f"_TontineBot Pro — BADF Ltd_")
+                return
 
             # Vérification montant : comparaison avec montant attendu
             if montant_lu and montant_attendu:
@@ -7417,7 +7882,8 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
                 f"_TontineBot Pro — BADF Ltd_")
             return
 
-        enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"])
+        enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"], dh_hex)
+        enregistrer_reference(conn, adhesion["tontine_id"], ref_norm, membre["id"])
 
         # Message places multiples si applicable
         places_info = ""
@@ -8713,27 +9179,41 @@ def _restaurer_sessions():
 
 _JOURS_SEMAINE = {"Lundi":0,"Mardi":1,"Mercredi":2,"Jeudi":3,"Vendredi":4,"Samedi":5,"Dimanche":6}
 
-def _est_jour_cotisation(t: dict) -> bool:
-    """True si aujourd'hui est un jour de cotisation pour cette tontine."""
+def _est_jour_collecte(t: dict, d: _date) -> bool:
+    """
+    True si la date `d` est un jour de cotisation pour cette tontine.
+    Source UNIQUE du calendrier de collecte (rappels + échéance IRA) :
+      • Journaliere  → tout jour
+      • Hebdomadaire → jour_semaine
+      • Mensuelle    → jour_mois (1-28)
+    Date-paramétrique : sert aussi à ira_engine.echeance_periode pour dater
+    l'échéance d'un paiement en retard, pas seulement à tester "aujourd'hui".
+    """
     tt = t.get("type_tontine", "Journaliere")
     if tt == "Journaliere":
         return True
-    # Heure locale du pays de la tontine
-    tz_name = t.get("timezone") or "Africa/Douala"
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo(tz_name))
-    except Exception:
-        now = datetime.now()
     if tt == "Hebdomadaire":
         jour_cible = _JOURS_SEMAINE.get(t.get("jour_semaine"))
         if jour_cible is None:
-            log.warning(f"jour_semaine invalide '{t.get('jour_semaine')}' tontine#{t.get('id')} — rappel ignoré")
+            log.warning(f"jour_semaine invalide '{t.get('jour_semaine')}' tontine#{t.get('id')}")
             return False
-        return now.weekday() == jour_cible
+        return d.weekday() == jour_cible
     if tt == "Mensuelle":
-        return now.day == (t.get("jour_mois") or 1)
+        return d.day == (t.get("jour_mois") or 1)
     return True
+
+
+def _est_jour_cotisation(t: dict) -> bool:
+    """True si aujourd'hui (tz de la tontine) est un jour de cotisation."""
+    if t.get("type_tontine", "Journaliere") == "Journaliere":
+        return True
+    tz_name = t.get("timezone") or "Africa/Douala"
+    try:
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo(tz_name)).date()
+    except Exception:
+        today = datetime.now().date()
+    return _est_jour_collecte(t, today)
 
 
 def rappel_ouverture():
@@ -8797,7 +9277,8 @@ def rappel_matin():
             f"📱 Virez vers : *{num_collecte}*\n"
             f"📸 Puis envoyez votre screenshot dans ce groupe.\n\n"
             f"⏰ Heure limite : *{t['heure_limite']}*\n"
-            f"Passé ce délai : pénalité *{MONTANT_IRA} FCFA* (IRA)\n"
+            f"Passé ce délai : IRA *{int(t['montant_place']*IRA_CLIFF_PCT):,} FCFA* "
+            f"({int(IRA_CLIFF_PCT*100)}% de la mise) +{int(IRA_DAILY_PCT*100)}%/jour\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
@@ -8872,7 +9353,7 @@ def rappel_non_cotisants():
                 f"📸 Envoyez le screenshot dans ce groupe.\n\n"
                 f"_{phrase}_\n\n"
                 f"⏰ Limite : *{t['heure_limite']}* | "
-                f"Retard → *{MONTANT_IRA} FCFA/jour*\n\n"
+                f"Retard → IRA *{int(IRA_CLIFF_PCT*100)}% de la mise* +{int(IRA_DAILY_PCT*100)}%/jour\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"_TontineBot Pro — BADF Ltd_"
             )
@@ -9500,160 +9981,14 @@ def verifier_dettes_badf_impayees():
 # ══════════════════════════════════════════════════════════════════════════
 # DASHBOARD LOCAL — http://localhost:5000/dashboard
 # ══════════════════════════════════════════════════════════════════════════
-
-@app.route("/dashboard/data", methods=["GET"])
-def dashboard_data():
-    """Données temps réel pour le dashboard — JSON."""
-    if not session.get("dash_ok"):
-        return jsonify({"error": "unauthorized"}), 401
-    try:
-        conn = get_conn()
-        try:
-            delta = datetime.now() - _BOT_START
-            h, rem = divmod(int(delta.total_seconds()), 3600)
-            m, s   = divmod(rem, 60)
-            uptime = f"{h}h {m:02d}m {s:02d}s"
-
-            cur = conn.cursor()
-            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-
-            cur.execute("""
-                SELECT t.nom, t.montant_place,
-                       t.cycle_actuel, t.heure_bouffage,
-                       COUNT(a.id) FILTER (WHERE a.statut='Actif') AS nb_membres
-                FROM tontines t
-                LEFT JOIN adhesions a ON a.tontine_id = t.id
-                WHERE t.statut = 'Active'
-                GROUP BY t.id
-                ORDER BY t.nom
-            """)
-            cols     = [d[0] for d in cur.description]
-            tontines = [dict(zip(cols, row)) for row in cur.fetchall()]
-
-            cur.execute("""
-                SELECT
-                    t.nom,
-                    t.montant_place,
-                    t.capacite_max,
-                    (SELECT COUNT(*)
-                     FROM adhesions a WHERE a.tontine_id=t.id AND a.statut='Actif') AS nb_membres,
-                    (SELECT COALESCE(SUM(a2.nombre_places),0)
-                     FROM adhesions a2 WHERE a2.tontine_id=t.id AND a2.statut='Actif') AS nb_places,
-                    (SELECT COALESCE(SUM(tx.frais_fmp),0)
-                     FROM transactions tx WHERE tx.tontine_id=t.id AND tx.statut='Confirmee') AS fmp_reel,
-                    (SELECT COALESCE(SUM(di.montant),0)
-                     FROM dettes_ira di WHERE di.tontine_id=t.id AND di.statut='Due') AS ira_du
-                FROM tontines t
-                WHERE t.statut='Active'
-                ORDER BY t.nom
-            """)
-            _proj_rows = cur.fetchall()
-            _proj_list, _fmp_reel_tot, _fmp_jour_tot, _ira_du_tot = [], 0.0, 0.0, 0.0
-            for _r in _proj_rows:
-                _nom, _mp, _cap, _nb_m, _nb_p, _fmp_r, _ira = _r
-                _fj = float(_nb_p) * float(_mp) * 0.02
-                _fmp_reel_tot += float(_fmp_r)
-                _fmp_jour_tot += _fj
-                _ira_du_tot   += float(_ira)
-                _proj_list.append({"nom": _nom, "nb_membres": int(_nb_m),
-                    "capacite_max": int(_cap), "fmp_jour": _fj,
-                    "fmp_reel": float(_fmp_r), "ira_du": float(_ira)})
-            projection = {"par_tontine": _proj_list, "fmp_reel": _fmp_reel_tot,
-                          "fmp_jour": _fmp_jour_tot, "fmp_30j": _fmp_jour_tot * 30,
-                          "ira_du": _ira_du_tot}
-
-            cur.execute("""
-                SELECT
-                    COALESCE(SUM(frais_fmp)    FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(montant_brut) FILTER (WHERE type_transaction = 'Adhesion'
-                                                       AND date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(frais_ira)    FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(montant_brut) FILTER (WHERE date_heure::date = CURRENT_DATE), 0),
-                    COALESCE(SUM(montant_brut), 0)
-                FROM transactions
-                WHERE statut = 'Confirmee'
-            """)
-            r         = cur.fetchone()
-            revenus   = {"fmp": r[0], "adhesions": r[1], "ira": r[2], "total": r[0]+r[1]+r[2]}
-            gmv_jour  = r[3]
-            gmv_total = r[4]
-
-            cur.execute("SELECT COUNT(*) FROM cotisations_manuelles WHERE statut='En_attente'")
-            cotis_attente = cur.fetchone()[0]
-
-            cur.execute("""
-                SELECT m.nom_complet, bm.montant_net, t.nom AS tontine
-                FROM bouffages_manuels bm
-                JOIN membres m  ON m.id  = bm.membre_id
-                JOIN tontines t ON t.id  = bm.tontine_id
-                WHERE bm.statut = 'En_attente'
-                ORDER BY bm.date_declenchement DESC
-                LIMIT 5
-            """)
-            bouffages = [{"nom": row[0], "montant": row[1], "tontine": row[2]}
-                         for row in cur.fetchall()]
-
-            cur.execute("SELECT COALESCE(SUM(montant), 0) FROM dettes_ira WHERE statut='Due'")
-            ira_total = cur.fetchone()[0]
-
-            cur.execute("""
-                SELECT type_event, details, date_heure
-                FROM audit_log
-                ORDER BY date_heure DESC
-                LIMIT 15
-            """)
-            activite = [
-                {"type": row[0],
-                 "details": (row[1] or "")[:60],
-                 "ts": row[2].strftime("%H:%M:%S") if row[2] else ""}
-                for row in cur.fetchall()
-            ]
-
-            resp = jsonify({
-                "uptime":       uptime,
-                "ts":           datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                "tontines":     tontines,
-                "projection":   projection,
-                "revenus":      revenus,
-                "cotis_attente": cotis_attente,
-                "bouffages":    bouffages,
-                "ira_total":    ira_total,
-                "gmv_jour":     gmv_jour,
-                "gmv_total":    gmv_total,
-                "activite":     activite,
-            })
-            resp.headers["Cache-Control"] = "no-store"
-            return resp
-        finally:
-            release_conn(conn)
-    except Exception as e:
-        log.error(f"Dashboard data error: {e}")
-        return jsonify({"error": "internal_error"}), 500
-
-
-_DASHBOARD_HTML = open(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html"),
-    encoding="utf-8"
-).read()
-
-
-@app.route("/dashboard", methods=["GET"])
-def dashboard():
-    """Dashboard local temps réel — Bloomberg terminal UI."""
-    tok = request.args.get("token", "")
-    if not session.get("dash_ok"):
-        if not _DASH_TOKEN or not hmac.compare_digest(tok, _DASH_TOKEN):
-            return Response(
-                '<html><body style="background:#060606;color:#ff4444;'
-                'font-family:monospace;padding:40px">'
-                '<h2>&#9679; ACC&#200;S REFUS&#201;</h2>'
-                '<p>Ajoutez <code>?token=DASHBOARD_TOKEN</code> '
-                '\u00e0 l\'URL.</p></body></html>',
-                content_type="text/html; charset=utf-8",
-                status=401
-            )
-        session["dash_ok"] = True
-    return Response(_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
+# Sous-système périphérique extrait dans dashboard.py (routes /dashboard,
+# /dashboard/data). Câblage par injection — aucune logique dashboard inline ici.
+import dashboard
+dashboard.register_dashboard(
+    app,
+    get_conn=get_conn, release_conn=release_conn,
+    bot_start=_BOT_START, dash_token=_DASH_TOKEN, logger=log,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════
