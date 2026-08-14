@@ -179,31 +179,25 @@ One protocol. Every informal economy. No competitor has built cross-ROSCA infras
 
 ---
 
-## IRA — A Behavioral-Regulation Lever, Not a Revenue Stream
+## IRA
 
-The IRA (late penalty) is deliberately excluded from the revenue model above. It is not a way for BADF to make money on lateness — it is the enforcement layer of the protocol: the mechanism that substitutes law for social pressure and makes honest behavior financially rational *before the temptation to default even forms*.
-
-**Indexed on the stake, not flat.** A flat 150 FCFA/day fee is trivial against a 50,000 FCFA stake (3 days = 0.9% of the withheld cash) — keeping your money stays rational. IRA v2 is indexed on the contribution itself: a Schelling cliff from the sixth minute of lateness, a linear daily accrual on top, capped at 50% of the stake to stay clear of usury optics (ANIF/COBAC). The penalty is strictly monotone in time — a longer delay never costs less — so lateness is irrational at any group size.
-
-**Redistributed, not pocketed.** Collected IRA does not book as company revenue. It funds the punctuality reward: punctual members are promoted in the rotation order, and (Phase 2, merchant-account float) share the collected pool as a rebate — the exact symmetric of the penalty. The latecomer is reclassed to last; the punctual member is moved to first. The invariant holds at all times: *redistributed ≤ collected* — BADF never advances cash.
-
-**A single network slip is forgiven.** One late payment per cycle is tolerated (a mulligan) for eligibility to the reward, absorbing MTN/Orange Money network stalls; the IRA still applies, but position and bonus are preserved. The second slip ejects. The result is a system that is hard on defaulters and forgiving of honest members hit by 2G friction — which is the whole point of a *katechon*: it restrains the chaos without punishing the faithful.
+The IRA (late penalty) is not part of the revenue model. It is an internal enforcement lever, never booked as company revenue. Amounts collected on lateness are redistributed to punctual members, so BADF makes no money on late payments.
 
 ---
 
-## Phase 2 — The USDC Layer: Inflation Shield + Yield Engine
+## Phase 2: The USDC Layer (Inflation Shield + Yield Engine)
 
-Every ROSCA has a structural vulnerability that no coordination software has ever solved: the pot sits idle in fiat currency between the day contributions are collected and the day the winner receives the cashout. In economies where inflation runs at 20–30% annually, this idle period silently erodes the real value of every member's contribution. In high-volatility environments like Nigeria (NGN depreciated 70% in 2023–2024) or Ghana (GHS lost over 50% against the dollar in 2022), the problem is existential.
+Every ROSCA has a structural vulnerability that no coordination software has ever solved: the pot sits idle in fiat currency between the day contributions are collected and the day the winner receives the cashout. In economies where inflation runs at 20 to 30% annually, this idle period silently erodes the real value of every member's contribution. In highly volatile environments like Nigeria (the naira lost 70% of its value across 2023 and 2024) or Ghana (the cedi lost over 50% against the dollar in 2022), the problem is existential.
 
 Phase 2 solves this by making USDC the invisible settlement layer underneath every ROSCA managed by KATECHON OS.
 
 When a contribution is confirmed, KATECHON OS automatically converts the local currency amount to USDC at the interbank rate. The pot is held in USDC, not in fiat. When the cashout window opens, the USDC balance is converted back to local currency and delivered to the winner. Members experience zero friction: they send FCFA or NGN or GHS as they always have, via mobile money or SwitchN. The USD peg works silently underneath.
 
-The yield layer activates the moment the pot exceeds a protocol-defined threshold. Idle USDC is deployed into institutional-grade yield protocols — Circle's yield products, Aave, or equivalent DeFi infrastructure — generating passive returns on the float. This yield is distributed proportionally to contributing members at the end of each ROSCA cycle, effectively acting as a rebate that reduces the net cost of the FMP 2% fee. In a 20-member tontine running for 20 days, even a conservative 5% annualized yield on the average float produces a meaningful per-member return that exceeds what any local savings account would offer to this population.
+The yield layer activates the moment the pot exceeds a threshold set by the protocol. Idle USDC is deployed into institutional grade yield protocols such as Circle's yield products, Aave, or equivalent DeFi infrastructure, generating passive returns on the float. This yield is distributed proportionally to contributing members at the end of each ROSCA cycle, effectively acting as a rebate that reduces the net cost of the FMP 2% fee. In a tontine of 20 members running for 20 days, even a conservative 5% annualized yield on the average float produces a meaningful return per member that exceeds what any local savings account would offer to this population.
 
-The Trust Graph becomes the credit layer. After 12–24 months of behavioral data, a member with a Green Trust Score (0–30) holds a cryptographically-verifiable track record that no traditional bank has ever assessed. KATECHON OS uses this as on-chain collateral to underwrite micro-credit at USDC rates. A member who has contributed on time for 18 months across three tontines can access a USDC micro-loan priced proportionally to their Trust Graph score, without a bank account, without a credit history, without collateral beyond their own demonstrated behavior.
+The Trust Graph becomes the credit layer. After 12 to 24 months of behavioral data, a member with a Green Trust Score (0 to 30) holds a cryptographically verifiable track record that no traditional bank has ever assessed. KATECHON OS uses this as on-chain collateral to underwrite micro-credit at USDC rates. A member who has contributed on time for 18 months across three tontines can access a USDC micro-loan priced proportionally to their Trust Graph score, without a bank account, without a credit history, without collateral beyond their own demonstrated behavior.
 
-Parametric insurance closes the loop. Smart contract oracles monitor commodity price indices, rainfall data, and regional economic shock indicators. When a trigger condition is met, a drought index crossing a threshold or a commodity price falling below a floor, affected members receive automatic USDC payouts. No claims process. No adjuster. No paperwork. Settlement in seconds, on-chain, auditable by any party.
+Parametric insurance closes the loop. Smart contract oracles monitor commodity price indices, rainfall data, and regional economic shock indicators. When a trigger condition is met, such as a drought index crossing a threshold or a commodity price falling below a floor, affected members receive automatic USDC payouts. No claims process. No adjuster. No paperwork. Settlement in seconds, on-chain, auditable by any party.
 
 Members never need to know what USDC is. They participate in their tontine as they always have. KATECHON OS handles the conversion, the yield deployment, the credit scoring, and the insurance settlement transparently. The result is a financial product that outperforms anything a retail bank in Cameroon, Nigeria, or Ghana has ever offered to this population, at zero marginal infrastructure cost.
 
