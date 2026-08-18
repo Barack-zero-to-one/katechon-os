@@ -6,7 +6,7 @@
 ║   Stack : Python 3.11 · Flask · PostgreSQL · Green API WhatsApp         ║
 ║                                                                          ║
 ║   CORRECTIFS v9.2 :                                                      ║
-║   ✅ Changement de numéro (CHGNUM 250 FCFA) — handler complet           ║
+║   ✅ Changement de numéro (CHGNUM 500 FCFA) — handler complet           ║
 ║   ✅ Admins groupe enregistrés automatiquement en base                   ║
 ║   ✅ Bot rejoint groupe → se présente + enregistre admins                ║
 ║   ✅ creer_tontine() / inscrire_dans_tontine() — config auto DM admin   ║
@@ -93,7 +93,7 @@ IRA_FLOOR        = 200     # Plancher aligné grille 100 (protège les petits gr
 IRA_GRACE_MIN    = 5       # Tolérance réseau MTN/Orange (minutes)
 MONTANT_IRA      = 150     # DÉPRÉCIÉ — conservé le temps de migrer les anciens messages
 FRAIS_REACTIV    = 1_000   # Réactivation après suspension
-FRAIS_CHGNUM     = 250     # Changement de numéro Mobile Money
+FRAIS_CHGNUM     = 500     # Changement de numéro Mobile Money
 
 # ── Numéro collecteur BADF — reçoit FMP + adhésions + IRA ─────────────────
 NUMERO_BADF_MTN    = os.getenv("NUMERO_BADF_MTN",    "+237683603113")  # MTN MoMo
