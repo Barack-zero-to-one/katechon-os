@@ -175,7 +175,7 @@ One protocol. Every informal economy. No competitor has built cross-ROSCA infras
 |---|--------|-------|
 | 1 | **FMP 2%** | Automatically deducted from each confirmed contribution |
 | 2 | **Reactivation fee** | 1,000 FCFA after 72h suspension |
-| 3 | **Number change fee** | 250 FCFA (CHGNUM command) |
+| 3 | **Number change fee** | 500 FCFA (CHGNUM command) |
 | 4 | **IRA (late penalty)** | Disabled |
 
 ---

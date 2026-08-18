@@ -83,7 +83,7 @@ Ce n'est pas une app de gestion de tontine. C'est l'infrastructure de confiance 
 - `FRAIS_FMP = 0.00` — FMP désactivé, aucune ligne visible côté membres ou admin
 - **IRA** — 150 FCFA/jour de retard (seule retenue active visible)
 - **Frais de réactivation** — 1 000 FCFA après suspension 72h
-- **Frais changement de numéro** — 250 FCFA (commande CHGNUM)
+- **Frais changement de numéro** — 500 FCFA (commande CHGNUM)
 
 **Modèle déclaré à YC (activable en 1 ligne) :**
 - FMP 2% sur chaque cotisation → `FRAIS_FMP = 0.02`
