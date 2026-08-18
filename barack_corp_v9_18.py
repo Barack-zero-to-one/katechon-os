@@ -2009,8 +2009,18 @@ def enregistrer_screenshot(conn, image_hash: str,
           """INSERT INTO screenshots_hash (hash, membre_id, tontine_id, dhash)
              VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
           (image_hash, membre_id, tontine_id, dhash_hex or None))
-    except Exception:
-        pass
+    except Exception as e:
+        # ON CONFLICT DO NOTHING absorbe déjà le cas bénin (hash déjà vu) sans
+        # jamais lever — donc toute exception ici est anormale (DB down, FK
+        # invalide, etc.) ET signifie que le hash n'a PAS été enregistré :
+        # l'anti-recyclage est silencieusement désactivé pour ce screenshot.
+        # Avaler l'erreur sans trace rendait ça indétectable — on logue.
+        log.error(f"❌ enregistrer_screenshot échec (anti-recyclage NON enregistré) "
+                  f"membre={membre_id} tontine={tontine_id}: {e}")
+        try:
+            conn.rollback()  # sinon la connexion reste "aborted" pour les appels suivants sur ce conn
+        except Exception:
+            pass
 
 
 def reference_deja_utilisee(conn, tontine_id: int, ref_norm: str) -> bool:
@@ -2100,7 +2110,14 @@ def enregistrer_cotisation_manuelle(conn, membre_id: int, tontine_id: int,
     if not tontine:
         raise ValueError(f"Tontine #{tontine_id} introuvable")
 
-    montant_attendu = tontine["montant_place"]
+    # Un membre peut détenir plusieurs places → l'attendu doit être mis à l'échelle,
+    # sinon tout membre multi-places déclenche un écart artificiel (jusqu'à 100%)
+    # et se fait rejeter à tort par MontantAberrantError.
+    adhesion_places = fetchone(conn,
+        "SELECT nombre_places FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
+        (membre_id, tontine_id))
+    nb_places = (adhesion_places["nombre_places"] if adhesion_places else 1) or 1
+    montant_attendu = tontine["montant_place"] * nb_places
 
     # ── Calculer l'écart relatif ──────────────────────────────────────
     if montant_attendu > 0:
@@ -2341,7 +2358,12 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
 
         if soumis_dt > grace_fin:
             # 1. IRA v2 indexée sur la mise — collecte À LA SOURCE (à ce paiement).
-            mise    = tontine["montant_place"]
+            #    La mise réelle inclut nombre_places : un membre à 3 places retient
+            #    3× plus d'argent en retard, la pénalité doit suivre.
+            _places = fetchone(conn,
+                "SELECT nombre_places FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
+                (cotis["membre_id"], cotis["tontine_id"]))
+            mise    = tontine["montant_place"] * ((_places["nombre_places"] if _places else 1) or 1)
             cycle   = tontine["cycle_actuel"]
             calc_ira  = calculer_ira_mise(mise, soumis_dt, dt_echeance)
             montant_ira = calc_ira["ira"]
@@ -2449,21 +2471,46 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
 
 def rejeter_cotisation(conn, cotis_id: int, admin_wa: str,
                         raison: str = "") -> dict:
-    """Admin rejette une cotisation (screenshot incorrect ou non reçu)."""
-    cotis = fetchone(conn,
-        "SELECT * FROM cotisations_manuelles WHERE id=%s", (cotis_id,))
-    if not cotis:
-        return {"ok": False, "msg": "Cotisation introuvable."}
+    """Admin rejette une cotisation (screenshot incorrect ou non reçu).
 
-    q(conn, """UPDATE cotisations_manuelles
-               SET statut='Rejete', confirme_par=%s, date_confirmation=NOW()
-               WHERE id=%s""", (admin_wa, cotis_id))
+    SELECT FOR UPDATE + vérif statut='En_attente' : même verrou pessimiste et
+    idempotence que confirmer_cotisation. Sans ça, un admin qui rejette une
+    cotisation déjà confirmée (double-tap, session admin périmée) écrase le
+    statut sans toucher la ligne `transactions` déjà créée par la confirmation
+    → contradiction permanente dans le grand livre.
+    """
+    import psycopg2.extras
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            "SELECT * FROM cotisations_manuelles WHERE id=%s FOR UPDATE",
+            (cotis_id,))
+        cotis = cur.fetchone()
+        if not cotis:
+            conn.rollback()
+            return {"ok": False, "msg": "Cotisation introuvable."}
 
-    # Annuler la dette FMP correspondante
-    q(conn, """UPDATE dettes_badf SET statut='Payee'
-               WHERE ref_cotis=%s AND statut='Due'""", (cotis_id,))
+        if cotis["statut"] != "En_attente":
+            # Idempotence : si déjà confirmée/rejetée, on retourne un message clair
+            conn.rollback()
+            return {"ok": False, "msg": f"Déjà traitée ({cotis['statut']})."}
 
-    conn.commit()
+        cur.execute("""UPDATE cotisations_manuelles
+                   SET statut='Rejete', confirme_par=%s, date_confirmation=NOW()
+                   WHERE id=%s""", (admin_wa, cotis_id))
+
+        # Annuler la dette FMP correspondante
+        cur.execute("""UPDATE dettes_badf SET statut='Payee'
+                   WHERE ref_cotis=%s AND statut='Due'""", (cotis_id,))
+
+        conn.commit()
+    except Exception as e:
+        try:    conn.rollback()
+        except: pass
+        log.error(f"❌ rejeter_cotisation #{cotis_id} échec: {e}")
+        return {"ok": False, "msg": f"Erreur technique: {str(e)[:80]}"}
+    finally:
+        cur.close()
 
     membre = fetchone(conn,
         "SELECT nom_complet, whatsapp FROM membres WHERE id=%s",
@@ -2487,13 +2534,23 @@ def rejeter_cotisation(conn, cotis_id: int, admin_wa: str,
 def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
                                 passage_id: int, montant_brut: int,
                                 caution: int,
-                                deductions_detail: str = "") -> int:
+                                deductions_detail: str = "",
+                                caution_reelle: int = None) -> int:
     """
     Déclenche le flux de bouffage manuel.
     DM au bénéficiaire pour son numéro MM.
     DM à l'admin avec le montant à virer.
     Retourne l'ID du bouffage créé.
+
+    `caution` = total des déductions (caution + IRA + cotisations manquantes),
+    utilisé pour le calcul du montant net. `caution_reelle` = la VRAIE caution
+    (celle qui sera restituée en fin de cycle) — si absente ou différente de
+    `caution`, le reste (`caution - caution_reelle`) est une pénalité/dette
+    NON remboursable et ne doit jamais être présenté comme telle au membre.
     """
+    if caution_reelle is None:
+        caution_reelle = caution  # rétrocompatibilité : rien à distinguer
+    caution_non_remboursable = max(0, caution - caution_reelle)
     montant_net = montant_brut - caution
     expiration  = datetime.now() + timedelta(hours=2)
 
@@ -2515,20 +2572,41 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
     if not membre or not tontine:
         return bouffage_id
 
-    # DM au bénéficiaire
+    # DM au bénéficiaire — décompte honnête : seule caution_reelle est présentée
+    # comme "retenue et restituable". Le reste (IRA, cotisations manquantes) est
+    # une dette réglée, jamais un dépôt remboursable — ne jamais dire l'inverse.
+    if caution_non_remboursable > 0:
+        decompte = (
+            f"  Cagnotte brute       : {montant_brut:>10,} FCFA\n"
+            f"  Caution (restituable): {caution_reelle:>10,} FCFA\n"
+            f"  Pénalités/dettes     : {caution_non_remboursable:>10,} FCFA (non remboursable)\n"
+            f"  ─────────────────────────────────\n"
+            f"  *MONTANT NET         : {montant_net:>10,} FCFA*\n\n"
+            f"*II. DÉTAIL*\n\n"
+            + (f"  Caution de *{caution_reelle:,} FCFA* : retenue par l'admin, "
+               f"restituée en fin de cycle si vous continuez à cotiser normalement.\n"
+               if caution_reelle > 0 else "")
+            + f"  Pénalités/dettes de *{caution_non_remboursable:,} FCFA* : réglées sur "
+              f"cette cagnotte, ne sont *pas* restituées (IRA de retard et/ou "
+              f"cotisations manquantes).\n\n"
+        )
+    else:
+        decompte = (
+            f"  Cagnotte brute    : {montant_brut:>10,} FCFA\n"
+            f"  Caution retenue   : {caution:>10,} FCFA\n"
+            f"  ─────────────────────────────────\n"
+            f"  *MONTANT NET      : {montant_net:>10,} FCFA*\n\n"
+            f"*II. CAUTION*\n\n"
+            f"  La caution de *{caution:,} FCFA* est retenue par l'admin.\n"
+            f"  Elle vous sera restituée à la fin du cycle si vous\n"
+            f"  continuez à cotiser normalement.\n\n"
+        )
     wa_prive(membre["whatsapp"],
         f"🎉 *AVIS DE DÉBLOCAGE DE CAGNOTTE*\n"
         f"*{tontine['nom']}* — BADF Ltd\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*I. DÉCOMPTE FINANCIER*\n\n"
-        f"  Cagnotte brute    : {montant_brut:>10,} FCFA\n"
-        f"  Caution retenue   : {caution:>10,} FCFA (10%)\n"
-        f"  ─────────────────────────────────\n"
-        f"  *MONTANT NET      : {montant_net:>10,} FCFA*\n\n"
-        f"*II. CAUTION*\n\n"
-        f"  La caution de *{caution:,} FCFA* est retenue par l'admin.\n"
-        f"  Elle vous sera restituée à la fin du cycle si vous\n"
-        f"  continuez à cotiser normalement.\n\n"
+        f"{decompte}"
         f"*III. INSTRUCTIONS*\n\n"
         f"  Envoyez votre numéro Mobile Money, précédé de l'opérateur :\n\n"
         f"    *MTN +237690XXXXXX*\n"
@@ -2679,14 +2757,31 @@ def confirmer_bouffage_vire(conn, bouffage_id: int, admin_wa: str) -> dict:
                         (bouffage["numero_mm"], bouffage.get("operateur_cashout"),
                          bouffage["passage_id"]))
 
-        # Enregistrer la transaction
+        # Dettes IRA dues pour ce membre/tontine : c'est ICI, au moment où l'argent
+        # quitte réellement la cagnotte, qu'elles sont effectivement réglées —
+        # verrouillées pour empêcher qu'une nouvelle pénalité s'insère entre temps.
+        cur.execute("""
+            SELECT id, montant FROM dettes_ira
+            WHERE membre_id=%s AND tontine_id=%s AND statut='Due'
+            FOR UPDATE
+        """, (bouffage["membre_id"], bouffage["tontine_id"]))
+        dettes_ira_dues = cur.fetchall()
+        total_ira = sum(d["montant"] for d in dettes_ira_dues)
+        if dettes_ira_dues:
+            cur.execute("""
+                UPDATE dettes_ira SET statut='Prelevee', prelevee_le=NOW()
+                WHERE id = ANY(%s)
+            """, ([d["id"] for d in dettes_ira_dues],))
+
+        # Enregistrer la transaction — frais_ira = pénalités réellement réglées ici,
+        # sinon elles n'apparaissent JAMAIS dans les rapports de revenus (SUM(frais_ira)).
         cur.execute("""
             INSERT INTO transactions
-                (membre_id, tontine_id, montant_brut, montant_net,
+                (membre_id, tontine_id, montant_brut, frais_ira, montant_net,
                  type_transaction, statut)
-            VALUES (%s,%s,%s,%s,'Bouffage','Confirmee')
+            VALUES (%s,%s,%s,%s,%s,'Bouffage','Confirmee')
         """, (bouffage["membre_id"], bouffage["tontine_id"],
-              bouffage["montant_brut"], bouffage["montant_net"]))
+              bouffage["montant_brut"], total_ira, bouffage["montant_net"]))
 
         conn.commit()
     except Exception as e:
@@ -3495,7 +3590,15 @@ def wa_groupe(group_id: str, message: str):
 
 
 def wa_admin(message: str):
-    wa_groupe(GROUPE_ADMIN, message)
+    """Alerte ops (auto-ban, fraude, cas critiques) → DM direct à OWNER_WA.
+
+    NE PAS router via wa_groupe(GROUPE_ADMIN, ...) : GROUPE_ADMIN="Admin Barack
+    Corp" n'est pas un JID @g.us, et aucune tontine n'est jamais seedée sous ce
+    nom — wa_groupe() ne trouve alors rien et retourne silencieusement, sans
+    log ni erreur. Le message n'est simplement jamais livré. wa_prive() sur un
+    numéro réel est le seul canal qui fonctionne réellement ici.
+    """
+    wa_prive(OWNER_WA, message)
 
 
 def wa_mentionner_retardataires(nom_groupe: str, retardataires: list,
@@ -3967,8 +4070,8 @@ def _repondre_rang(wa: str, membre: Optional[dict]) -> str:
     passages = fetchall(conn, """
         SELECT lp.ordre, lp.cycle, lp.statut, t.nom, t.montant_place,
                t.caution_pourcent, t.caution_active,
-               (SELECT COUNT(*) FROM adhesions WHERE tontine_id=t.id
-                AND statut='Actif') AS nb_membres,
+               (SELECT COALESCE(SUM(nombre_places),0) FROM adhesions WHERE tontine_id=t.id
+                AND statut='Actif') AS nb_places,
                (SELECT COUNT(*) FROM liste_passage lp2
                 WHERE lp2.tontine_id=lp.tontine_id AND lp2.cycle=lp.cycle
                   AND lp2.statut='Paye') AS deja_passes
@@ -3987,7 +4090,7 @@ def _repondre_rang(wa: str, membre: Optional[dict]) -> str:
     lines = ["📅 *MON RANG — BARACK CORP*\n━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     for p in passages:
         avant        = p["ordre"] - p["deja_passes"] - 1
-        montant_tot  = p["montant_place"] * p["nb_membres"]
+        montant_tot  = p["montant_place"] * p["nb_places"]
         fmp          = int(montant_tot * FRAIS_FMP)
         caution_pct  = p["caution_pourcent"] if p["caution_active"] else 0
         caution_mont = int(montant_tot * caution_pct / 100)
@@ -5365,6 +5468,20 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         col   = sess["data"]["heure_col"]
         label = sess["data"]["heure_label"]
 
+        # Ouverture/Rappel/Bouffage sont déclenchés par des jobs cron HORAIRES
+        # (notifier_prochain_bouffage, rappel_ouverture, rappel_non_cotisants)
+        # qui comparent l'heure configurée à datetime.now().strftime("%H:00") —
+        # une minute ≠ 00 ne matchera JAMAIS et le déclenchement ne se produira
+        # silencieusement jamais. Seule heure_limite tolère des minutes libres
+        # (comparée en continu, pas via un cron horaire).
+        _COLONNES_HEURE_PLEINE = {"heure_ouverture", "heure_rappel", "heure_bouffage"}
+        if col in _COLONNES_HEURE_PLEINE and m != 0:
+            return (
+                f"❌ *{label}* se déclenche par un job qui tourne une fois par "
+                f"heure — les minutes doivent être *:00* (ex: *{h:02d}:00*).\n\n"
+                f"Entrez une autre heure ou tapez *0* pour annuler."
+            )
+
         # Validation logique des heures entre elles
         conn  = get_conn()
         t_act = fetchone(conn,
@@ -5773,16 +5890,33 @@ def saisir_caution_et_compenser_groupe(conn, membre_id: int, tontine_id: int,
 
     Retourne un dict avec le détail de la compensation.
     """
-    caution = fetchone(conn,
-        "SELECT * FROM cautions_garantie WHERE membre_id=%s AND tontine_id=%s AND statut='Bloquee'",
+    # VERROU PESSIMISTE : sans ça, deux déclencheurs concurrents (saisie manuelle
+    # admin + job traiter_bouffages_suspects_expires) peuvent tous deux lire la
+    # caution 'Bloquee' avant que l'un des deux ne commit son UPDATE → double
+    # compensation, double crédit BADF. Même schéma que confirmer_cotisation.
+    import psycopg2.extras
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT * FROM cautions_garantie WHERE membre_id=%s AND tontine_id=%s "
+        "AND statut='Bloquee' FOR UPDATE",
         (membre_id, tontine_id))
+    caution = cur.fetchone()
     if not caution:
+        conn.rollback()
+        cur.close()
         return {"ok": False, "msg": "Aucune caution bloquée pour ce membre."}
 
     tontine = fetchone(conn, "SELECT * FROM tontines WHERE id=%s", (tontine_id,))
     membre  = fetchone(conn, "SELECT nom_complet, whatsapp FROM membres WHERE id=%s", (membre_id,))
     if not tontine or not membre:
+        conn.rollback()
+        cur.close()
         return {"ok": False, "msg": "Membre ou tontine introuvable."}
+
+    # `cur` a fait son travail (acquérir + lire la ligne verrouillée) : le verrou
+    # reste tenu par la TRANSACTION jusqu'au commit() plus bas, pas par le curseur
+    # lui-même — on peut donc le fermer ici, le reste utilise q()/fetchone() sur conn.
+    cur.close()
 
     # Cotisations manquantes depuis le bouffage
     mon_pass = fetchone(conn, """
@@ -6607,7 +6741,7 @@ def _auto_inscrire_participants(conn, tontine_id: int, participants: list) -> in
     return inscrits
 
 
-@healed
+@healed()
 def _envoyer_config_dm_admins(admins_list: list, group_id: str, nom_groupe: str,
                                participants: list = None) -> int:
     """DM la Question 1/3 à chaque admin éligible du groupe et crée sa session config.
@@ -7591,8 +7725,11 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
 
     if est_image and img_bytes:
         try:
-            if group_id:
-                _traiter_screenshot_cotisation_bytes(wa, img_bytes, caption, group_id)
+            # _traiter_screenshot_cotisation_bytes gère déjà group_id="" (DM) via
+            # sa propre branche de lookup d'adhésion — la garde `if group_id:` ici
+            # jetait silencieusement tout screenshot envoyé en DM, sans aucun
+            # feedback au membre.
+            _traiter_screenshot_cotisation_bytes(wa, img_bytes, caption, group_id or "")
         except Exception as e:
             log.error(f"Erreur image Green API : {e}")
         return
@@ -7980,7 +8117,11 @@ def traiter_bouffages_suspects_expires():
             # Position dans l'ordre — cotisations attendues = son ordre
             cotis_attendues  = p["ordre"]
             cotis_manquantes = max(0, cotis_attendues - cotis_payees)
-            dette_cotis      = cotis_manquantes * p["montant_place"]
+            _places_debt = fetchone(conn,
+                "SELECT nombre_places FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
+                (membre_id, tontine_id))
+            nb_places_debt = (_places_debt["nombre_places"] if _places_debt else 1) or 1
+            dette_cotis      = cotis_manquantes * p["montant_place"] * nb_places_debt
 
             # Caution bloquée
             caution = fetchone(conn, """
@@ -8005,21 +8146,27 @@ def traiter_bouffages_suspects_expires():
                     f"Caution ({montant_caution:,} FCFA) couvre partiellement.\n"
                     f"Dette résiduelle enregistrée : *{dette_residuelle:,} FCFA*"
                 )
-                q(conn, """INSERT INTO dettes_ira
-                           (membre_id, tontine_id, montant, motif)
-                           VALUES (%s,%s,%s,%s)""",
-                  (membre_id, tontine_id, dette_residuelle,
-                   "Dette résiduelle — bouffage suspect non débloqué"))
 
             # Saisir la caution
             if caution:
                 q(conn, "UPDATE cautions_garantie SET statut='Saisie', date_liberation=NOW() WHERE id=%s",
                   (caution["id"],))
 
-            # Solder les dettes IRA
+            # Solder les ANCIENNES dettes IRA (couvertes par la caution) — AVANT
+            # de créer la nouvelle ligne résiduelle ci-dessous, sinon le blanket
+            # UPDATE la marquerait 'Prelevee' alors qu'elle n'a jamais été payée.
             q(conn, """UPDATE dettes_ira SET statut='Prelevee', prelevee_le=NOW()
                        WHERE membre_id=%s AND tontine_id=%s AND statut='Due'""",
               (membre_id, tontine_id))
+
+            # Nouvelle dette résiduelle (caution insuffisante) — créée APRÈS le
+            # solde ci-dessus, reste donc 'Due' (réellement non réglée).
+            if montant_caution < total_dettes:
+                q(conn, """INSERT INTO dettes_ira
+                           (membre_id, tontine_id, montant, motif)
+                           VALUES (%s,%s,%s,%s)""",
+                  (membre_id, tontine_id, dette_residuelle,
+                   "Dette résiduelle — bouffage suspect non débloqué"))
 
             # Virer le reliquat au membre si positif
             if solde_membre > 0:
@@ -8774,6 +8921,7 @@ def commande_admin_cas_difficile(wa_admin: str, args_texte: str) -> str:
     - Suspend toutes les sanctions automatiques sur ce membre pendant 30j
     - Notifie tous les admins du groupe (pas le owner — c'est leur tontine)
     """
+    conn = None
     try:
         if not args_texte or len(args_texte.split(None, 1)) < 2:
             return (
@@ -8882,6 +9030,12 @@ def commande_admin_cas_difficile(wa_admin: str, args_texte: str) -> str:
         )
 
     except Exception as e:
+        # Tous les retours normaux de la fonction relâchent déjà `conn` avant
+        # de sortir (return n'atteint jamais ce bloc) — donc si on arrive ici,
+        # `conn` (si acquis) n'a encore jamais été relâché. Sans ce release,
+        # la connexion reste éternellement sortie du pool à chaque exception.
+        if conn:
+            release_conn(conn)
         log.error(f"❌ commande_admin_cas_difficile : {e}")
         return "❌ Erreur lors de l'escalade. Réessayez."
 
@@ -8994,11 +9148,11 @@ def notifier_prochain_bouffage():
                       f"{passage['nom_complet']} | Score:{score_trust['score']} | {t['nom']}",
                       passage.get("whatsapp", ""))
 
-        # Calcul financier
-        nb_membres   = fetchone(conn,
-            "SELECT COUNT(*) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
+        # Calcul financier — SUM(nombre_places), pas COUNT(*) : un membre peut détenir plusieurs places
+        nb_places    = fetchone(conn,
+            "SELECT COALESCE(SUM(nombre_places),0) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
             (t["id"],))["n"]
-        montant_brut = nb_membres * t["montant_place"]
+        montant_brut = nb_places * t["montant_place"]
         caution_pct  = t["caution_pourcent"] if t["caution_active"] else 0
         caution_mont = int(montant_brut * caution_pct / 100)
 
@@ -9016,7 +9170,11 @@ def notifier_prochain_bouffage():
         """, (passage["mbr_id"], t["id"]))["n"]
         cotis_attendues  = passage["ordre"]  # il devait cotiser autant de fois que son rang
         cotis_manquantes = max(0, cotis_attendues - cotis_payees)
-        dette_cotis      = cotis_manquantes * t["montant_place"]
+        _places_benef = fetchone(conn,
+            "SELECT nombre_places FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
+            (passage["mbr_id"], t["id"]))
+        nb_places_benef = (_places_benef["nombre_places"] if _places_benef else 1) or 1
+        dette_cotis      = cotis_manquantes * t["montant_place"] * nb_places_benef
 
         # Montant net final = cagnotte - caution - IRA - cotisations manquantes
         montant_net = max(0, montant_brut - caution_mont - total_ira - dette_cotis)
@@ -9049,7 +9207,8 @@ def notifier_prochain_bouffage():
             passage_id   = passage["id"],
             montant_brut = montant_brut,
             caution      = total_deductions,
-            deductions_detail = deductions_txt
+            deductions_detail = deductions_txt,
+            caution_reelle    = caution_mont,
         )
 
         # Enregistrer la caution en base (informatif)
@@ -9514,23 +9673,36 @@ def detecter_fugitifs():
             delai_alerte  = DELAI_ALERTE_FUGUE  * periode
             delai_blocage = DELAI_BLOCAGE_FUGUE * periode
             membres = fetchall(conn, """
-                SELECT m.id, m.nom_complet, m.whatsapp, m.dernier_bouffage, m.score_confiance
+                SELECT m.id, m.nom_complet, m.whatsapp, m.score_confiance
                 FROM adhesions a JOIN membres m ON m.id=a.membre_id
                 WHERE a.tontine_id=%s AND a.statut IN ('Actif','Suspendu')
-                  AND m.dernier_bouffage IS NOT NULL
                   AND m.statut_global IN ('Actif','Suspendu_global')
             """, (t["id"],))
             for m in membres:
+                # `membres.dernier_bouffage` est global au membre (dernier bouffage
+                # TOUTES tontines confondues) — un membre actif dans 2+ tontines
+                # verrait la date d'une AUTRE tontine utilisée ici, faussant les
+                # deux détections (faux négatif dans l'une, faux positif dans
+                # l'autre). Seul liste_passage.date_paiement de CETTE tontine fait foi.
+                dernier_bouffage_tontine = fetchone(conn, """
+                    SELECT date_paiement FROM liste_passage
+                    WHERE membre_id=%s AND tontine_id=%s AND statut='Paye'
+                    ORDER BY date_paiement DESC LIMIT 1
+                """, (m["id"], t["id"]))
+                if not dernier_bouffage_tontine or not dernier_bouffage_tontine["date_paiement"]:
+                    continue  # jamais bouffé dans CETTE tontine → pas de fugue post-bouffage possible ici
+                dernier_bouffage = dernier_bouffage_tontine["date_paiement"]
+
                 derniere = fetchone(conn, """
                     SELECT date_heure FROM transactions
                     WHERE membre_id=%s AND tontine_id=%s AND type_transaction='Cotisation'
                       AND statut='Confirmee' AND date_heure > %s
                     ORDER BY date_heure DESC LIMIT 1
-                """, (m["id"], t["id"], m["dernier_bouffage"]))
+                """, (m["id"], t["id"], dernier_bouffage))
                 if derniere:
                     jours = (datetime.now() - derniere["date_heure"].replace(tzinfo=None)).days
                 else:
-                    jours = (datetime.now() - m["dernier_bouffage"].replace(tzinfo=None)).days
+                    jours = (datetime.now() - dernier_bouffage.replace(tzinfo=None)).days
                 if jours < delai_alerte:
                     continue
                 # Nombre de périodes manquées (pas de jours bruts) × montant par période
@@ -10179,6 +10351,7 @@ def comptabilite_badf_quotidienne():
     Appelé chaque matin à 7h33 — avant que le owner ne se lève.
     Synthèse en 1 seul message DM, format trésorerie.
     """
+    conn = None
     try:
         conn = get_conn()
         today = datetime.now().date()
@@ -10271,6 +10444,7 @@ def comptabilite_badf_quotidienne():
             croissance = int(((projection_fmp - ca_mois_prec) / ca_mois_prec) * 100)
 
         release_conn(conn)
+        conn = None  # relâchée : évite un double-release si une exception suit
 
         # ── 10. Construction du message DM owner ──────────────────────────
         emoji_croissance = "📈" if croissance >= 0 else "📉"
@@ -10328,6 +10502,11 @@ def comptabilite_badf_quotidienne():
         log.info(f"✅ Compta BADF envoyée — FMP jour={ca_jour['fmp_du']:,} mois={ca_mois['fmp_du']:,}")
 
     except Exception as e:
+        # `conn` est remis à None juste après son propre release_conn() plus haut,
+        # donc ce release ne s'exécute que si l'exception a eu lieu AVANT ce point
+        # (connexion jamais rendue au pool) — jamais de double-release.
+        if conn:
+            release_conn(conn)
         log.error(f"❌ comptabilite_badf_quotidienne : {e}")
 
 
