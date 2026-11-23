@@ -27,17 +27,12 @@ jobs:
           python-version: '3.11'
       - name: Syntax check
         run: |
-          python -c "
-          import ast, sys
-          with open('barack_corp_v9_18.py', encoding='utf-8') as f:
-              src = f.read()
-          try:
-              ast.parse(src)
-              print('Syntax OK —', len(src.splitlines()), 'lines')
-          except SyntaxError as e:
-              print(f'SyntaxError: {e}')
-              sys.exit(1)
-          "
+          # Every tracked Python file, not only the orchestrator: modules
+          # extracted from barack_corp_v9_18.py must be checked too.
+          n=$(git ls-files '*.py' | wc -l)
+          if [ "$n" -eq 0 ]; then echo "No Python file found"; exit 1; fi
+          git ls-files -z '*.py' | xargs -0 -r python -m py_compile
+          echo "Syntax OK: $n files"
 
   secrets-audit:
     name: No Hardcoded Secrets
@@ -89,6 +84,11 @@ jobs:
           import PIL, pytesseract, cv2, numpy
           print('All imports OK')
           "
+      - name: Import the bot
+        # Importing opens no database and no network connection; it writes only
+        # local log files, logs/ and .bot_start. It proves every re-exported
+        # name and local module still resolves.
+        run: python -c "import barack_corp_v9_18; print('barack_corp_v9_18 imported')"
 
   # Single required status check for branch protection. Green only if every
   # upstream job succeeded — protects main behind one stable context name.
