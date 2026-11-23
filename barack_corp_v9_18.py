@@ -2173,11 +2173,13 @@ def enregistrer_cotisation_manuelle(conn, membre_id: int, tontine_id: int,
         """, (membre_id, tontine_id, montant, fmp, screenshot_hash))
         cotis_id = cur.fetchone()[0]
 
-        # Créer la dette FMP pour l'admin → à reverser à BADF
-        q(conn, """
-            INSERT INTO dettes_badf (admin_wa, tontine_id, type_dette, montant, ref_cotis)
-            VALUES (%s,%s,'FMP',%s,%s)
-        """, (admin_wa, tontine_id, fmp, cotis_id))
+        # Créer la dette FMP pour l'admin → à reverser à BADF. Aucune dette
+        # quand la FMP vaut 0 (lancement sans frais) : rien n'est dû.
+        if fmp > 0:
+            q(conn, """
+                INSERT INTO dettes_badf (admin_wa, tontine_id, type_dette, montant, ref_cotis)
+                VALUES (%s,%s,'FMP',%s,%s)
+            """, (admin_wa, tontine_id, fmp, cotis_id))
 
         conn.commit()
         return cotis_id
@@ -4367,6 +4369,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             FROM dettes_badf
             WHERE admin_wa=%s AND statut='Due'
             HAVING MIN(date_creation) < NOW() - INTERVAL '72 hours'
+               AND SUM(montant) > 0
         """, (normaliser_numero(wa),))
         release_conn(conn_chk)
 
@@ -10060,6 +10063,7 @@ def verifier_dettes_badf_impayees():
             WHERE statut = 'Due'
             GROUP BY admin_wa
             HAVING MIN(date_creation) < NOW() - INTERVAL '24 hours'
+               AND SUM(montant) > 0
             ORDER BY heures_retard DESC
         """)
 
