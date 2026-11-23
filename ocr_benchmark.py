@@ -8,11 +8,12 @@ Usage :
     python ocr_benchmark.py --dossier "Sample_receipts/ORANGE MONEY AND MOMO"
     python ocr_benchmark.py --verbose
 
-Pré-requis : pip install pytesseract pillow opencv-python numpy
+Pré-requis : pip install pytesseract pillow opencv-python numpy pdfplumber
              + Tesseract-OCR installé dans C:\\Program Files\\Tesseract-OCR\\
 """
 
 import argparse
+import logging
 import statistics
 import sys
 import time
@@ -24,10 +25,10 @@ if sys.stdout.encoding != "utf-8":
 
 try:
     # Vérification des dépendances du module ocr avant le premier reçu
-    import cv2, numpy, PIL, pytesseract  # noqa: F401
+    import cv2, numpy, PIL, pytesseract, pdfplumber  # noqa: F401
 except ImportError as e:
     print(f"❌ Dépendance manquante : {e}")
-    print("   pip install pytesseract pillow opencv-python numpy")
+    print("   pip install pytesseract pillow opencv-python numpy pdfplumber")
     sys.exit(1)
 
 DOSSIER_PAR_DEFAUT = r"Sample_receipts\ORANGE MONEY AND MOMO"
@@ -86,17 +87,20 @@ def benchmark(dossier: str, verbose: bool = False):
             print()
 
     # ── Statistiques ───────────────────────────────────────────────────────
-    haute   = sum(1 for _, r, _ in resultats if r.get("confiance") == "haute")
-    moyenne = sum(1 for _, r, _ in resultats if r.get("confiance") == "moyenne")
-    faible  = sum(1 for _, r, _ in resultats if r.get("confiance") == "faible")
-    ok_ocr  = sum(1 for _, r, _ in resultats if r.get("ok", False))
+    # Une lecture en échec (ok False) n'entre ni dans les confiances ni dans
+    # les opérateurs : elle est comptée à part et listée avec sa raison.
+    lus     = [r for _, r, _ in resultats if r.get("ok", False)]
+    haute   = sum(1 for r in lus if r.get("confiance") == "haute")
+    moyenne = sum(1 for r in lus if r.get("confiance") == "moyenne")
+    faible  = sum(1 for r in lus if r.get("confiance") == "faible")
+    ok_ocr  = len(lus)
     avec_montant = sum(1 for _, r, _ in resultats if r.get("montant"))
     avec_ref     = sum(1 for _, r, _ in resultats if r.get("reference"))
-    mtn     = sum(1 for _, r, _ in resultats if r.get("operateur") == "MTN")
-    orange  = sum(1 for _, r, _ in resultats if r.get("operateur") == "Orange")
-    inconnu = sum(1 for _, r, _ in resultats if r.get("operateur") == "Inconnu")
-    switchn = sum(1 for _, r, _ in resultats if r.get("operateur") == "SwitchN")
-    echecs_lecture = total - ok_ocr   # lecture impossible : le module ne rend que ok et raison
+    mtn     = sum(1 for r in lus if r.get("operateur") == "MTN")
+    orange  = sum(1 for r in lus if r.get("operateur") == "Orange")
+    inconnu = sum(1 for r in lus if r.get("operateur") == "Inconnu")
+    switchn = sum(1 for r in lus if r.get("operateur") == "SwitchN")
+    echecs_lecture = total - ok_ocr
 
     p50 = statistics.median(durees_ms)
     p95 = sorted(durees_ms)[int(len(durees_ms) * 0.95)]
@@ -157,13 +161,19 @@ def benchmark(dossier: str, verbose: bool = False):
         print("  ⚠️  Voir reçus en confiance faible — OCR brut avec --verbose")
 
     # ── Détail des échecs ─────────────────────────────────────────────────
-    echecs = [(nom, r, d) for nom, r, d in resultats if r.get("confiance") == "faible"]
-    if echecs:
-        print(f"\n  REÇUS EN CONFIANCE FAIBLE ({len(echecs)}) :")
-        for nom, r, d in echecs:
+    faibles = [(nom, r) for nom, r, _ in resultats
+               if r.get("ok", False) and r.get("confiance") == "faible"]
+    if faibles:
+        print(f"\n  REÇUS EN CONFIANCE FAIBLE ({len(faibles)}) :")
+        for nom, r in faibles:
             print(f"    • {nom}  op={r.get('operateur','?')}  "
                   f"montant={r.get('montant','—')}  "
                   f"ref={r.get('reference','—')}")
+    echoues = [(nom, r) for nom, r, _ in resultats if not r.get("ok", False)]
+    if echoues:
+        print(f"\n  LECTURES EN ÉCHEC ({len(echoues)}) :")
+        for nom, r in echoues:
+            print(f"    • {nom}  raison={r.get('raison', 'illisible')}")
 
     print("═" * 70 + "\n")
 
@@ -175,6 +185,9 @@ def main():
     parser.add_argument("--verbose", action="store_true",
                         help="Afficher le texte OCR brut pour chaque reçu")
     args = parser.parse_args()
+    # Les erreurs OCR sont listées avec leur raison en fin de rapport : on
+    # n'imprime pas en plus les logs du module au milieu du tableau.
+    logging.getLogger("BarackCorp").setLevel(logging.CRITICAL)
     benchmark(args.dossier, verbose=args.verbose)
 
 
