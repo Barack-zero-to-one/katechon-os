@@ -66,7 +66,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
 import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
 import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
-from rate_limiter import RateLimiter  # Limiteur per-clé + global, mémoire bornée (module pur)
+from rate_limiter import RateLimiter
+import wa_dispatch                   # File d'envoi WhatsApp : un expéditeur, priorités, écart par destinataire (module pur)  # Limiteur per-clé + global, mémoire bornée (module pur)
 
 # ══════════════════════════════════════════════════════════════════════════
 # CONFIGURATION GÉNÉRALE
@@ -613,24 +614,8 @@ _download_executor = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="DownloadWorker",
 )
 
-# ── WA throttle — ≤ 77 msg/s vers Green API ──────────────────────────────────
-_wa_throttle_lock = threading.Lock()
-_wa_last_send_ts  = 0.0
-
 # ── Groupes ayant déjà reçu l'intro — évite le spam ──────────────────────────
 _groupes_intro_envoyes: set = set()
-
-
-def _throttle_wa():
-    """Garantit un intervalle ≥ 3s entre deux envois — évite la détection WhatsApp."""
-    global _wa_last_send_ts
-    with _wa_throttle_lock:
-        now = time_module.time()
-        gap = now - _wa_last_send_ts
-        wait = max(0.0, 3.0 - gap)
-        _wa_last_send_ts = now + wait
-    if wait > 0:
-        time_module.sleep(wait)
 
 
 def session_valide(sessions: dict, wa: str) -> bool:
@@ -3412,7 +3397,7 @@ def _outbox_drain():
                 if time_module.time() - entry["ts"] > 86400:
                     continue
                 if entry["kind"] == "send":
-                    ok = _wa_send_direct(**entry["payload"])
+                    ok = _wa_send(**entry["payload"])
                 elif entry["kind"] == "send_group":
                     ok = _wa_send_groupe_direct(**entry["payload"])
                 else:
@@ -3479,20 +3464,32 @@ def _wa_request(method: str, payload: dict, max_retries: int = 3) -> bool:
     return False
 
 
-def _wa_send_direct(to: str, body: str) -> bool:
-    """Envoi DM ou groupe via Green API.
-    `to` accepte +237XXXXXXXXX, un JID @c.us ou un JID @g.us (outbox drain)."""
-    _throttle_wa()   # ≤ 77 msg/s — évite le 429 sur les batchs APScheduler
+def _chat_id(to: str) -> str:
+    """+237XXXXXXXXX → JID @c.us ; un JID @c.us ou @g.us est rendu tel quel."""
     if "@g.us" in to or "@c.us" in to:
-        chat_id = to
-    else:
-        to_clean = to.lstrip("+").replace(" ", "")
-        chat_id  = f"{to_clean}@c.us"
-    payload  = {
-        "chatId":  chat_id,
-        "message": body[:4096],
-    }
-    return _wa_request("sendMessage", payload)
+        return to
+    return f"{to.lstrip('+').replace(' ', '')}@c.us"
+
+
+def _wa_send_direct(to: str, body: str) -> bool:
+    """Un envoi Green API immédiat, sans file ni espacement. Seul le thread
+    expéditeur (_expediteur) l'appelle : il porte le rythme d'envoi."""
+    return _wa_request("sendMessage", {"chatId": _chat_id(to), "message": body[:4096]})
+
+
+# ── Expéditeur WhatsApp unique ─────────────────────────────────────────────
+# Remplace l'ancien écart global de 3 s par message (qui faisait attendre
+# chaque appelant) : les appelants soumettent et rendent la main, un seul
+# thread envoie, 3 s entre deux messages au MÊME destinataire, débit global
+# borné. Un envoi en échec part dans l'outbox (wa_outbox.jsonl).
+WA_ECART_PAR_CHAT = float(os.getenv("WA_ECART_PAR_CHAT", "3"))
+WA_DEBIT_GLOBAL   = float(os.getenv("WA_DEBIT_GLOBAL",   "1"))   # msg/s, à ajuster aux limites Green API
+_expediteur = wa_dispatch.Expediteur(
+    envoyer        = lambda chat, texte: _wa_send_direct(chat, texte),
+    ecart_par_chat = WA_ECART_PAR_CHAT,
+    debit_global   = WA_DEBIT_GLOBAL,
+    en_echec       = lambda chat, texte: _outbox_enqueue("send", {"to": chat, "body": texte}),
+)
 
 
 def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
@@ -3519,22 +3516,20 @@ def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
         release_conn(conn)
         if not membres:
             return False
-        ok_count = 0
         for m in membres:
-            if _wa_send_direct(m["whatsapp"], body):
-                ok_count += 1
-        return ok_count > 0
+            _wa_send(m["whatsapp"], body, wa_dispatch.PRIORITE_DIFFUSION)
+        return True
     except Exception as e:
         log.error(f"❌ Broadcast groupe {group_id} : {e}")
         return False
 
 
-def _wa_send(to: str, body: str) -> bool:
-    """Envoie un DM avec fallback outbox si Green API indisponible."""
-    if _wa_send_direct(to, body):
-        return True
-    _outbox_enqueue("send", {"to": to, "body": body})
-    return False
+def _wa_send(to: str, body: str, priorite: int = wa_dispatch.PRIORITE_REPONSE) -> bool:
+    """Soumet un message à l'expéditeur et rend la main aussitôt ; un échec
+    d'envoi ultérieur part dans l'outbox. Retourne True (message accepté)."""
+    _expediteur.demarrer()
+    _expediteur.soumettre(_chat_id(to), body, priorite)
+    return True
 
 
 def _wa_send_groupe(group_id: str, body: str) -> bool:
@@ -3547,12 +3542,7 @@ def _wa_send_groupe(group_id: str, body: str) -> bool:
 def _wa_send_group_chatid(group_chatid: str, body: str) -> bool:
     """Poste dans le canal WhatsApp groupe via JID @g.us.
     Distinct de _wa_send_groupe (broadcast DM individuel)."""
-    _throttle_wa()
-    payload = {"chatId": group_chatid, "message": body[:4096]}
-    if _wa_request("sendMessage", payload):
-        return True
-    _outbox_enqueue("send", {"to": group_chatid, "body": body})
-    return False
+    return _wa_send(group_chatid, body)
 
 
 def wa_kick_membre(group_id: str, wa_membre: str) -> bool:
@@ -3605,9 +3595,9 @@ def kick_membre_si_bot_admin(membre_id: int, tontine_id: int, raison: str = "") 
     return ok
 
 
-def wa_prive(numero: str, message: str):
-    """Envoie un DM à un membre."""
-    _wa_send(numero, message)
+def wa_prive(numero: str, message: str, priorite: int = wa_dispatch.PRIORITE_REPONSE):
+    """Envoie un DM à un membre (sans attendre : l'expéditeur rythme l'envoi)."""
+    _wa_send(numero, message, priorite)
 
 
 def wa_owner(message: str):
@@ -3622,7 +3612,7 @@ def wa_admins_tontine(tontine_id: int, message: str):
         "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s", (tontine_id,))
     release_conn(conn)
     for a in admins:
-        wa_prive(a["whatsapp"], message)
+        wa_prive(a["whatsapp"], message, wa_dispatch.PRIORITE_DIFFUSION)
 
 
 def wa_groupe(group_id: str, message: str):
@@ -3676,7 +3666,7 @@ def wa_mentionner_retardataires(nom_groupe: str, retardataires: list,
             f"💸 Passé ce délai : IRA *{int(IRA_CLIFF_PCT*100)}% de la mise* dès le retard "
             f"+{int(IRA_DAILY_PCT*100)}%/jour (plafond {int(IRA_CAP_PCT*100)}%)"
         )
-        wa_prive(r["whatsapp"], msg)
+        wa_prive(r["whatsapp"], msg, wa_dispatch.PRIORITE_DIFFUSION)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -10342,7 +10332,7 @@ def _self_heal_check():
         # Recovery : notifier le owner si on était en état d'alerte
         if prev_failures >= 5:
             try:
-                _wa_send_direct(OWNER_WA,
+                _wa_send(OWNER_WA,
                     f"✅ *DB RÉTABLIE*\n\n"
                     f"Base de données opérationnelle après {prev_failures} cycles en échec ({prev_failures} min).\n"
                     f"Bot 100% fonctionnel.")
@@ -10359,7 +10349,7 @@ def _self_heal_check():
         # Alerte graduée : à 5 cycles, puis tous les 5 cycles (évite spam + évite miss)
         if failures >= 5 and failures % 5 == 0:
             try:
-                _wa_send_direct(OWNER_WA,
+                _wa_send(OWNER_WA,
                     f"🔴 *ALERTE DB #{failures // 5}*\n\n"
                     f"Base de données injoignable depuis {failures} cycles ({failures} min).\n"
                     f"Tentatives auto-réparation : {heal_attempts}\n\n"
@@ -10403,7 +10393,7 @@ def _check_greenapi():
             })
         if ok and not prev_ok:
             try:
-                _wa_send_direct(OWNER_WA,
+                _wa_send(OWNER_WA,
                     "✅ *GREEN API RÉTABLIE*\n\nMessages en file d'attente en cours d'envoi.")
             except Exception:
                 pass
@@ -10979,6 +10969,7 @@ if __name__ == "__main__":
 
     def _shutdown_bot():
         """Appelé par atexit à chaque arrêt — ferme proprement le pool DB."""
+        _expediteur.vider(timeout=10)   # laisse partir les messages déjà soumis
         _sauvegarder_sessions()
         if _db_pool:
             try:
