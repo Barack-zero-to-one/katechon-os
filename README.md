@@ -176,7 +176,7 @@ One protocol. Every informal economy. No competitor has built cross-ROSCA infras
 | 1 | **FMP 2%** | Automatically deducted from each confirmed contribution |
 | 2 | **Reactivation fee** | 1,000 FCFA after 72h suspension |
 | 3 | **Number change fee** | 500 FCFA (CHGNUM command) |
-| 4 | **IRA (late penalty)** | Disabled |
+| 4 | **IRA (late penalty)** | Not BADF revenue. Penalties go to on-time members: enforcement, not revenue. 15% of the stake after a 5-minute grace, plus 2% per day, capped at 50%, floor 200 FCFA, deducted from the late member's payout and kept for the group's on-time members |
 
 ---
 

@@ -120,7 +120,8 @@ def register_dashboard(app, *, get_conn, release_conn, bot_start, dash_token,
                     WHERE statut = 'Confirmee'
                 """)
                 r         = cur.fetchone()
-                revenus   = {"fmp": r[0], "adhesions": r[1], "ira": r[2], "total": r[0]+r[1]+r[2]}
+                # IRA hors total : elle revient aux membres ponctuels, pas à BADF.
+                revenus   = {"fmp": r[0], "adhesions": r[1], "ira": r[2], "total": r[0]+r[1]}
                 gmv_jour  = r[3]
                 gmv_total = r[4]
 

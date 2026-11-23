@@ -95,7 +95,8 @@ MONTANT_IRA      = 150     # DÉPRÉCIÉ — conservé le temps de migrer les an
 FRAIS_REACTIV    = 1_000   # Réactivation après suspension
 FRAIS_CHGNUM     = 500     # Changement de numéro Mobile Money
 
-# ── Numéro collecteur BADF — reçoit FMP + adhésions + IRA ─────────────────
+# ── Numéro collecteur BADF — reçoit FMP + adhésions (jamais l'IRA, qui
+#    revient aux membres ponctuels du groupe) ──────────────────────────────
 NUMERO_BADF_MTN    = os.getenv("NUMERO_BADF_MTN",    "+237683603113")  # MTN MoMo
 NUMERO_BADF_ORANGE = os.getenv("NUMERO_BADF_ORANGE", "+237692100606")  # Orange Money
 
@@ -6432,6 +6433,15 @@ def _owner_menu_principal() -> str:
     )
 
 
+def _bloc_ira_membres(ira: int) -> str:
+    """Pénalités IRA prélevées : elles reviennent aux membres ponctuels du
+    groupe (dissuasion, pas revenu), donc hors de tout total BADF."""
+    return (
+        f"🤝 *PÉNALITÉS IRA — fonds des membres ponctuels*\n"
+        f"  Prélevées (hors revenu BADF) : *{ira:,} FCFA*\n\n"
+    )
+
+
 def _owner_rapport_jour() -> str:
     conn = get_conn()
     try:
@@ -6490,17 +6500,17 @@ def _owner_rapport_jour() -> str:
                 f" | FMP: {t_fmp:,} FCFA"
             )
 
-        total_badf = fmp + ira + cautions_saisies["v"]
+        total_badf = fmp + cautions_saisies["v"]
 
         return (
             f"📊 *RAPPORT DU JOUR — {datetime.now().strftime('%d/%m/%Y')}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💰 *REVENUS BADF Ltd*\n"
             f"  Commission FMP (2%)     : *{fmp:,} FCFA*\n"
-            f"  Pénalités IRA           : *{ira:,} FCFA*\n"
             f"  Cautions saisies        : *{cautions_saisies['v']:,} FCFA* ({cautions_saisies['n']} fugitifs)\n"
             f"  ──────────────────────────────\n"
             f"  *TOTAL BADF AUJOURD'HUI : {total_badf:,} FCFA*\n\n"
+            f"{_bloc_ira_membres(ira)}"
             f"📈 *ACTIVITÉ*\n"
             f"  Cotisations reçues      : {cot['n']} ({cot['v']:,} FCFA)\n"
             f"  Bouffages exécutés      : {bouffages['n']} ({bouffages['v']:,} FCFA)\n\n"
@@ -6537,17 +6547,17 @@ def _owner_rapport_mois() -> str:
             SELECT COUNT(*) n FROM liste_passage
             WHERE statut='Paye' AND date_paiement >= %s
         """, (debut_mois,))
-        total = fmp + ira + cautions["v"]
+        total = fmp + cautions["v"]
         mois_nom = datetime.now().strftime("%B %Y").upper()
         return (
             f"📆 *RAPPORT {mois_nom}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💰 *REVENUS BADF Ltd*\n"
             f"  Commission FMP          : *{fmp:,} FCFA*\n"
-            f"  Pénalités IRA           : *{ira:,} FCFA*\n"
             f"  Cautions saisies        : *{cautions['v']:,} FCFA* ({cautions['n']} fugitifs)\n"
             f"  ──────────────────────────────\n"
             f"  *TOTAL MOIS : {total:,} FCFA*\n\n"
+            f"{_bloc_ira_membres(ira)}"
             f"📈 *ACTIVITÉ*\n"
             f"  Bouffages exécutés      : {bouffages['n']}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6579,7 +6589,7 @@ def _owner_historique_n_jours(nb_jours: int, titre: str = None) -> str:
         # Top 5 jours les plus rentables
         top_jours = fetchall(conn, """
             SELECT date_heure::date AS jour,
-                   COALESCE(SUM(frais_fmp + frais_ira), 0) AS total
+                   COALESCE(SUM(frais_fmp), 0) AS total
             FROM transactions
             WHERE statut='Confirmee' AND date_heure >= %s
             GROUP BY jour ORDER BY total DESC LIMIT 5
@@ -6590,16 +6600,16 @@ def _owner_historique_n_jours(nb_jours: int, titre: str = None) -> str:
             for r in top_jours
         ) or "  Aucune donnée."
 
-        total = fmp + ira + cautions["v"]
+        total = fmp + cautions["v"]
         return (
             f"📈 *{titre}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💰 *REVENUS BADF Ltd*\n"
             f"  Commission FMP          : *{fmp:,} FCFA*\n"
-            f"  Pénalités IRA           : *{ira:,} FCFA*\n"
             f"  Cautions saisies        : *{cautions['v']:,} FCFA* ({cautions['n']} fugitifs)\n"
             f"  ──────────────────────────────\n"
             f"  *TOTAL PÉRIODE : {total:,} FCFA*\n\n"
+            f"{_bloc_ira_membres(ira)}"
             f"🏆 *TOP 5 JOURS*\n{lignes_top}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"_Tapez *0* pour le menu principal._"
@@ -10495,7 +10505,8 @@ def comptabilite_badf_quotidienne():
         jours_total = (today.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
         jours_total_int = jours_total.day
         projection_fmp = int((ca_mois["fmp_du"] / jours_ecoules) * jours_total_int) if jours_ecoules > 0 else 0
-        projection_total = projection_fmp + (kyc_mois * 2000) + ca_mois["ira_du"]
+        # IRA exclue : elle revient aux membres ponctuels, pas à BADF.
+        projection_total = projection_fmp + (kyc_mois * 2000)
 
         # ── 9. Variations vs mois précédent ───────────────────────────────
         croissance = 0
@@ -10518,12 +10529,12 @@ def comptabilite_badf_quotidienne():
 
             f"📊 *AUJOURD'HUI*\n"
             f"   FMP généré        : {ca_jour['fmp_du']:,} FCFA\n"
-            f"   IRA généré        : {ca_jour['ira_du']:,} FCFA\n"
+            f"   IRA (membres ponctuels) : {ca_jour['ira_du']:,} FCFA\n"
             f"   Membres actifs    : {ca_jour['membres_actifs']}\n\n"
 
             f"📅 *CE MOIS ({debut_mois.strftime('%b %Y')})*\n"
             f"   FMP cumulé        : {ca_mois['fmp_du']:,} FCFA\n"
-            f"   IRA cumulé        : {ca_mois['ira_du']:,} FCFA\n"
+            f"   IRA (membres ponctuels) : {ca_mois['ira_du']:,} FCFA\n"
             f"   KYC encaissés     : {revenu_kyc_mois:,} FCFA ({kyc_mois} nouveaux)\n"
             f"   Cotisations       : {ca_mois['nb_cotisations']}\n\n"
 

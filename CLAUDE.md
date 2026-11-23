@@ -81,7 +81,7 @@ Ce n'est pas une app de gestion de tontine. C'est l'infrastructure de confiance 
 **Lancement (actuel) — zéro friction :**
 - `FRAIS_ADHESION` supprimé du code
 - `FRAIS_FMP = 0.00` — FMP désactivé, aucune ligne visible côté membres ou admin
-- **IRA** — 150 FCFA/jour de retard (seule retenue active visible)
+- **IRA v2** — indexée sur la mise : 15 % après 5 min de tolérance, puis 2 % par jour, plafond 50 %, plancher 200 FCFA (`IRA_*` dans le code). Déduite du bouffage du membre en retard et reversée aux membres ponctuels du groupe, **jamais un revenu BADF** (« Penalties go to on-time members: enforcement, not revenue »). Seule retenue active visible.
 - **Frais de réactivation** — 1 000 FCFA après suspension 72h
 - **Frais changement de numéro** — 500 FCFA (commande CHGNUM)
 
