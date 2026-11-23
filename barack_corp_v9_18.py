@@ -2009,12 +2009,19 @@ def screenshot_deja_utilise(conn, image_hash: str) -> bool:
 
 def enregistrer_screenshot(conn, image_hash: str,
                             membre_id: int, tontine_id: int, dhash_hex: str = ""):
-    """Enregistre le hash brut + le perceptual hash (dHash) pour l'anti-recyclage."""
+    """Enregistre le hash brut + le perceptual hash (dHash) pour l'anti-recyclage.
+
+    Écrit dans la transaction de l'appelant (enregistrer_cotisation_manuelle,
+    avant son commit). Un échec est isolé dans un SAVEPOINT : il est logué sans
+    annuler la cotisation en cours.
+    """
     try:
+        q(conn, "SAVEPOINT anti_recyclage_hash")
         q(conn,
           """INSERT INTO screenshots_hash (hash, membre_id, tontine_id, dhash)
              VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
           (image_hash, membre_id, tontine_id, dhash_hex or None))
+        q(conn, "RELEASE SAVEPOINT anti_recyclage_hash")
     except Exception as e:
         # ON CONFLICT DO NOTHING absorbe déjà le cas bénin (hash déjà vu) sans
         # jamais lever — donc toute exception ici est anormale (DB down, FK
@@ -2024,7 +2031,7 @@ def enregistrer_screenshot(conn, image_hash: str,
         log.error(f"❌ enregistrer_screenshot échec (anti-recyclage NON enregistré) "
                   f"membre={membre_id} tontine={tontine_id}: {e}")
         try:
-            conn.rollback()  # sinon la connexion reste "aborted" pour les appels suivants sur ce conn
+            q(conn, "ROLLBACK TO SAVEPOINT anti_recyclage_hash")
         except Exception:
             pass
 
@@ -2044,16 +2051,24 @@ def reference_deja_utilisee(conn, tontine_id: int, ref_norm: str) -> bool:
 
 
 def enregistrer_reference(conn, tontine_id: int, ref_norm: str, membre_id: int):
-    """Mémorise une référence de transaction (dédup ON CONFLICT via UNIQUE)."""
+    """Mémorise une référence de transaction (dédup ON CONFLICT via UNIQUE),
+    dans la transaction de l'appelant ; un échec est isolé par SAVEPOINT."""
     if not ref_norm:
         return
     try:
+        q(conn, "SAVEPOINT anti_recyclage_ref")
         q(conn,
           """INSERT INTO references_transaction (tontine_id, reference_norm, membre_id)
              VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
           (tontine_id, ref_norm, membre_id))
-    except Exception:
-        pass
+        q(conn, "RELEASE SAVEPOINT anti_recyclage_ref")
+    except Exception as e:
+        log.error(f"❌ enregistrer_reference échec (anti-recyclage NON enregistré) "
+                  f"membre={membre_id} tontine={tontine_id}: {e}")
+        try:
+            q(conn, "ROLLBACK TO SAVEPOINT anti_recyclage_ref")
+        except Exception:
+            pass
 
 
 def screenshot_near_duplicate(conn, membre_id: int, dh_int) -> bool:
@@ -2085,7 +2100,9 @@ class MontantAberrantError(ValueError):
 def enregistrer_cotisation_manuelle(conn, membre_id: int, tontine_id: int,
                                      montant: int, screenshot_hash: str,
                                      admin_wa: str,
-                                     force: bool = False) -> int:
+                                     force: bool = False,
+                                     dhash_hex: str = "",
+                                     ref_norm: str = "") -> int:
     """
     Enregistre une cotisation manuelle en attente de confirmation admin.
     Valide la cohérence du montant avant insertion (PATCH 2 v9.18).
@@ -2180,6 +2197,12 @@ def enregistrer_cotisation_manuelle(conn, membre_id: int, tontine_id: int,
                 INSERT INTO dettes_badf (admin_wa, tontine_id, type_dette, montant, ref_cotis)
                 VALUES (%s,%s,'FMP',%s,%s)
             """, (admin_wa, tontine_id, fmp, cotis_id))
+
+        # Anti-recyclage dans la MÊME transaction que la cotisation : écrits
+        # avant le commit, sinon release_conn les annule (rollback).
+        if screenshot_hash:
+            enregistrer_screenshot(conn, screenshot_hash, membre_id, tontine_id, dhash_hex)
+        enregistrer_reference(conn, tontine_id, ref_norm, membre_id)
 
         conn.commit()
         return cotis_id
@@ -8077,7 +8100,9 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
                 tontine_id      = adhesion["tontine_id"],
                 montant         = montant_attendu,
                 screenshot_hash = img_hash,
-                admin_wa        = admin_wa
+                admin_wa        = admin_wa,
+                dhash_hex       = dh_hex,
+                ref_norm        = ref_norm,
             )
         except Exception as e:
             log.error(f"❌ enregistrer_cotisation_manuelle échec pour {wa}: {e}")
@@ -8088,8 +8113,6 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
                 f"_TontineBot Pro — BADF Ltd_")
             return
 
-        enregistrer_screenshot(conn, img_hash, membre["id"], adhesion["tontine_id"], dh_hex)
-        enregistrer_reference(conn, adhesion["tontine_id"], ref_norm, membre["id"])
 
         # Message places multiples si applicable
         places_info = ""
