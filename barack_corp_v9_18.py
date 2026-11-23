@@ -1181,6 +1181,11 @@ def init_db():
            ))""",
         # ── Capture numéro Mobile Money bouffage (BOUFFAGE_VIRE) ────────────
         "ALTER TABLE bouffages_manuels ADD COLUMN IF NOT EXISTS operateur_cashout TEXT",
+        # ── Lien dette IRA ↔ versement : on ne solde et ne comptabilise que les
+        # dettes réellement déduites du versement. montant_ira NULL = versement
+        # créé avant ce lien (ancienne règle conservée à la confirmation).
+        "ALTER TABLE bouffages_manuels ADD COLUMN IF NOT EXISTS montant_ira INTEGER",
+        "ALTER TABLE dettes_ira ADD COLUMN IF NOT EXISTS bouffage_id INTEGER REFERENCES bouffages_manuels(id)",
         # ── FORTERESSE concurrence : UNIQUE(tontine,cycle,ordre) DEFERRABLE ──
         # Une permutation d'ordre (reclassement, MODIF_ORDRE, dup cycle) crée des
         # doublons TRANSITOIRES ; la vérif differée au COMMIT les tolère tant que
@@ -2535,7 +2540,8 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
                                 passage_id: int, montant_brut: int,
                                 caution: int,
                                 deductions_detail: str = "",
-                                caution_reelle: int = None) -> int:
+                                caution_reelle: int = None,
+                                dettes_ira: list = None) -> int:
     """
     Déclenche le flux de bouffage manuel.
     DM au bénéficiaire pour son numéro MM.
@@ -2547,21 +2553,30 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
     (celle qui sera restituée en fin de cycle) — si absente ou différente de
     `caution`, le reste (`caution - caution_reelle`) est une pénalité/dette
     NON remboursable et ne doit jamais être présenté comme telle au membre.
+
+    `dettes_ira` = les lignes dettes_ira (id, montant) déduites de ce versement.
+    Elles sont liées au versement dans la même transaction : la confirmation ne
+    soldera qu'elles, jamais une dette apparue entre-temps.
     """
     if caution_reelle is None:
         caution_reelle = caution  # rétrocompatibilité : rien à distinguer
     caution_non_remboursable = max(0, caution - caution_reelle)
     montant_net = montant_brut - caution
     expiration  = datetime.now() + timedelta(hours=2)
+    dettes_ira  = dettes_ira or []
+    montant_ira = sum(d["montant"] for d in dettes_ira)
 
     cur = q(conn, """
         INSERT INTO bouffages_manuels
             (membre_id, tontine_id, passage_id, montant_brut,
-             caution, montant_net, expiration)
-        VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+             caution, montant_net, expiration, montant_ira)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (membre_id, tontine_id, passage_id,
-          montant_brut, caution, montant_net, expiration))
+          montant_brut, caution, montant_net, expiration, montant_ira))
     bouffage_id = cur.fetchone()[0]
+    if dettes_ira:
+        q(conn, "UPDATE dettes_ira SET bouffage_id=%s WHERE id = ANY(%s) AND statut='Due'",
+          (bouffage_id, [d["id"] for d in dettes_ira]))
     conn.commit()
 
     membre  = fetchone(conn,
@@ -2757,16 +2772,26 @@ def confirmer_bouffage_vire(conn, bouffage_id: int, admin_wa: str) -> dict:
                         (bouffage["numero_mm"], bouffage.get("operateur_cashout"),
                          bouffage["passage_id"]))
 
-        # Dettes IRA dues pour ce membre/tontine : c'est ICI, au moment où l'argent
-        # quitte réellement la cagnotte, qu'elles sont effectivement réglées —
-        # verrouillées pour empêcher qu'une nouvelle pénalité s'insère entre temps.
-        cur.execute("""
-            SELECT id, montant FROM dettes_ira
-            WHERE membre_id=%s AND tontine_id=%s AND statut='Due'
-            FOR UPDATE
-        """, (bouffage["membre_id"], bouffage["tontine_id"]))
-        dettes_ira_dues = cur.fetchall()
-        total_ira = sum(d["montant"] for d in dettes_ira_dues)
+        # Dettes IRA réglées ICI, au moment où l'argent quitte la cagnotte : ce
+        # sont celles déduites au déclenchement (liées par bouffage_id), jamais
+        # une dette apparue depuis. frais_ira = ce qui a réellement été déduit.
+        if bouffage.get("montant_ira") is None:
+            # Versement créé avant le lien dette/versement : ancienne règle.
+            cur.execute("""
+                SELECT id, montant FROM dettes_ira
+                WHERE membre_id=%s AND tontine_id=%s AND statut='Due'
+                FOR UPDATE
+            """, (bouffage["membre_id"], bouffage["tontine_id"]))
+            dettes_ira_dues = cur.fetchall()
+            total_ira = sum(d["montant"] for d in dettes_ira_dues)
+        else:
+            cur.execute("""
+                SELECT id, montant FROM dettes_ira
+                WHERE bouffage_id=%s AND statut='Due'
+                FOR UPDATE
+            """, (bouffage_id,))
+            dettes_ira_dues = cur.fetchall()
+            total_ira = bouffage["montant_ira"]
         if dettes_ira_dues:
             cur.execute("""
                 UPDATE dettes_ira SET statut='Prelevee', prelevee_le=NOW()
@@ -8170,10 +8195,12 @@ def traiter_bouffages_suspects_expires():
 
             # Virer le reliquat au membre si positif
             if solde_membre > 0:
+                # montant_ira = 0 : les dettes IRA sont déjà soldées par la
+                # caution ci-dessus, ce reliquat n'en déduit aucune.
                 q(conn, """INSERT INTO bouffages_manuels
                            (membre_id, tontine_id, passage_id, montant_brut,
-                            caution, montant_net, statut)
-                           VALUES (%s,%s,%s,%s,0,%s,'En_attente')""",
+                            caution, montant_net, statut, montant_ira)
+                           VALUES (%s,%s,%s,%s,0,%s,'En_attente',0)""",
                   (membre_id, tontine_id, p["id"], solde_membre, solde_membre))
                 conn.commit()
                 wa_admins_tontine(tontine_id,
@@ -9158,7 +9185,7 @@ def notifier_prochain_bouffage():
 
         # Dettes IRA
         dettes_ira  = fetchall(conn,
-            "SELECT montant FROM dettes_ira WHERE membre_id=%s AND tontine_id=%s AND statut='Due'",
+            "SELECT id, montant FROM dettes_ira WHERE membre_id=%s AND tontine_id=%s AND statut='Due'",
             (passage["mbr_id"], t["id"]))
         total_ira   = sum(d["montant"] for d in dettes_ira)
 
@@ -9209,6 +9236,7 @@ def notifier_prochain_bouffage():
             caution      = total_deductions,
             deductions_detail = deductions_txt,
             caution_reelle    = caution_mont,
+            dettes_ira        = dettes_ira,
         )
 
         # Enregistrer la caution en base (informatif)
