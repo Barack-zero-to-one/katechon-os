@@ -2740,6 +2740,49 @@ def traiter_reponse_numero_bouffage(wa: str, texte: str, membre: dict):
         release_conn(conn)
 
 
+def _solder_versement(cur, bouffage: dict) -> int:
+    """Règle un versement dont l'argent quitte la cagnotte : solde les dettes
+    IRA qu'il a déduites et écrit la transaction Bouffage. Seul point d'écriture
+    pour les deux chemins de versement (confirmation BOUFFAGE_VIRE et cashout
+    forcé). `cur` est dans la transaction de l'appelant, ligne bouffage verrouillée.
+
+    Les dettes soldées sont celles liées au versement au déclenchement
+    (bouffage_id), jamais une dette apparue depuis ; frais_ira = montant_ira,
+    ce qui a réellement été déduit. Un versement créé avant ce lien
+    (montant_ira NULL) garde l'ancienne règle. Retourne frais_ira.
+    """
+    if bouffage.get("montant_ira") is None:
+        cur.execute("""
+            SELECT id, montant FROM dettes_ira
+            WHERE membre_id=%s AND tontine_id=%s AND statut='Due'
+            FOR UPDATE
+        """, (bouffage["membre_id"], bouffage["tontine_id"]))
+        dettes = cur.fetchall()
+        total_ira = sum(d["montant"] for d in dettes)
+    else:
+        cur.execute("""
+            SELECT id, montant FROM dettes_ira
+            WHERE bouffage_id=%s AND statut='Due'
+            FOR UPDATE
+        """, (bouffage["id"],))
+        dettes = cur.fetchall()
+        total_ira = bouffage["montant_ira"]
+    if dettes:
+        cur.execute("""
+            UPDATE dettes_ira SET statut='Prelevee', prelevee_le=NOW()
+            WHERE id = ANY(%s)
+        """, ([d["id"] for d in dettes],))
+
+    cur.execute("""
+        INSERT INTO transactions
+            (membre_id, tontine_id, montant_brut, frais_ira, montant_net,
+             type_transaction, statut)
+        VALUES (%s,%s,%s,%s,%s,'Bouffage','Confirmee')
+    """, (bouffage["membre_id"], bouffage["tontine_id"],
+          bouffage["montant_brut"], total_ira, bouffage["montant_net"]))
+    return total_ira
+
+
 def confirmer_bouffage_vire(conn, bouffage_id: int, admin_wa: str) -> dict:
     """Admin confirme avoir viré le montant au bénéficiaire.
 
@@ -2772,42 +2815,7 @@ def confirmer_bouffage_vire(conn, bouffage_id: int, admin_wa: str) -> dict:
                         (bouffage["numero_mm"], bouffage.get("operateur_cashout"),
                          bouffage["passage_id"]))
 
-        # Dettes IRA réglées ICI, au moment où l'argent quitte la cagnotte : ce
-        # sont celles déduites au déclenchement (liées par bouffage_id), jamais
-        # une dette apparue depuis. frais_ira = ce qui a réellement été déduit.
-        if bouffage.get("montant_ira") is None:
-            # Versement créé avant le lien dette/versement : ancienne règle.
-            cur.execute("""
-                SELECT id, montant FROM dettes_ira
-                WHERE membre_id=%s AND tontine_id=%s AND statut='Due'
-                FOR UPDATE
-            """, (bouffage["membre_id"], bouffage["tontine_id"]))
-            dettes_ira_dues = cur.fetchall()
-            total_ira = sum(d["montant"] for d in dettes_ira_dues)
-        else:
-            cur.execute("""
-                SELECT id, montant FROM dettes_ira
-                WHERE bouffage_id=%s AND statut='Due'
-                FOR UPDATE
-            """, (bouffage_id,))
-            dettes_ira_dues = cur.fetchall()
-            total_ira = bouffage["montant_ira"]
-        if dettes_ira_dues:
-            cur.execute("""
-                UPDATE dettes_ira SET statut='Prelevee', prelevee_le=NOW()
-                WHERE id = ANY(%s)
-            """, ([d["id"] for d in dettes_ira_dues],))
-
-        # Enregistrer la transaction — frais_ira = pénalités réellement réglées ici,
-        # sinon elles n'apparaissent JAMAIS dans les rapports de revenus (SUM(frais_ira)).
-        cur.execute("""
-            INSERT INTO transactions
-                (membre_id, tontine_id, montant_brut, frais_ira, montant_net,
-                 type_transaction, statut)
-            VALUES (%s,%s,%s,%s,%s,'Bouffage','Confirmee')
-        """, (bouffage["membre_id"], bouffage["tontine_id"],
-              bouffage["montant_brut"], total_ira, bouffage["montant_net"]))
-
+        _solder_versement(cur, bouffage)
         conn.commit()
     except Exception as e:
         try: conn.rollback()
@@ -4720,17 +4728,40 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         cashout_ref = f"FORCE-{ac_rec['membre_id']}-{ac_rec['tontine_id']}-{int(time_module.time())}"
         res = {"success": True, "reference": cashout_ref}
         if res["success"]:
-            q(conn, """UPDATE bouffages_manuels
-                       SET statut='Confirme', numero_mm=%s
-                       WHERE id=%s""", (numero, ac_rec["id"]))
-            q(conn, """UPDATE liste_passage
-                       SET statut='Paye', numero_cashout=%s, operateur_cashout=%s,
-                           montant_bouffage=%s, date_paiement=NOW()
-                       WHERE id=%s""",
-              (numero, operateur, ac_rec["montant_net"], ac_rec["passage_id"]))
-            q(conn, "UPDATE membres SET nb_bouffages=nb_bouffages+1, dernier_bouffage=NOW() WHERE id=%s",
-              (ac_rec["membre_id"],))
-            conn.commit()
+            # Même règlement que BOUFFAGE_VIRE : verrou + statut, dettes IRA
+            # déduites soldées et transaction écrite dans la même transaction.
+            import psycopg2.extras
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            try:
+                cur.execute("SELECT * FROM bouffages_manuels WHERE id=%s FOR UPDATE",
+                            (ac_rec["id"],))
+                ac_rec = cur.fetchone()
+                if not ac_rec or ac_rec["statut"] != "En_attente":
+                    conn.rollback()
+                    release_conn(conn)
+                    sess["etape"] = "menu"
+                    return "ℹ️ Ce bouffage a déjà été traité."
+                cur.execute("""UPDATE bouffages_manuels
+                               SET statut='Confirme', numero_mm=%s, operateur_cashout=%s,
+                                   confirme_par=%s, date_confirmation=NOW()
+                               WHERE id=%s""", (numero, operateur, wa, ac_rec["id"]))
+                cur.execute("""UPDATE liste_passage
+                               SET statut='Paye', numero_cashout=%s, operateur_cashout=%s,
+                                   montant_bouffage=%s, date_paiement=NOW()
+                               WHERE id=%s""",
+                            (numero, operateur, ac_rec["montant_net"], ac_rec["passage_id"]))
+                cur.execute("UPDATE membres SET nb_bouffages=nb_bouffages+1, dernier_bouffage=NOW() WHERE id=%s",
+                            (ac_rec["membre_id"],))
+                _solder_versement(cur, ac_rec)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                release_conn(conn)
+                log.error(f"❌ cashout forcé #{ac_rec['id'] if ac_rec else '?'} échec: {e}")
+                sess["etape"] = "menu"
+                return "❌ Erreur technique. Le cashout n'a pas été enregistré."
+            finally:
+                cur.close()
             # ── Détection fin de cycle — manquait sur ce chemin "forcé" ─────
             # (confirmer_bouffage_vire l'appelle déjà pour le chemin normal ;
             # sans ça, un cycle clôturé via cashout forcé ne déclenchait jamais
