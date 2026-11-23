@@ -129,6 +129,7 @@ def msg_intro_groupe(nom_tontine: str, montant: int,
     )
 
 
+# Garder MSG_INTRO_GROUPE comme alias statique pour compatibilité
 MSG_INTRO_GROUPE = msg_intro_groupe("TONTINE", 0)
 
 

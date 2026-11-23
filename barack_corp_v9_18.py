@@ -210,9 +210,6 @@ PUBLIC_URL    = ""
 SESSION_TIMEOUT = 300
 
 
-# Garder MSG_INTRO_GROUPE comme alias statique pour compatibilité
-
-
 def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tuple:
     """
     Enregistre la liste parsée dans liste_passage.
