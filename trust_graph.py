@@ -678,7 +678,7 @@ def commande_admin_cas_difficile(wa_admin: str, args_texte: str) -> str:
         q(conn, """
             INSERT INTO cas_difficiles
                 (membre_id, tontine_id, type_cas, details, date_reprise, admin_id)
-            VALUES (%s, %s, 'Escalade_admin', %s, NOW() + INTERVAL '30 days',
+            VALUES (%s, %s, 'Pause', %s, NOW() + INTERVAL '30 days',
                     (SELECT id FROM membres WHERE whatsapp=%s LIMIT 1))
         """, (membre["id"], tontine_id, description, wa_admin))
         conn.commit()
