@@ -9,7 +9,6 @@ Extrait de barack_corp_v9_18.py sans changement de comportement. Ne dépend
 jamais du bot ; le webhook l'appelle et le scheduler du bot planifie ses
 deux jobs.
 """
-import logging
 from datetime import datetime, timedelta
 
 from audit import log_audit
@@ -24,8 +23,6 @@ __all__ = ["traiter_menu_owner", "_owner_menu_principal", "_bloc_ira_membres",
     "_owner_historique_n_jours", "_owner_tontines_actives", "_owner_reserve_badf",
     "_owner_membres_stats", "_owner_fugitifs_stats", "envoyer_releve_fmp_post_bouffage",
     "rapport_groupes_fin_journee"]
-
-log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
 
 def traiter_menu_owner(wa: str, texte: str) -> str | None:
