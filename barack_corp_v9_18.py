@@ -2857,6 +2857,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     # tour, panne téléphone, changement collectif), l'admin peut escalader
     # aux autres admins de la tontine pour décision collective.
     # Le membre concerné est mis en "Pause" — sanctions auto suspendues 30j.
+    if texte.lower().startswith("cas_resolu"):
+        return commande_admin_cas_resolu(wa, texte[len("cas_resolu"):].strip())
     if texte.lower().startswith("cas "):
         return commande_admin_cas_difficile(wa, texte[4:].strip())
 
@@ -6819,6 +6821,7 @@ from trust_graph import (
     _update_score_confiance, POIDS_MAX_TRUST_GRAPH, _agreger_score_risque_fugue,
     calculer_score_risque_fugue, alerter_risques_bouffage_imminent,
     commande_admin_score_risque, commande_admin_cas_difficile,
+    commande_admin_cas_resolu, lever_pauses_echues,
 )
 
 
@@ -8047,6 +8050,8 @@ def demarrer_scheduler():
 
     # ── Finance comportementale prédictive — risque fugue J-7 ────────────
     scheduler.add_job(alerter_risques_bouffage_imminent, "cron", hour=5, minute=33, id="risque_fugue_predictif")
+    # Reprise automatique des pauses (commande 'cas' et menu admin 9 A) à date_reprise.
+    scheduler.add_job(lever_pauses_echues, "cron", hour=6, minute=5, id="pauses_echues")
 
     scheduler.start()
     log.info("✅ Scheduler TontineBot Pro v9.18 démarré.")
