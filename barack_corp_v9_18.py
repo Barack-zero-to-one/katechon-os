@@ -10069,7 +10069,20 @@ def demarrer_scheduler():
 # POINT D'ENTRÉE
 # ══════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
+def _shutdown_bot():
+    """Appelé par atexit à chaque arrêt — ferme proprement le pool DB."""
+    _expediteur.vider(timeout=10)   # laisse partir les messages déjà soumis
+    _sauvegarder_sessions()
+    fermer_pool()
+    _msg_executor.shutdown(wait=False)
+    _download_executor.shutdown(wait=False)
+    log.info("Bot arrêté proprement — pool DB fermé.")
+
+
+def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: int = None):
+    """Démarre le bot : secrets, PostgreSQL, pool, tables, sessions, URL
+    publique, scheduler, arrêt propre, puis Waitress sur hote:port (PORT par
+    défaut). Retourne le scheduler ; servir=False s'arrête avant Waitress."""
     log.info("━" * 60)
     log.info("🚀 TontineBot Pro v9.18 — Barack & AI Development Facilities Ltd")
     log.info("   BADF Ltd — Cameroun 🇨🇲")
@@ -10131,25 +10144,23 @@ if __name__ == "__main__":
         log.warning("   ⚠️ URL ngrok non détectée — configurez NGROK_DOMAIN dans .env")
 
     # ── 4. Scheduler ───────────────────────────────────────────────────────
-    demarrer_scheduler()
+    scheduler = demarrer_scheduler()
     log.info("✅ Scheduler démarré.")
     log.info("━" * 60)
     log.info("🟢 TontineBot Pro v9.18 — Prêt à recevoir des messages.")
     log.info("━" * 60)
 
-    def _shutdown_bot():
-        """Appelé par atexit à chaque arrêt — ferme proprement le pool DB."""
-        _expediteur.vider(timeout=10)   # laisse partir les messages déjà soumis
-        _sauvegarder_sessions()
-        fermer_pool()
-        _msg_executor.shutdown(wait=False)
-        _download_executor.shutdown(wait=False)
-        log.info("Bot arrêté proprement — pool DB fermé.")
-
     atexit.register(_shutdown_bot)
 
+    if not servir:
+        return scheduler
     from waitress import serve
-    log.info(f"🚀 Waitress WSGI — {WAITRESS_THREADS} threads — port {PORT}")
-    serve(app, host="0.0.0.0", port=PORT, threads=WAITRESS_THREADS,
+    port = PORT if port is None else port
+    log.info(f"🚀 Waitress WSGI — {WAITRESS_THREADS} threads — port {port}")
+    serve(app, host=hote, port=port, threads=WAITRESS_THREADS,
           channel_timeout=120, cleanup_interval=30)
+    return scheduler
 
+
+if __name__ == "__main__":
+    demarrer()
