@@ -1928,6 +1928,10 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
         q(conn, """UPDATE adhesions SET statut='Actif', jours_avance=0
                    WHERE tontine_id=%s AND statut IN ('Suspendu','Pause')""",
           (tontine_id,))
+        # Les pauses levées par le nouveau cycle ne laissent pas de cas ouvert.
+        q(conn, """UPDATE cas_difficiles SET statut='Termine'
+                   WHERE tontine_id=%s AND statut='Actif' AND type_cas='Pause'""",
+          (tontine_id,))
 
         # Libérer les cautions bloquées
         cautions = fetchall(conn, """
@@ -2857,6 +2861,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     # tour, panne téléphone, changement collectif), l'admin peut escalader
     # aux autres admins de la tontine pour décision collective.
     # Le membre concerné est mis en "Pause" — sanctions auto suspendues 30j.
+    if texte.lower().startswith("cas_resolu"):
+        return commande_admin_cas_resolu(wa, texte[len("cas_resolu"):].strip())
     if texte.lower().startswith("cas "):
         return commande_admin_cas_difficile(wa, texte[4:].strip())
 
@@ -3518,14 +3524,28 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "pause_date":
         if not re.match(r"^\d{2}/\d{2}/\d{4}$", texte):
             return "❌ Format incorrect. Ex: 15/06/2026"
+        # Date lue en JJ/MM/AAAA ici, pas par le DateStyle du serveur (souvent MDY).
+        try:
+            date_reprise = datetime.strptime(texte, "%d/%m/%Y").date()
+        except ValueError:
+            return "❌ Date invalide. Ex: 15/06/2026"
+        if date_reprise <= datetime.now().date():
+            return "❌ La date de reprise doit être dans le futur."
         d    = sess["data"]
         conn = get_conn()
-        q(conn, "UPDATE adhesions SET statut='Pause' WHERE membre_id=%s AND tontine_id=%s", (d["cas_mbr_id"], tid))
-        q(conn, """INSERT INTO cas_difficiles (membre_id, tontine_id, type_cas, details, date_reprise, admin_id)
-                   VALUES (%s,%s,'Pause',%s,%s,%s)""",
-          (d["cas_mbr_id"], tid, f"Pause jusqu'au {texte}", texte, wa))
-        conn.commit()
-        release_conn(conn)
+        try:
+            adh = fetchone(conn, """SELECT statut FROM adhesions WHERE membre_id=%s AND tontine_id=%s
+                                    FOR UPDATE""", (d["cas_mbr_id"], tid))
+            if not adh or adh["statut"] != "Actif":
+                sess["etape"] = "menu"
+                return message_pause_refusee(d["cas_mbr_nom"], tnom, adh["statut"] if adh else None)
+            q(conn, "UPDATE adhesions SET statut='Pause' WHERE membre_id=%s AND tontine_id=%s", (d["cas_mbr_id"], tid))
+            q(conn, """INSERT INTO cas_difficiles (membre_id, tontine_id, type_cas, details, date_reprise, admin_id)
+                       VALUES (%s,%s,'Pause',%s,%s,%s)""",
+              (d["cas_mbr_id"], tid, f"Pause jusqu'au {texte}", date_reprise, wa))
+            conn.commit()
+        finally:
+            release_conn(conn)
         wa_prive(d["cas_wa"],
             f"⏸️ *PAUSE ACCORDÉE — {tnom}*\n"
             f"Votre cotisation est suspendue jusqu'au *{texte}*.\n"
@@ -6819,6 +6839,7 @@ from trust_graph import (
     _update_score_confiance, POIDS_MAX_TRUST_GRAPH, _agreger_score_risque_fugue,
     calculer_score_risque_fugue, alerter_risques_bouffage_imminent,
     commande_admin_score_risque, commande_admin_cas_difficile,
+    commande_admin_cas_resolu, lever_pauses_echues, message_pause_refusee,
 )
 
 
@@ -8047,6 +8068,8 @@ def demarrer_scheduler():
 
     # ── Finance comportementale prédictive — risque fugue J-7 ────────────
     scheduler.add_job(alerter_risques_bouffage_imminent, "cron", hour=5, minute=33, id="risque_fugue_predictif")
+    # Reprise automatique des pauses (commande 'cas' et menu admin 9 A) à date_reprise.
+    scheduler.add_job(lever_pauses_echues, "cron", hour=6, minute=5, id="pauses_echues")
 
     scheduler.start()
     log.info("✅ Scheduler TontineBot Pro v9.18 démarré.")

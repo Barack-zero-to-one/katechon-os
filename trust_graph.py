@@ -20,6 +20,7 @@ __all__ = [
     "_update_score_confiance", "POIDS_MAX_TRUST_GRAPH", "_agreger_score_risque_fugue",
     "calculer_score_risque_fugue", "alerter_risques_bouffage_imminent",
     "commande_admin_score_risque", "commande_admin_cas_difficile",
+    "commande_admin_cas_resolu", "lever_pauses_echues", "message_pause_refusee",
 ]
 
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
@@ -668,6 +669,33 @@ def commande_admin_cas_difficile(wa_admin: str, args_texte: str) -> str:
             "SELECT nom_complet FROM membres WHERE whatsapp=%s LIMIT 1", (wa_admin,))
         nom_declarant = declarant["nom_complet"] if declarant else wa_admin
 
+        # 0. Un seul cas actif par membre et par tontine. L'adhésion est
+        #    verrouillée d'abord : deux escalades simultanées se sérialisent.
+        adhesion = fetchone(conn, """SELECT statut FROM adhesions
+                                     WHERE membre_id=%s AND tontine_id=%s FOR UPDATE""",
+                            (membre["id"], tontine_id))
+        statut_adh = adhesion["statut"] if adhesion else None
+        cas_ouvert = fetchone(conn, """SELECT id FROM cas_difficiles WHERE membre_id=%s AND tontine_id=%s
+                                       AND statut='Actif' AND type_cas='Pause'""",
+                              (membre["id"], tontine_id))
+        if cas_ouvert and statut_adh == "Pause":
+            conn.rollback()
+            release_conn(conn)
+            return (f"ℹ️ Un cas est déjà ouvert pour *{membre['nom_complet']}*. "
+                    f"Clôturez-le avec *cas_resolu {nom_membre} reprend|retire*.")
+        # Seul un membre actif peut être mis en pause : sinon la reprise
+        # réactiverait un suspendu (sans frais de réactivation) ou un exclu.
+        if statut_adh != "Actif":
+            conn.rollback()
+            release_conn(conn)
+            return message_pause_refusee(membre["nom_complet"], nom_tontine, statut_adh)
+
+        # Un cas Pause resté Actif alors que l'adhésion est Actif est périmé
+        # (pause levée par un nouveau cycle) : il est clos avant le nouveau.
+        q(conn, """UPDATE cas_difficiles SET statut='Termine'
+                   WHERE membre_id=%s AND tontine_id=%s AND statut='Actif' AND type_cas='Pause'""",
+          (membre["id"], tontine_id))
+
         # 1. Mettre le membre en Pause dans cette tontine
         q(conn, """
             UPDATE adhesions SET statut='Pause'
@@ -704,13 +732,21 @@ def commande_admin_cas_difficile(wa_admin: str, args_texte: str) -> str:
             f"   • *cas_resolu {nom_membre.split()[0]} retire* — pour retirer définitivement\n\n"
             f"_BADF Ltd · Escalade humaine_"
         )
-        for a in autres_admins:
-            wa_prive(a["whatsapp"], msg_aux_autres)
-
         release_conn(conn)
-        log_audit("CAS_DIFFICILE_OUVERT",
-                  f"Tontine:{nom_tontine} | Membre:{membre['nom_complet']} | {description[:80]}",
-                  wa_admin)
+        conn = None
+        # Le cas est enregistré : un échec d'envoi ne doit plus faire croire
+        # à l'admin que l'escalade a échoué (sa relance créerait un doublon).
+        for a in autres_admins:
+            try:
+                wa_prive(a["whatsapp"], msg_aux_autres)
+            except Exception as e:
+                log.error(f"❌ cas difficile : notification {a['whatsapp']} : {e}")
+        try:
+            log_audit("CAS_DIFFICILE_OUVERT",
+                      f"Tontine:{nom_tontine} | Membre:{membre['nom_complet']} | {description[:80]}",
+                      wa_admin)
+        except Exception as e:
+            log.error(f"❌ cas difficile : audit : {e}")
 
         nb_notifies = len(autres_admins)
         return (
@@ -735,3 +771,206 @@ def commande_admin_cas_difficile(wa_admin: str, args_texte: str) -> str:
             release_conn(conn)
         log.error(f"❌ commande_admin_cas_difficile : {e}")
         return "❌ Erreur lors de l'escalade. Réessayez."
+
+
+def _message_reprise(nom_tontine: str) -> str:
+    return (f"▶️ *REPRISE — {nom_tontine}*\n"
+            f"Votre pause est terminée : vous êtes de nouveau membre actif.\n"
+            f"Les cotisations reprennent au prochain jour de collecte.")
+
+
+def message_pause_refusee(nom_membre: str, nom_tontine: str, statut) -> str:
+    return (f"❌ *{nom_membre}* n'est pas actif dans {nom_tontine} "
+            f"(statut : {statut or 'aucune adhésion'}) : pas de mise en pause.")
+
+
+def _motif_like(texte: str) -> str:
+    return "%" + texte.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def commande_admin_cas_resolu(wa_admin: str, args_texte: str) -> str:
+    """
+    Commande admin : 'cas_resolu [nom_membre] reprend|retire [tontine]'
+    Clôt la décision collective ouverte par 'cas' :
+      - reprend : l'adhésion repasse Actif (si elle est encore en Pause)
+      - retire  : l'adhésion passe Quitte, sans bannissement, et ses tours
+                  en attente passent Cede (plus de bouffage pour ce membre)
+    Le cas passe Termine. Seuls les cas Pause actifs des tontines dont
+    l'expéditeur est admin sont visibles ; un nom exact (ou un numéro) est
+    préféré à une correspondance partielle ; le nom de la tontine en fin de
+    commande départage un membre en pause dans plusieurs tontines.
+    """
+    usage = ("Usage : *cas_resolu [nom_membre] reprend|retire*\n\n"
+             "Exemples :\n  cas_resolu Marie reprend\n  cas_resolu Jean retire\n"
+             "  cas_resolu Jean retire Njangi Akwa  (si Jean est en pause dans plusieurs tontines)")
+    mots = (args_texte or "").split()
+    pos = next((i for i, m in enumerate(mots) if i > 0 and m.lower() in ("reprend", "retire")), None)
+    if pos is None:
+        return usage
+    decision = mots[pos].lower()
+    nom = " ".join(mots[:pos])
+    nom_tontine = " ".join(mots[pos + 1:])
+    # Un numéro saisi sans indicatif (699123456) retrouve +237699123456.
+    chiffres = "".join(ch for ch in nom if ch.isdigit())
+    if len(chiffres) < 8 or len(chiffres) < len(nom.replace(" ", "").lstrip("+")):
+        chiffres = ""
+
+    conn = None
+    try:
+        conn = get_conn()
+        if not fetchone(conn, "SELECT 1 AS ok FROM admins_groupe WHERE whatsapp=%s LIMIT 1", (wa_admin,)):
+            return "❌ Vous n'êtes pas administrateur d'une tontine."
+        cas = fetchall(conn, """
+            SELECT c.id, c.membre_id, c.tontine_id, m.nom_complet, m.whatsapp, t.nom AS nom_tontine,
+                   (LOWER(m.nom_complet) = LOWER(%s) OR m.whatsapp = %s
+                    OR (%s <> '' AND regexp_replace(m.whatsapp, '[^0-9]', '', 'g') LIKE %s)) AS exact
+            FROM cas_difficiles c
+            JOIN membres m ON m.id = c.membre_id
+            JOIN tontines t ON t.id = c.tontine_id
+            WHERE c.statut='Actif' AND c.type_cas='Pause'
+              AND c.tontine_id IN (SELECT tontine_id FROM admins_groupe WHERE whatsapp=%s)
+              AND (LOWER(m.nom_complet) LIKE %s OR m.whatsapp=%s
+                   OR (%s <> '' AND regexp_replace(m.whatsapp, '[^0-9]', '', 'g') LIKE %s))
+              AND (%s = '' OR LOWER(t.nom) = LOWER(%s))
+            ORDER BY m.nom_complet, t.nom, c.id
+            FOR UPDATE OF c
+        """, (nom, nom, chiffres, "%" + chiffres, wa_admin, _motif_like(nom), nom, chiffres, "%" + chiffres,
+              nom_tontine, nom_tontine))
+        if any(c["exact"] for c in cas):
+            cas = [c for c in cas if c["exact"]]
+        if not cas:
+            conn.rollback()
+            ou = f"dans {nom_tontine}" if nom_tontine else "dans vos tontines"
+            return f"❌ Aucun cas ouvert pour '{nom}' {ou}."
+        if len({(c["membre_id"], c["tontine_id"]) for c in cas}) > 1:
+            conn.rollback()
+            vus, liste = set(), []
+            homonymes = [(c["nom_complet"].lower(), c["nom_tontine"]) for c in cas]
+            for c in cas:
+                if (c["membre_id"], c["tontine_id"]) not in vus:
+                    vus.add((c["membre_id"], c["tontine_id"]))
+                    # Deux homonymes dans la même tontine : seul le numéro les distingue.
+                    cle = (c["whatsapp"] if homonymes.count((c["nom_complet"].lower(), c["nom_tontine"])) > 1
+                           else c["nom_complet"])
+                    liste.append(f"  • cas_resolu {cle} {decision} {c['nom_tontine']}")
+            return (f"❓ Plusieurs cas ouverts correspondent à '{nom}'. Tapez l'une de ces commandes :\n"
+                    + "\n".join(liste))
+        c = cas[0]
+        reactive = False
+        if decision == "reprend":
+            reactive = q(conn, """UPDATE adhesions SET statut='Actif'
+                                  WHERE membre_id=%s AND tontine_id=%s AND statut='Pause'""",
+                         (c["membre_id"], c["tontine_id"])).rowcount > 0
+            if not reactive:
+                actuel = fetchone(conn, "SELECT statut FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
+                                  (c["membre_id"], c["tontine_id"]))
+        else:
+            q(conn, "UPDATE adhesions SET statut='Quitte' WHERE membre_id=%s AND tontine_id=%s",
+              (c["membre_id"], c["tontine_id"]))
+            # Comme une cession (menu 9 C) : ses tours non servis ne seront pas payés.
+            q(conn, """UPDATE liste_passage SET statut='Cede'
+                       WHERE membre_id=%s AND tontine_id=%s AND statut='En_attente'""",
+              (c["membre_id"], c["tontine_id"]))
+        q(conn, "UPDATE cas_difficiles SET statut='Termine' WHERE id = ANY(%s)", ([x["id"] for x in cas],))
+        autres = fetchall(conn, "SELECT whatsapp FROM admins_groupe WHERE tontine_id=%s AND whatsapp != %s",
+                          (c["tontine_id"], wa_admin))
+        conn.commit()
+        release_conn(conn)
+        conn = None
+
+        if decision == "retire":
+            titre = f"✅ *Cas résolu — {c['nom_complet']} retiré de {c['nom_tontine']}*"
+            au_membre = (f"⏹️ *FIN DE PARTICIPATION — {c['nom_tontine']}*\n"
+                         f"Les admins ont décidé de clore votre participation à cette tontine.")
+        elif reactive:
+            titre = f"✅ *Cas résolu — {c['nom_complet']} réactivé*"
+            au_membre = _message_reprise(c["nom_tontine"])
+        else:
+            statut = actuel["statut"] if actuel else "aucune adhésion"
+            titre = (f"ℹ️ *Cas clos — {c['nom_complet']} n'était plus en pause (statut : {statut})*\n"
+                     f"Adhésion inchangée.")
+            au_membre = None
+        aux_admins = (f"🤝 *CAS DIFFICILE CLOS — {c['nom_tontine']}*\n"
+                      f"Membre : *{c['nom_complet']}*\nDécision : *{decision}*")
+        envois = [(a["whatsapp"], aux_admins) for a in autres]
+        if au_membre:
+            envois.append((c["whatsapp"], au_membre))
+        for dest, texte in envois:
+            try:
+                wa_prive(dest, texte)
+            except Exception as e:
+                log.error(f"❌ cas_resolu : notification {dest} : {e}")
+        try:
+            log_audit("CAS_DIFFICILE_RESOLU",
+                      f"Tontine:{c['nom_tontine']} | Membre:{c['nom_complet']} | {decision}", wa_admin)
+        except Exception as e:
+            log.error(f"❌ cas_resolu : audit : {e}")
+        return f"{titre}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n{len(autres)} autre(s) admin(s) informé(s).\n\n_BADF Ltd_"
+    except Exception as e:
+        log.error(f"❌ commande_admin_cas_resolu : {e}")
+        return "❌ Erreur lors de la clôture du cas. Réessayez."
+    finally:
+        if conn:
+            release_conn(conn)
+
+
+# Date de reprise effective : le menu 9 A écrivait le texte JJ/MM/AAAA tel quel
+# dans la colonne DATE (lu selon le DateStyle du serveur, donc parfois inversé) ;
+# le texte saisi, conservé dans details, fait foi.
+_REPRISE_EFFECTIVE = """COALESCE(CASE WHEN {c}.details ~ '^Pause jusqu''au [0-9]{{2}}/[0-9]{{2}}/[0-9]{{4}}$'
+                     THEN to_date(right({c}.details, 10), 'DD/MM/YYYY') END, {c}.date_reprise)"""
+
+
+@healed()
+def lever_pauses_echues():
+    """
+    Job quotidien : lève les pauses (commande 'cas' ou menu admin 9 A) dont la
+    date de reprise est atteinte. Les cas échus sont clos ; l'adhésion repasse
+    Actif seulement si elle est encore en Pause et qu'aucune autre pause active
+    ne court encore. Un seul message par membre et par tontine.
+    """
+    conn = None
+    try:
+        conn = get_conn()
+        echus = fetchall(conn, f"""
+            SELECT c.id, c.membre_id, c.tontine_id, m.whatsapp, m.nom_complet, t.nom AS nom_tontine,
+                   EXISTS (SELECT 1 FROM cas_difficiles c2
+                           WHERE c2.membre_id = c.membre_id AND c2.tontine_id = c.tontine_id
+                             AND c2.statut='Actif' AND c2.type_cas='Pause'
+                             AND ({_REPRISE_EFFECTIVE.format(c="c2")} IS NULL
+                                  OR {_REPRISE_EFFECTIVE.format(c="c2")} > CURRENT_DATE)) AS autre_pause
+            FROM cas_difficiles c
+            JOIN membres m ON m.id = c.membre_id
+            JOIN tontines t ON t.id = c.tontine_id
+            WHERE c.statut='Actif' AND c.type_cas='Pause'
+              AND {_REPRISE_EFFECTIVE.format(c="c")} <= CURRENT_DATE
+            ORDER BY c.id
+            FOR UPDATE OF c
+        """)
+        repris, vus = [], set()
+        for c in echus:
+            q(conn, "UPDATE cas_difficiles SET statut='Termine' WHERE id=%s", (c["id"],))
+            cle = (c["membre_id"], c["tontine_id"])
+            if cle in vus or c["autre_pause"]:
+                continue
+            vus.add(cle)
+            if q(conn, """UPDATE adhesions SET statut='Actif'
+                          WHERE membre_id=%s AND tontine_id=%s AND statut='Pause'""", cle).rowcount > 0:
+                repris.append(c)
+        conn.commit()
+        release_conn(conn)
+        conn = None
+        for c in repris:
+            try:
+                wa_prive(c["whatsapp"], _message_reprise(c["nom_tontine"]))
+            except Exception as e:
+                log.error(f"❌ lever_pauses_echues : notification {c['whatsapp']} : {e}")
+            try:
+                log_audit("PAUSE_LEVEE", f"Tontine:{c['nom_tontine']} | Membre:{c['nom_complet']}", c["whatsapp"])
+            except Exception as e:
+                log.error(f"❌ lever_pauses_echues : audit : {e}")
+        if echus:
+            log.info(f"▶️ Pauses échues : {len(echus)} cas clos, {len(repris)} membre(s) réactivé(s)")
+    finally:
+        if conn:
+            release_conn(conn)
