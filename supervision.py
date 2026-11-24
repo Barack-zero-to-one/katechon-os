@@ -8,7 +8,7 @@ bot planifie ces trois jobs.
 """
 import logging
 import time as time_module
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from audit import log_audit
 from db import get_conn, release_conn, fetchone, fetchall
@@ -78,7 +78,8 @@ def comptabilite_badf_quotidienne():
             SELECT
                 COALESCE(SUM(CASE WHEN statut='Due'   THEN montant ELSE 0 END), 0) AS du,
                 COALESCE(SUM(CASE WHEN statut='Payee' THEN montant ELSE 0 END), 0) AS encaisse,
-                COUNT(CASE WHEN statut='Due' AND date_creation < NOW() - INTERVAL '24 hours'
+                COUNT(CASE WHEN statut='Due' AND montant > 0
+                                AND date_creation < NOW() - INTERVAL '24 hours'
                            THEN 1 END) AS en_retard
             FROM dettes_badf
             WHERE date_creation::date BETWEEN %s AND %s
@@ -89,7 +90,8 @@ def comptabilite_badf_quotidienne():
             SELECT admin_wa, SUM(montant) AS du, COUNT(*) AS nb_dettes,
                    MIN(date_creation) AS plus_ancienne
             FROM dettes_badf
-            WHERE statut='Due' AND date_creation < NOW() - INTERVAL '24 hours'
+            WHERE statut='Due' AND montant > 0
+              AND date_creation < NOW() - INTERVAL '24 hours'
             GROUP BY admin_wa
             ORDER BY du DESC
             LIMIT 3
@@ -131,7 +133,7 @@ def comptabilite_badf_quotidienne():
             croissance = int(((projection_fmp - ca_mois_prec) / ca_mois_prec) * 100)
 
         release_conn(conn)
-        conn = None  # relâchée : évite un double-release si une exception suit
+        conn = None  # relâchée avant la construction du message : pas de double libération
 
         # ── 10. Construction du message DM owner ──────────────────────────
         emoji_croissance = "📈" if croissance >= 0 else "📉"
@@ -170,7 +172,7 @@ def comptabilite_badf_quotidienne():
         if mauvais_payeurs:
             msg += f"🔴 *À RELANCER (mauvais payeurs)*\n"
             for mp in mauvais_payeurs:
-                jours = (datetime.now() - mp["plus_ancienne"]).days
+                jours = (datetime.now(timezone.utc) - mp["plus_ancienne"]).days   # TIMESTAMPTZ
                 msg += f"   • {mp['admin_wa']} : {mp['du']:,} FCFA ({jours}j)\n"
             msg += "\n"
 
@@ -189,12 +191,10 @@ def comptabilite_badf_quotidienne():
         log.info(f"✅ Compta BADF envoyée — FMP jour={ca_jour['fmp_du']:,} mois={ca_mois['fmp_du']:,}")
 
     except Exception as e:
-        # `conn` est remis à None juste après son propre release_conn() plus haut,
-        # donc ce release ne s'exécute que si l'exception a eu lieu AVANT ce point
-        # (connexion jamais rendue au pool) — jamais de double-release.
+        log.error(f"❌ comptabilite_badf_quotidienne : {e}")
+    finally:
         if conn:
             release_conn(conn)
-        log.error(f"❌ comptabilite_badf_quotidienne : {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -214,6 +214,7 @@ def surveillance_anomalies_quotidienne():
     S'exécute chaque matin à 6h36 — avant la compta du owner.
     Génère un rapport d'alertes uniquement si des anomalies sont détectées.
     """
+    conn = None
     try:
         conn = get_conn()
         today = datetime.now().date()
@@ -257,18 +258,18 @@ def surveillance_anomalies_quotidienne():
 
         # ── 2. Hash de screenshot partagé entre tontines différentes ──────
         hash_partages = fetchall(conn, """
-            SELECT image_hash, COUNT(DISTINCT tontine_id) AS nb_tontines,
+            SELECT hash, COUNT(DISTINCT tontine_id) AS nb_tontines,
                    array_agg(DISTINCT tontine_id) AS tontines
             FROM screenshots_hash
-            WHERE date_creation >= NOW() - INTERVAL '7 days'
-            GROUP BY image_hash
+            WHERE created_at >= NOW() - INTERVAL '7 days'
+            GROUP BY hash
             HAVING COUNT(DISTINCT tontine_id) >= 2
             LIMIT 5
         """)
         for h in hash_partages:
             alertes.append(
                 f"🔄 HASH PARTAGÉ — fraude inter-groupes\n"
-                f"   Screenshot {h['image_hash'][:12]}... soumis dans "
+                f"   Screenshot {h['hash'][:12]}... soumis dans "
                 f"{h['nb_tontines']} tontines différentes\n"
                 f"   → Bannissement automatique recommandé"
             )
@@ -336,6 +337,7 @@ def surveillance_anomalies_quotidienne():
             )
 
         release_conn(conn)
+        conn = None
 
         # ── Envoi du rapport au owner SEULEMENT si anomalies détectées ────
         if alertes:
@@ -355,6 +357,9 @@ def surveillance_anomalies_quotidienne():
 
     except Exception as e:
         log.error(f"❌ surveillance_anomalies_quotidienne : {e}")
+    finally:
+        if conn:
+            release_conn(conn)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -381,6 +386,7 @@ def zto_supervision_quotidienne():
     Envoyé chaque matin à 6h33 si des incidents ont eu lieu dans les 24h,
     ou en silence sinon.
     """
+    conn = None
     try:
         # ── État santé actuel ─────────────────────────────────────────────
         with _health_lock:
@@ -402,13 +408,14 @@ def zto_supervision_quotidienne():
         conn = get_conn()
         stats_24h = fetchone(conn, """
             SELECT
-                COUNT(CASE WHEN action LIKE '%ERREUR%' THEN 1 END) AS erreurs,
-                COUNT(CASE WHEN action LIKE '%SUSPENSION%' THEN 1 END) AS suspensions,
-                COUNT(CASE WHEN action LIKE '%FRAUDE%' THEN 1 END) AS fraudes
+                COUNT(CASE WHEN type_event LIKE '%%ERREUR%%' THEN 1 END) AS erreurs,
+                COUNT(CASE WHEN type_event LIKE '%%SUSPENSION%%' THEN 1 END) AS suspensions,
+                COUNT(CASE WHEN type_event LIKE '%%FRAUDE%%' THEN 1 END) AS fraudes
             FROM audit_log
             WHERE date_heure >= NOW() - INTERVAL '24 hours'
         """)
         release_conn(conn)
+        conn = None
 
         # ── Décision : envoyer un rapport seulement si incident ───────────
         incidents = (heal_count > 0 or outbox_size > 10
@@ -443,3 +450,6 @@ def zto_supervision_quotidienne():
 
     except Exception as e:
         log.error(f"❌ zto_supervision_quotidienne : {e}")
+    finally:
+        if conn:
+            release_conn(conn)
