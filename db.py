@@ -4,8 +4,9 @@ et verrou d'ordre par tontine.
 
 Extrait de barack_corp_v9_18.py. Le pool est un état de CE module : le bot
 ne garde aucune copie de _db_pool et passe par configurer(), init_pool(),
-fermer_pool(), reinitialiser_pool() et pool_actif(), si bien qu'une
-réinitialisation remplace toujours le seul pool existant. Aucune dépendance
+fermer_pool(), reinitialiser_pool() et pool_actif(). reinitialiser_pool()
+ferme l'ancien pool avant d'en ouvrir un neuf ; init_pool(), comme avant
+l'extraction, en ouvre un sans fermer celui qui existe. Aucune dépendance
 au bot.
 """
 import logging
@@ -32,10 +33,10 @@ def configurer(host, port, dbname, user, password) -> None:
     _config.update(host=host, port=port, dbname=dbname, user=user, password=password)
 
 
-def init_pool():
-    """Initialise le pool de connexions au démarrage."""
-    global _db_pool
-    _db_pool = pg_pool.ThreadedConnectionPool(
+def _creer_pool():
+    if not _config:
+        raise RuntimeError("db.configurer() n'a pas été appelé : paramètres PostgreSQL absents")
+    pool = pg_pool.ThreadedConnectionPool(
         minconn=10,
         maxconn=80,
         host=_config["host"], port=_config["port"], dbname=_config["dbname"],
@@ -50,18 +51,32 @@ def init_pool():
     )
     log.info(f"✅ Pool PostgreSQL initialisé (10–80 connexions) | "
              f"{_config['host']}:{_config['port']}/{_config['dbname']}")
+    return pool
 
 
-def fermer_pool() -> None:
-    """Ferme toutes les connexions du pool (arrêt du bot)."""
+def init_pool():
+    """Initialise le pool de connexions au démarrage."""
     global _db_pool
-    with _db_pool_lock:
+    _db_pool = _creer_pool()
+
+
+def fermer_pool(attente_verrou: float = 5.0) -> None:
+    """Ferme toutes les connexions du pool (arrêt du bot).
+
+    Le pool fermé reste en place, comme avant l'extraction : un appel tardif
+    à get_conn() échoue (PoolError) au lieu d'ouvrir en douce un pool neuf que
+    plus rien ne fermerait. L'arrêt n'attend le verrou qu'un temps borné, pour
+    ne pas rester bloqué derrière une reconstruction en cours."""
+    pris = _db_pool_lock.acquire(timeout=attente_verrou)
+    try:
         if _db_pool is not None:
             try:
                 _db_pool.closeall()
             except Exception:
                 pass
-        _db_pool = None
+    finally:
+        if pris:
+            _db_pool_lock.release()
 
 
 def reinitialiser_pool() -> None:
@@ -79,7 +94,7 @@ def reinitialiser_pool() -> None:
 
 
 def pool_actif() -> bool:
-    return _db_pool is not None
+    return _db_pool is not None and not _db_pool.closed
 
 
 # ── Circuit breaker DB — protection contre saturation ────────────────────
