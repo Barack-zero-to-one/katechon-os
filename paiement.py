@@ -5,8 +5,8 @@ virement, fin et lancement de cycle, clôture, dettes BADF des admins,
 cautions des fugitifs et leur libération.
 
 Extrait de barack_corp_v9_18.py sans changement de comportement. Dépend de
-socle.py, etat.py et des modules déjà extraits, jamais du bot ; le webhook,
-les menus et le scheduler du bot l'appellent.
+socle, db, audit, health, whatsapp, ira_engine et screenshot_integrity,
+jamais du bot ; le webhook, les menus et le scheduler du bot l'appellent.
 """
 import logging
 import hashlib
