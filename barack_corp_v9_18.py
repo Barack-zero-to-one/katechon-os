@@ -68,7 +68,6 @@ from apscheduler.schedulers import SchedulerNotRunningError
 import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
 import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
 import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
-from rate_limiter import RateLimiter  # Limiteur per-clé + global, mémoire bornée (module pur)
 import wa_dispatch                   # File d'envoi WhatsApp : un expéditeur, priorités, écart par destinataire (module pur)
 from ocr import (                    # Lecture des reçus : OpenCV, PDF SwitchN, Tesseract (module pur)
     _pretraiter_screenshot_whatsapp, _lire_pdf_switchn, lire_screenshot_mobile_money,
@@ -84,8 +83,7 @@ from messages import (               # Textes du bot et liste de passage (module
 # ══════════════════════════════════════════════════════════════════════════
 
 PORT             = 5000
-WAITRESS_THREADS = 70   # aligné sur maxconn=80 (-10 réservés APScheduler)
-
+# Frais, barème IRA, numéros collecteurs, seuil de fraude et réglages webhook : socle.py.
 from socle import (   # extrait dans socle.py
     FRAIS_FMP, HEURE_LIMITE_DEF, IRA_CLIFF_PCT, IRA_DAILY_PCT, IRA_HOURLY_PCT, IRA_CAP_PCT,
     IRA_FLOOR, IRA_GRACE_MIN, FRAIS_REACTIV, FRAIS_CHGNUM, NUMERO_BADF_MTN, NUMERO_BADF_ORANGE,
@@ -95,15 +93,15 @@ from socle import (   # extrait dans socle.py
     get_tontines_admin, est_owner, est_admin, incrementer_tentatives_fraude, _alerter_burst_fraude,
     _JOURS_SEMAINE, _est_jour_collecte, _est_jour_cotisation, _verifier_credit_comm,
 )
-# Frais, barème IRA, numéros collecteurs, seuil de fraude et réglages webhook : socle.py.
+from etat import (   # sessions, limiteur, exécuteurs : etat.py
+    WAITRESS_THREADS, RATE_LIMIT_MAX, RATE_LIMIT_FENETRE, RATE_LIMIT_GLOBAL_MAX, _sessions_membre,
+    _sessions_admin, _sessions_kyc, _sessions_config, _rate_limiter, _sessions_lock, _msg_executor,
+    _download_executor, _groupes_intro_envoyes, session_valide, rate_limit_ok, _sessions_path,
+    _sessions_bak_lock, _sessions_owner, _purger_sessions_expirees, _sauvegarder_sessions,
+    _restaurer_sessions,
+)
 MONTANT_IRA      = 150     # DÉPRÉCIÉ — conservé le temps de migrer les anciens messages
 
-# ── Anti-fraude général ────────────────────────────────────────────────────
-RATE_LIMIT_MAX          = 10
-RATE_LIMIT_FENETRE      = 60
-# Plafond GLOBAL (tous émetteurs) : garde-fou anti-burst multi-numéros. Doit rester
-# au-dessus du pic légitime (ouverture simultanée de nombreuses tontines) — réglable.
-RATE_LIMIT_GLOBAL_MAX   = int(os.getenv("RATE_LIMIT_GLOBAL_MAX", "3000"))
 DELAI_SUSPENSION_HEURES = 72
 DELAI_ALERTE_FUGUE      = 3
 DELAI_BLOCAGE_FUGUE     = 7
@@ -218,58 +216,6 @@ audit = logging.getLogger("Audit")
 audit.addHandler(logging.FileHandler("audit_securite.log", encoding="utf-8"))
 audit.setLevel(logging.WARNING)
 from audit import log_audit, _masquer_wa   # Journal d'audit (module audit.py)
-
-# ══════════════════════════════════════════════════════════════════════════
-# ÉTAT EN MÉMOIRE
-# ══════════════════════════════════════════════════════════════════════════
-
-_sessions_membre: dict = {}   # {wa: {"etape": str, "data": dict, "ts": float}}
-_sessions_admin:  dict = {}   # {wa: {"etape": str, "tontine_id": int, "data": dict, "ts": float}}
-_sessions_kyc:    dict = {}   # {wa: {"etape": str, "data": dict, "ts": float}}
-_sessions_config: dict = {}   # {wa: {"etape": str, "group_id": str, "group_name": str, "data": dict, "ts": float}}
-_rate_limiter = RateLimiter(max_per_key=RATE_LIMIT_MAX, max_global=RATE_LIMIT_GLOBAL_MAX,
-                            window=RATE_LIMIT_FENETRE)
-_sessions_lock    = threading.RLock()   # protège toutes les mutations _sessions_*
-
-# ── Exécuteur borné pour le traitement des messages webhook ───────────────────
-# non-daemon → le process attend la fin des threads en cours avant de quitter
-# max_workers aligné sur WAITRESS_THREADS pour ne pas dépasser maxconn DB
-_msg_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=WAITRESS_THREADS,
-    thread_name_prefix="MsgWorker",
-)
-_download_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=10,
-    thread_name_prefix="DownloadWorker",
-)
-
-# ── Groupes ayant déjà reçu l'intro — évite le spam ──────────────────────────
-_groupes_intro_envoyes: set = set()
-
-
-def session_valide(sessions: dict, wa: str) -> bool:
-    with _sessions_lock:
-        s = sessions.get(wa)
-        if not s:
-            return False
-        if time_module.time() - s.get("ts", 0) > SESSION_TIMEOUT:
-            sessions.pop(wa, None)
-            return False
-        s["ts"] = time_module.time()
-        return True
-
-
-def rate_limit_ok(identifiant: str) -> bool:
-    """
-    Autorise le message ? Double limite (per-numéro + plafond global), mémoire
-    bornée et thread-safe (cf. rate_limiter.RateLimiter). Le plafond global
-    neutralise le burst multi-numéros que l'ancien limiteur per-clé laissait passer.
-    """
-    ok = _rate_limiter.autorise(identifiant)
-    if not ok:
-        audit.warning(f"RATE LIMIT : {identifiant}")
-    return ok
-
 
 # ══════════════════════════════════════════════════════════════════════════
 # BASE DE DONNÉES — POSTGRESQL + POOL DE CONNEXIONS
@@ -1826,14 +1772,10 @@ def enregistrer_paiement_badf(admin_wa: str, code_transaction: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# WHATSAPP — envoi dans whatsapp.py ; restent ici les sessions et deux
-# fonctions liées au bot (journal d'audit, constantes IRA)
+# WHATSAPP — envoi dans whatsapp.py, sessions dans etat.py ; restent ici les
+# fonctions d'envoi liées au bot (exclusion d'un membre du groupe)
 # ══════════════════════════════════════════════════════════════════════════
 
-# H6 — Backup sessions
-_sessions_path = Path("logs/sessions_backup.json")
-
-_sessions_bak_lock = threading.Lock()
 
 def kick_membre_si_bot_admin(membre_id: int, tontine_id: int, raison: str = "") -> bool:
     """
@@ -4415,7 +4357,6 @@ def _add_security_headers(response):
 # Mot-clé d'accès : "badf" ou "owner" en DM
 # ══════════════════════════════════════════════════════════════════════════
 
-_sessions_owner: dict = {}   # wa → {etape, data}
 
 def traiter_menu_owner(wa: str, texte: str) -> str | None:
     """
@@ -6769,61 +6710,6 @@ def notifier_prochain_bouffage():
                   f"{passage['nom_complet']} | {t['nom']} | {montant_net:,} FCFA")
 
     release_conn(conn)
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# NETTOYAGE SESSIONS EXPIRÉES
-# ══════════════════════════════════════════════════════════════════════════
-
-def _purger_sessions_expirees():
-    now = time_module.time()
-    for store in (_sessions_kyc, _sessions_membre, _sessions_admin, _sessions_owner):
-        for k in [k for k, v in list(store.items())
-                  if now - v.get("ts", 0) > SESSION_TIMEOUT]:
-            store.pop(k, None)
-    for k in [k for k, v in list(_sessions_config.items())
-              if now - v.get("ts", 0) > SESSION_TIMEOUT]:
-        sess = _sessions_config.pop(k, None)
-        if sess:
-            _groupes_intro_envoyes.discard(sess.get("group_id", ""))
-
-
-def _sauvegarder_sessions():
-    """Snapshot des sessions actives vers fichier JSON (toutes les 60s + atexit)."""
-    now = time_module.time()
-    snapshot = {
-        "kyc": {k: v for k, v in _sessions_kyc.items() if now - v.get("ts", 0) < SESSION_TIMEOUT},
-        "admin": {k: v for k, v in _sessions_admin.items() if now - v.get("ts", 0) < SESSION_TIMEOUT},
-        "membre": {k: v for k, v in _sessions_membre.items() if now - v.get("ts", 0) < SESSION_TIMEOUT},
-    }
-    try:
-        with _sessions_bak_lock:
-            with open(_sessions_path, "w", encoding="utf-8") as f:
-                json.dump(snapshot, f)
-    except Exception as e:
-        log.warning(f"⚠️ Sauvegarde sessions échouée : {e}")
-
-
-def _restaurer_sessions():
-    """Restaure les sessions non-expirées depuis le backup JSON au démarrage."""
-    if not _sessions_path.exists():
-        return
-    try:
-        with open(_sessions_path, encoding="utf-8") as f:
-            data = json.load(f)
-        now = time_module.time()
-        for k, v in data.get("kyc", {}).items():
-            if now - v.get("ts", 0) < SESSION_TIMEOUT:
-                _sessions_kyc[k] = v
-        for k, v in data.get("admin", {}).items():
-            if now - v.get("ts", 0) < SESSION_TIMEOUT:
-                _sessions_admin[k] = v
-        for k, v in data.get("membre", {}).items():
-            if now - v.get("ts", 0) < SESSION_TIMEOUT:
-                _sessions_membre[k] = v
-        log.info(f"Sessions restaurées : {len(_sessions_kyc)} KYC, {len(_sessions_admin)} admin, {len(_sessions_membre)} membre")
-    except Exception as e:
-        log.warning(f"⚠️ Restauration sessions échouée (non bloquant) : {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
