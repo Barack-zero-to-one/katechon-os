@@ -335,6 +335,7 @@ log   = logging.getLogger("BarackCorp")
 audit = logging.getLogger("Audit")
 audit.addHandler(logging.FileHandler("audit_securite.log", encoding="utf-8"))
 audit.setLevel(logging.WARNING)
+from audit import log_audit, _masquer_wa   # Journal d'audit (module audit.py)
 
 # ══════════════════════════════════════════════════════════════════════════
 # ÉTAT EN MÉMOIRE
@@ -1043,28 +1044,6 @@ def creer_base_postgresql() -> bool:
         log.error(f"   Créez-la manuellement : psql -U postgres -c "
                   f"\"CREATE DATABASE {PG_DB};\"")
         return False
-
-
-def _masquer_wa(wa: str) -> str:
-    if len(wa) > 6:
-        return wa[:4] + "****" + wa[-2:]
-    return "****"
-
-def log_audit(type_event: str, details: str, whatsapp: str = "", ip: str = ""):
-    wa_masque = _masquer_wa(whatsapp) if whatsapp else ""
-    audit.warning(f"[{type_event}] {details} | WA:{wa_masque} | IP:{ip}")
-    try:
-        conn = get_conn()
-        q(conn,
-          "INSERT INTO audit_log (type_event, details, whatsapp, ip) VALUES (%s,%s,%s,%s)",
-          (type_event, details, wa_masque, ip))
-        conn.commit()
-        release_conn(conn)
-        # Journal immuable append-only
-        with open("logs/audit_immutable.log", "a", encoding="utf-8") as _f:
-            _f.write(f"{datetime.now().isoformat()}|{type_event}|{details}|{wa_masque}\n")
-    except Exception:
-        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════
