@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-screenshot_integrity.py — Anti-recyclage screenshot renforcé (module pur).
+katechon/security/screenshot_integrity.py — Anti-recyclage screenshot renforcé (module pur).
 
 Le SHA-256 des bytes bruts ne détecte QUE le doublon strictement identique :
 1 pixel modifié ou une re-compression JPEG produit un hash neuf (PoC confirmé,

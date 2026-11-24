@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-webhook_security.py — Durcissement du webhook Green API.
+katechon/security/webhook_security.py — Durcissement du webhook Green API.
 
 Module PUR (pas de Flask, DB, réseau) : logique 100 % testable hors infra.
-Le câblage HTTP vit dans barack_corp_v9_18.py et appelle ces primitives.
+Le câblage HTTP vit dans webhook.py et appelle ces primitives.
 
 Résout trois faiblesses du pentest sur la surface #1 :
   • Rejeu (replay) : le token statique dans l'URL n'empêche PAS de rejouer une

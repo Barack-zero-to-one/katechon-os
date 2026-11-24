@@ -79,7 +79,7 @@ def session_valide(sessions: dict, wa: str) -> bool:
 def rate_limit_ok(identifiant: str) -> bool:
     """
     Autorise le message ? Double limite (per-numéro + plafond global), mémoire
-    bornée et thread-safe (cf. rate_limiter.RateLimiter). Le plafond global
+    bornée et thread-safe (cf. katechon.security.rate_limiter.RateLimiter). Le plafond global
     neutralise le burst multi-numéros que l'ancien limiteur per-clé laissait passer.
     """
     ok = _rate_limiter.autorise(identifiant)

@@ -1,5 +1,8 @@
 """KATECHON OS — package du bot TontineBot Pro (BADF Ltd).
 
+Sous-paquets, ajoutés étape par étape (security d'abord, puis core et
+messaging, finance, handlers) :
+
 core : base de données, schéma, état, réglages, santé, app Flask, scheduler.
 security : durcissement du webhook, limiteur de débit, anti-recyclage.
 finance : paiement, barème IRA, Trust Graph, supervision, OCR, jobs.
