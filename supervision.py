@@ -106,6 +106,7 @@ def comptabilite_badf_quotidienne():
             WHERE date_creation::date BETWEEN %s AND %s
             GROUP BY admin_wa
             HAVING COALESCE(SUM(CASE WHEN statut='Due' THEN montant ELSE 0 END), 0) = 0
+               AND COALESCE(SUM(CASE WHEN statut='Payee' THEN montant ELSE 0 END), 0) > 0
             ORDER BY encaisse DESC
             LIMIT 3
         """, (debut_mois, today))
@@ -256,13 +257,16 @@ def surveillance_anomalies_quotidienne():
                         f"   → Vérifier que l'admin n'enregistre pas des paiements fictifs"
                     )
 
-        # ── 2. Hash de screenshot partagé entre tontines différentes ──────
+        # ── 2. Même image soumise dans des tontines différentes ───────────
+        # hash (octets) est UNIQUE : une copie exacte est refusée à l'entrée et
+        # ne laisse qu'une ligne. La même image, réencodée, garde son dhash
+        # (empreinte perceptuelle) : c'est lui qu'on regroupe.
         hash_partages = fetchall(conn, """
-            SELECT hash, COUNT(DISTINCT tontine_id) AS nb_tontines,
+            SELECT dhash AS hash, COUNT(DISTINCT tontine_id) AS nb_tontines,
                    array_agg(DISTINCT tontine_id) AS tontines
             FROM screenshots_hash
-            WHERE created_at >= NOW() - INTERVAL '7 days'
-            GROUP BY hash
+            WHERE created_at >= NOW() - INTERVAL '7 days' AND dhash IS NOT NULL
+            GROUP BY dhash
             HAVING COUNT(DISTINCT tontine_id) >= 2
             LIMIT 5
         """)
