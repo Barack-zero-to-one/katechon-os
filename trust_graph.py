@@ -14,7 +14,7 @@ from datetime import datetime
 from audit import log_audit
 from db import get_conn, q, release_conn, fetchone, fetchall
 from health import healed
-from whatsapp import wa_prive, wa_owner, wa_admin
+from whatsapp import wa_prive, wa_owner
 
 __all__ = [
     "_update_score_confiance", "POIDS_MAX_TRUST_GRAPH", "_agreger_score_risque_fugue",
@@ -28,14 +28,18 @@ log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie incha
 # bouffage approche. Plus le score est élevé, plus la probabilité de fugue
 # post-bouffage est haute. Permet à l'admin d'agir AVANT.
 #
-# Le modèle combine 7 features comportementales :
-#   1. Régularité historique (variance des intervalles entre cotisations)
-#   2. Tendance récente (cotisations en chute ces 7 derniers jours)
-#   3. Score de confiance (réputation accumulée des cycles précédents)
-#   4. Dettes en cours (IRA + cotisations manquantes / capacité)
-#   5. Profondeur d'engagement (nombre de tontines, ancienneté, KYC)
-#   6. Vélocité de paiement (combien de temps il prend pour payer après rappel)
-#   7. Signaux faibles (suspensions passées, alertes fugue passées)
+# Le modèle combine 10 features comportementales (poids bruts, somme 145,
+# normalisée sur 100 par _agreger_score_risque_fugue) :
+#   1. Régularité historique (variance des intervalles entre cotisations)  25
+#   2. Tendance récente (cotisations 0–30 j contre 30–60 j)                20
+#   3. Score de confiance inversé                                          15
+#   4. Dettes en cours (dette IRA / capacité mensuelle)                    15
+#   5. Profondeur d'engagement (ancienneté, nombre de tontines)            10
+#   6. Vélocité de paiement (délai après heure_ouverture)                  10
+#   7. Signaux faibles (suspensions, tentatives de fraude)                  5
+#   8. Comportement post-bouffage                                          20
+#   9. Chute du score de confiance (> 25 pts en 30 j)                      10
+#  10. Position dans le cycle                                              15
 #
 # Pondération calibrée sur l'intuition cofondateur — sera affinée par ML
 # après 6 mois de données réelles.
