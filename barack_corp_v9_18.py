@@ -68,7 +68,6 @@ from apscheduler.schedulers import SchedulerNotRunningError
 import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
 import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
 import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
-from rate_limiter import RateLimiter  # Limiteur per-clé + global, mémoire bornée (module pur)
 import wa_dispatch                   # File d'envoi WhatsApp : un expéditeur, priorités, écart par destinataire (module pur)
 from ocr import (                    # Lecture des reçus : OpenCV, PDF SwitchN, Tesseract (module pur)
     _pretraiter_screenshot_whatsapp, _lire_pdf_switchn, lire_screenshot_mobile_money,
@@ -84,6 +83,7 @@ from messages import (               # Textes du bot et liste de passage (module
 # ══════════════════════════════════════════════════════════════════════════
 
 PORT             = 5000
+# Frais, barème IRA, numéros collecteurs, seuil de fraude et réglages webhook : socle.py.
 from socle import (   # extrait dans socle.py
     FRAIS_FMP, HEURE_LIMITE_DEF, IRA_CLIFF_PCT, IRA_DAILY_PCT, IRA_HOURLY_PCT, IRA_CAP_PCT,
     IRA_FLOOR, IRA_GRACE_MIN, FRAIS_REACTIV, FRAIS_CHGNUM, NUMERO_BADF_MTN, NUMERO_BADF_ORANGE,
@@ -100,7 +100,6 @@ from etat import (   # sessions, limiteur, exécuteurs : etat.py
     _sessions_bak_lock, _sessions_owner, _purger_sessions_expirees, _sauvegarder_sessions,
     _restaurer_sessions,
 )
-# Frais, barème IRA, numéros collecteurs, seuil de fraude et réglages webhook : socle.py.
 MONTANT_IRA      = 150     # DÉPRÉCIÉ — conservé le temps de migrer les anciens messages
 
 DELAI_SUSPENSION_HEURES = 72
@@ -1773,8 +1772,8 @@ def enregistrer_paiement_badf(admin_wa: str, code_transaction: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# WHATSAPP — envoi dans whatsapp.py ; restent ici les sessions et deux
-# fonctions liées au bot (journal d'audit, constantes IRA)
+# WHATSAPP — envoi dans whatsapp.py, sessions dans etat.py ; restent ici les
+# fonctions d'envoi liées au bot (exclusion d'un membre du groupe)
 # ══════════════════════════════════════════════════════════════════════════
 
 
