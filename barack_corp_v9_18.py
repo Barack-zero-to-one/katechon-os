@@ -1928,6 +1928,10 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
         q(conn, """UPDATE adhesions SET statut='Actif', jours_avance=0
                    WHERE tontine_id=%s AND statut IN ('Suspendu','Pause')""",
           (tontine_id,))
+        # Les pauses levées par le nouveau cycle ne laissent pas de cas ouvert.
+        q(conn, """UPDATE cas_difficiles SET statut='Termine'
+                   WHERE tontine_id=%s AND statut='Actif' AND type_cas='Pause'""",
+          (tontine_id,))
 
         # Libérer les cautions bloquées
         cautions = fetchall(conn, """
@@ -3525,6 +3529,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             date_reprise = datetime.strptime(texte, "%d/%m/%Y").date()
         except ValueError:
             return "❌ Date invalide. Ex: 15/06/2026"
+        if date_reprise <= datetime.now().date():
+            return "❌ La date de reprise doit être dans le futur."
         d    = sess["data"]
         conn = get_conn()
         try:

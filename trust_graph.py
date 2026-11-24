@@ -674,20 +674,27 @@ def commande_admin_cas_difficile(wa_admin: str, args_texte: str) -> str:
         adhesion = fetchone(conn, """SELECT statut FROM adhesions
                                      WHERE membre_id=%s AND tontine_id=%s FOR UPDATE""",
                             (membre["id"], tontine_id))
-        if fetchone(conn, """SELECT id FROM cas_difficiles WHERE membre_id=%s AND tontine_id=%s
-                             AND statut='Actif' AND type_cas='Pause'""",
-                    (membre["id"], tontine_id)):
+        statut_adh = adhesion["statut"] if adhesion else None
+        cas_ouvert = fetchone(conn, """SELECT id FROM cas_difficiles WHERE membre_id=%s AND tontine_id=%s
+                                       AND statut='Actif' AND type_cas='Pause'""",
+                              (membre["id"], tontine_id))
+        if cas_ouvert and statut_adh == "Pause":
             conn.rollback()
             release_conn(conn)
             return (f"ℹ️ Un cas est déjà ouvert pour *{membre['nom_complet']}*. "
                     f"Clôturez-le avec *cas_resolu {nom_membre} reprend|retire*.")
         # Seul un membre actif peut être mis en pause : sinon la reprise
         # réactiverait un suspendu (sans frais de réactivation) ou un exclu.
-        statut_adh = adhesion["statut"] if adhesion else None
         if statut_adh != "Actif":
             conn.rollback()
             release_conn(conn)
             return message_pause_refusee(membre["nom_complet"], nom_tontine, statut_adh)
+
+        # Un cas Pause resté Actif alors que l'adhésion est Actif est périmé
+        # (pause levée par un nouveau cycle) : il est clos avant le nouveau.
+        q(conn, """UPDATE cas_difficiles SET statut='Termine'
+                   WHERE membre_id=%s AND tontine_id=%s AND statut='Actif' AND type_cas='Pause'""",
+          (membre["id"], tontine_id))
 
         # 1. Mettre le membre en Pause dans cette tontine
         q(conn, """
@@ -803,6 +810,10 @@ def commande_admin_cas_resolu(wa_admin: str, args_texte: str) -> str:
     decision = mots[pos].lower()
     nom = " ".join(mots[:pos])
     nom_tontine = " ".join(mots[pos + 1:])
+    # Un numéro saisi sans indicatif (699123456) retrouve +237699123456.
+    chiffres = "".join(ch for ch in nom if ch.isdigit())
+    if len(chiffres) < 8 or len(chiffres) < len(nom.replace(" ", "").lstrip("+")):
+        chiffres = ""
 
     conn = None
     try:
@@ -811,17 +822,20 @@ def commande_admin_cas_resolu(wa_admin: str, args_texte: str) -> str:
             return "❌ Vous n'êtes pas administrateur d'une tontine."
         cas = fetchall(conn, """
             SELECT c.id, c.membre_id, c.tontine_id, m.nom_complet, m.whatsapp, t.nom AS nom_tontine,
-                   (LOWER(m.nom_complet) = LOWER(%s) OR m.whatsapp = %s) AS exact
+                   (LOWER(m.nom_complet) = LOWER(%s) OR m.whatsapp = %s
+                    OR (%s <> '' AND regexp_replace(m.whatsapp, '[^0-9]', '', 'g') LIKE %s)) AS exact
             FROM cas_difficiles c
             JOIN membres m ON m.id = c.membre_id
             JOIN tontines t ON t.id = c.tontine_id
             WHERE c.statut='Actif' AND c.type_cas='Pause'
               AND c.tontine_id IN (SELECT tontine_id FROM admins_groupe WHERE whatsapp=%s)
-              AND (LOWER(m.nom_complet) LIKE %s OR m.whatsapp=%s)
+              AND (LOWER(m.nom_complet) LIKE %s OR m.whatsapp=%s
+                   OR (%s <> '' AND regexp_replace(m.whatsapp, '[^0-9]', '', 'g') LIKE %s))
               AND (%s = '' OR LOWER(t.nom) = LOWER(%s))
             ORDER BY m.nom_complet, t.nom, c.id
             FOR UPDATE OF c
-        """, (nom, nom, wa_admin, _motif_like(nom), nom, nom_tontine, nom_tontine))
+        """, (nom, nom, chiffres, "%" + chiffres, wa_admin, _motif_like(nom), nom, chiffres, "%" + chiffres,
+              nom_tontine, nom_tontine))
         if any(c["exact"] for c in cas):
             cas = [c for c in cas if c["exact"]]
         if not cas:
@@ -831,10 +845,14 @@ def commande_admin_cas_resolu(wa_admin: str, args_texte: str) -> str:
         if len({(c["membre_id"], c["tontine_id"]) for c in cas}) > 1:
             conn.rollback()
             vus, liste = set(), []
+            homonymes = [(c["nom_complet"].lower(), c["nom_tontine"]) for c in cas]
             for c in cas:
                 if (c["membre_id"], c["tontine_id"]) not in vus:
                     vus.add((c["membre_id"], c["tontine_id"]))
-                    liste.append(f"  • cas_resolu {c['nom_complet']} {decision} {c['nom_tontine']}")
+                    # Deux homonymes dans la même tontine : seul le numéro les distingue.
+                    cle = (c["whatsapp"] if homonymes.count((c["nom_complet"].lower(), c["nom_tontine"])) > 1
+                           else c["nom_complet"])
+                    liste.append(f"  • cas_resolu {cle} {decision} {c['nom_tontine']}")
             return (f"❓ Plusieurs cas ouverts correspondent à '{nom}'. Tapez l'une de ces commandes :\n"
                     + "\n".join(liste))
         c = cas[0]
@@ -896,38 +914,49 @@ def commande_admin_cas_resolu(wa_admin: str, args_texte: str) -> str:
             release_conn(conn)
 
 
+# Date de reprise effective : le menu 9 A écrivait le texte JJ/MM/AAAA tel quel
+# dans la colonne DATE (lu selon le DateStyle du serveur, donc parfois inversé) ;
+# le texte saisi, conservé dans details, fait foi.
+_REPRISE_EFFECTIVE = """COALESCE(CASE WHEN {c}.details ~ '^Pause jusqu''au [0-9]{{2}}/[0-9]{{2}}/[0-9]{{4}}$'
+                     THEN to_date(right({c}.details, 10), 'DD/MM/YYYY') END, {c}.date_reprise)"""
+
+
 @healed()
 def lever_pauses_echues():
     """
     Job quotidien : lève les pauses (commande 'cas' ou menu admin 9 A) dont la
-    date de reprise est atteinte. L'adhésion repasse Actif seulement si elle
-    est encore en Pause ; le cas est clos dans tous les cas.
+    date de reprise est atteinte. Les cas échus sont clos ; l'adhésion repasse
+    Actif seulement si elle est encore en Pause et qu'aucune autre pause active
+    ne court encore. Un seul message par membre et par tontine.
     """
     conn = None
     try:
         conn = get_conn()
-        echus = fetchall(conn, """
+        echus = fetchall(conn, f"""
             SELECT c.id, c.membre_id, c.tontine_id, m.whatsapp, m.nom_complet, t.nom AS nom_tontine,
-                   a.statut AS statut_adhesion,
                    EXISTS (SELECT 1 FROM cas_difficiles c2
                            WHERE c2.membre_id = c.membre_id AND c2.tontine_id = c.tontine_id
                              AND c2.statut='Actif' AND c2.type_cas='Pause'
-                             AND (c2.date_reprise IS NULL OR c2.date_reprise > CURRENT_DATE)) AS autre_pause
+                             AND ({_REPRISE_EFFECTIVE.format(c="c2")} IS NULL
+                                  OR {_REPRISE_EFFECTIVE.format(c="c2")} > CURRENT_DATE)) AS autre_pause
             FROM cas_difficiles c
             JOIN membres m ON m.id = c.membre_id
             JOIN tontines t ON t.id = c.tontine_id
-            LEFT JOIN adhesions a ON a.membre_id = c.membre_id AND a.tontine_id = c.tontine_id
-            WHERE c.statut='Actif' AND c.type_cas='Pause' AND c.date_reprise <= CURRENT_DATE
+            WHERE c.statut='Actif' AND c.type_cas='Pause'
+              AND {_REPRISE_EFFECTIVE.format(c="c")} <= CURRENT_DATE
+            ORDER BY c.id
             FOR UPDATE OF c
         """)
-        repris = []
+        repris, vus = [], set()
         for c in echus:
-            if c["statut_adhesion"] == "Pause" and not c["autre_pause"]:
-                q(conn, """UPDATE adhesions SET statut='Actif'
-                           WHERE membre_id=%s AND tontine_id=%s AND statut='Pause'""",
-                  (c["membre_id"], c["tontine_id"]))
-                repris.append(c)
             q(conn, "UPDATE cas_difficiles SET statut='Termine' WHERE id=%s", (c["id"],))
+            cle = (c["membre_id"], c["tontine_id"])
+            if cle in vus or c["autre_pause"]:
+                continue
+            vus.add(cle)
+            if q(conn, """UPDATE adhesions SET statut='Actif'
+                          WHERE membre_id=%s AND tontine_id=%s AND statut='Pause'""", cle).rowcount > 0:
+                repris.append(c)
         conn.commit()
         release_conn(conn)
         conn = None
