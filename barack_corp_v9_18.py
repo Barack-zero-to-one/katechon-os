@@ -383,178 +383,17 @@ def rate_limit_ok(identifiant: str) -> bool:
 # BASE DE DONNÉES — POSTGRESQL + POOL DE CONNEXIONS
 # ══════════════════════════════════════════════════════════════════════════
 #
-# ThreadedConnectionPool : maintient entre 2 et 20 connexions ouvertes.
-# Chaque thread (rappel, webhook, scheduler) prend une connexion du pool
-# et la rend immédiatement après usage → plus de saturation.
-# Capacité : ~20 requêtes simultanées sans attente.
+# Le pool (ThreadedConnectionPool 10 à 80 connexions), le disjoncteur et les
+# helpers de requête vivent dans db.py ; le bot lui passe ses PG_* une fois.
+# Chaque thread prend une connexion et la rend aussitôt avec release_conn().
 # ══════════════════════════════════════════════════════════════════════════
 
-from psycopg2 import pool as pg_pool
+from db import (                     # Accès PostgreSQL : pool, disjoncteur, helpers (module db.py)
+    configurer as _configurer_db, init_pool, fermer_pool, reinitialiser_pool, pool_actif,
+    get_conn, q, release_conn, fetchone, fetchall, verrou_ordre_tontine,
+)
 
-_db_pool: Optional[pg_pool.ThreadedConnectionPool] = None
-_db_pool_lock = threading.Lock()   # protège init_pool() et la réinitialisation dans get_conn()
-
-def init_pool():
-    """Initialise le pool de connexions au démarrage."""
-    global _db_pool
-    _db_pool = pg_pool.ThreadedConnectionPool(
-        minconn=10,
-        maxconn=80,
-        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-        user=PG_USER, password=PG_PASS,
-        connect_timeout=10,
-        keepalives=1,
-        keepalives_idle=30,
-        keepalives_interval=10,
-        keepalives_count=5,
-        application_name="TontineBotPro_v9.18",
-        options="-c timezone=Africa/Douala",
-    )
-    log.info(f"✅ Pool PostgreSQL initialisé (10–80 connexions) | {PG_HOST}:{PG_PORT}/{PG_DB}")
-
-
-# ── Circuit breaker DB — protection contre saturation ────────────────────
-_db_failures      = 0
-_db_last_failure  = 0
-_DB_MAX_FAILURES  = 10
-_DB_RESET_AFTER   = 60  # secondes
-_db_circuit_lock  = threading.Lock()   # protège le check-then-act atomique
-
-def _db_circuit_open() -> bool:
-    """True si le circuit est ouvert (DB en panne) → on évite de marteler."""
-    global _db_failures, _db_last_failure
-    with _db_circuit_lock:
-        if _db_failures < _DB_MAX_FAILURES:
-            return False
-        if time_module.time() - _db_last_failure > _DB_RESET_AFTER:
-            _db_failures = 0
-            return False
-        return True
-
-
-def _db_record_failure():
-    global _db_failures, _db_last_failure
-    with _db_circuit_lock:
-        _db_failures += 1
-        _db_last_failure = time_module.time()
-
-
-def _db_record_success():
-    global _db_failures
-    with _db_circuit_lock:
-        if _db_failures > 0:
-            _db_failures = max(0, _db_failures - 1)
-
-
-def get_conn(retries: int = 3):
-    """
-    Récupère une connexion depuis le pool.
-    Auto-reconnexion en cas de connexion morte ou pool saturé.
-    Toujours appeler release_conn() pour la rendre au pool.
-    """
-    global _db_pool
-    with _db_pool_lock:
-        if _db_pool is None:
-            init_pool()
-
-    if _db_circuit_open():
-        log.warning("⚠️ Circuit breaker DB ouvert — attente 60s")
-        time_module.sleep(2)
-
-    last_err = None
-    for attempt in range(retries):
-        try:
-            conn = _db_pool.getconn()
-            # Connexion morte ? (keepalives gèrent la détection réseau)
-            if getattr(conn, "closed", False):
-                try:
-                    _db_pool.putconn(conn, close=True)
-                except Exception:
-                    pass
-                conn = _db_pool.getconn()
-                # Fix 6 : vérifier aussi la connexion de remplacement
-                if getattr(conn, "closed", False):
-                    raise pg_pool.PoolError("Connexion de remplacement également fermée")
-            conn.autocommit = False
-            _db_record_success()
-            return conn
-        except (psycopg2.OperationalError, psycopg2.InterfaceError, pg_pool.PoolError) as e:
-            last_err = e
-            _db_record_failure()
-            log.warning(f"⚠️ DB connexion échec {attempt+1}/{retries} : {str(e)[:100]}")
-            if attempt < retries - 1:
-                time_module.sleep(2 ** attempt)  # 1s, 2s, 4s
-                # Réinitialiser le pool si trop d'échecs — protégé par lock
-                if _db_failures >= _DB_MAX_FAILURES // 2:
-                    with _db_pool_lock:
-                        if _db_pool is not None:
-                            try:
-                                _db_pool.closeall()
-                            except Exception:
-                                pass
-                            _db_pool = None
-                        init_pool()
-    raise last_err or RuntimeError("Impossible d'obtenir une connexion DB")
-
-
-def q(conn, sql: str, params=None):
-    cur = conn.cursor()
-    cur.execute(sql, params or ())
-    return cur
-
-
-def release_conn(conn):
-    """Rend la connexion au pool. Rollback auto si transaction non commitée."""
-    global _db_pool
-    if conn and _db_pool:
-        try:
-            conn.rollback()
-        except Exception:
-            try:
-                _db_pool.putconn(conn, close=True)
-                return
-            except Exception:
-                return
-        try:
-            _db_pool.putconn(conn)
-        except Exception:
-            pass
-
-
-def fetchone(conn, sql: str, params=None) -> Optional[dict]:
-    cur  = q(conn, sql, params)
-    row  = cur.fetchone()
-    if row is None:
-        return None
-    cols = [d[0] for d in cur.description]
-    return dict(zip(cols, row))
-
-
-def fetchall(conn, sql: str, params=None) -> list:
-    cur  = q(conn, sql, params)
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
-
-
-# ── FORTERESSE concurrence : verrou d'ordre par tontine ────────────────────
-_ORDRE_LOCK_NS = 42   # namespace advisory lock dédié aux mutations d'ordre
-
-def verrou_ordre_tontine(conn, tontine_id: int):
-    """
-    Mutex STRICT par tontine sur les mutations d'ordre de liste_passage
-    (pg_advisory_xact_lock, relâché automatiquement au COMMIT/ROLLBACK).
-
-    Sérialise les writers d'une MÊME tontine (reclassement retard, MODIF_ORDRE,
-    duplication de cycle, saisie de liste) sans jamais bloquer les autres tontines
-    — 100 groupes à 16h05 restent pleinement parallèles.
-
-    À appeler comme PREMIER statement de toute transaction qui modifie `ordre`.
-    Couplé à la contrainte UNIQUE(tontine,cycle,ordre) DEFERRABLE : le lock
-    garantit l'absence de writer concurrent, la contrainte deferrable tolère les
-    doublons transitoires d'une permutation jusqu'au commit. Défense en profondeur.
-    """
-    q(conn, "SELECT pg_advisory_xact_lock(%s, %s)", (_ORDRE_LOCK_NS, int(tontine_id)))
+_configurer_db(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS)
 
 
 def init_db():
@@ -9632,18 +9471,10 @@ _health_lock = threading.Lock()
 
 def _self_heal_db():
     """Tente de réparer le pool DB silencieusement."""
-    global _db_pool
     with _health_lock:
         _health_state["self_heal_attempts"] += 1
     try:
-        with _db_pool_lock:              # même lock que get_conn() — évite la race condition
-            if _db_pool:
-                try:
-                    _db_pool.closeall()
-                except Exception:
-                    pass
-            _db_pool = None
-            init_pool()
+        reinitialiser_pool()             # même verrou que get_conn() — un seul pool à la fois
         # Ne pas reset consecutive_db_failures ici : le reset appartient à _self_heal_check()
         # après confirmation par SELECT 1. Resetter ici masquerait les DB flapping.
         log.info("✅ Auto-heal DB : pool réinitialisé")
@@ -10310,11 +10141,7 @@ if __name__ == "__main__":
         """Appelé par atexit à chaque arrêt — ferme proprement le pool DB."""
         _expediteur.vider(timeout=10)   # laisse partir les messages déjà soumis
         _sauvegarder_sessions()
-        if _db_pool:
-            try:
-                _db_pool.closeall()
-            except Exception:
-                pass
+        fermer_pool()
         _msg_executor.shutdown(wait=False)
         _download_executor.shutdown(wait=False)
         log.info("Bot arrêté proprement — pool DB fermé.")
