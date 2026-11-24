@@ -16,7 +16,7 @@ from datetime import date as _date, datetime, time
 from typing import Optional
 
 import ira_engine
-import webhook_security as ws
+from katechon.security import webhook_security as ws
 from audit import log_audit
 from db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
 from messages import msg_dissuasion

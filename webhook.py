@@ -15,8 +15,8 @@ import concurrent.futures
 import time as time_module
 
 import requests
-import screenshot_integrity as si
-import webhook_security as ws
+from katechon.security import screenshot_integrity as si
+from katechon.security import webhook_security as ws
 from audit import log_audit
 from db import fetchone, get_conn, q, release_conn
 from etat import _download_executor, _msg_executor, _sessions_config, rate_limit_ok

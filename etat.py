@@ -16,7 +16,7 @@ import threading
 import time as time_module
 from pathlib import Path
 
-from rate_limiter import RateLimiter
+from katechon.security.rate_limiter import RateLimiter
 from socle import SESSION_TIMEOUT
 
 __all__ = ["WAITRESS_THREADS", "RATE_LIMIT_MAX", "RATE_LIMIT_FENETRE", "RATE_LIMIT_GLOBAL_MAX",
