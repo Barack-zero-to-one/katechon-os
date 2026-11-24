@@ -343,7 +343,7 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
 def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
                                           caption: str, group_id: str = ""):
     """
-    Reçoit les bytes de l'image directement depuis Meta.
+    Reçoit les bytes de l'image téléchargés depuis Green API.
     Hash SHA-256 anti-recyclage + enregistrement cotisation.
     """
     conn   = get_conn()
