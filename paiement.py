@@ -5,7 +5,7 @@ virement, fin et lancement de cycle, clôture, dettes BADF des admins,
 cautions des fugitifs et leur libération.
 
 Extrait de barack_corp_v9_18.py sans changement de comportement. Dépend de
-socle, db, audit, health, whatsapp, ira_engine et screenshot_integrity,
+socle, db, audit, health, whatsapp, ira_engine et katechon.security.screenshot_integrity,
 jamais du bot ; le webhook, les menus et le scheduler du bot l'appellent.
 """
 import logging
@@ -15,7 +15,7 @@ from datetime import datetime, time, timedelta
 
 import ira_engine
 import psycopg2.extras
-import screenshot_integrity as si
+from katechon.security import screenshot_integrity as si
 from audit import log_audit
 from db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
 from health import healed

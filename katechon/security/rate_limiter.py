@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-rate_limiter.py — Limiteur de débit robuste (module pur, thread-safe).
+katechon/security/rate_limiter.py — Limiteur de débit robuste (module pur, thread-safe).
 
 Corrige les faiblesses du limiteur historique (finding #4) :
   • per-numéro SEUL → un burst multi-numéros (ou des `sender` forgés si le token

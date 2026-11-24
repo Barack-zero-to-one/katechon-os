@@ -66,8 +66,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers import SchedulerNotRunningError
 
 import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
-import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
-import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
+from katechon.security import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
+from katechon.security import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
 import wa_dispatch                   # File d'envoi WhatsApp : un expéditeur, priorités, écart par destinataire (module pur)
 from ocr import (                    # Lecture des reçus : OpenCV, PDF SwitchN, Tesseract (module pur)
     _pretraiter_screenshot_whatsapp, _lire_pdf_switchn, lire_screenshot_mobile_money,

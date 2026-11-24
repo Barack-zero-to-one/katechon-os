@@ -1,7 +1,7 @@
 """
 File d'envoi WhatsApp : un seul expéditeur, priorités, espacement par destinataire.
 
-Module pur (aucune dépendance au bot, comme rate_limiter.py). L'appelant ne
+Module pur (aucune dépendance au bot, comme katechon/security/rate_limiter.py). L'appelant ne
 dort jamais : soumettre() range le message et rend la main. Un thread unique
 envoie en respectant deux règles :
   - au moins `ecart_par_chat` secondes entre deux messages au même destinataire

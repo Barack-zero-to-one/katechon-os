@@ -6,7 +6,7 @@ communication, inscription et liste de passage.
 
 Extrait de barack_corp_v9_18.py sans changement de comportement. Dépend des
 modules déjà extraits (db, audit, whatsapp, messages, trust_graph) et des
-modules purs (ira_engine, webhook_security), jamais du bot. Les menus, le
+modules purs (ira_engine, katechon.security.webhook_security), jamais du bot. Les menus, le
 paiement et le webhook l'importent quand ils quittent le bot.
 """
 import logging
@@ -16,7 +16,7 @@ from datetime import date as _date, datetime, time
 from typing import Optional
 
 import ira_engine
-import webhook_security as ws
+from katechon.security import webhook_security as ws
 from audit import log_audit
 from db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
 from messages import msg_dissuasion
