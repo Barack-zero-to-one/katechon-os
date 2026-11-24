@@ -10069,8 +10069,19 @@ def demarrer_scheduler():
 # POINT D'ENTRÉE
 # ══════════════════════════════════════════════════════════════════════════
 
+# Un seul démarrage par processus : demarrer() rend le scheduler déjà lancé au
+# lieu d'en démarrer un second, et n'enregistre l'arrêt propre qu'une fois.
+_demarrage = {"scheduler": None, "arret_enregistre": False}
+
+
 def _shutdown_bot():
-    """Appelé par atexit à chaque arrêt — ferme proprement le pool DB."""
+    """Appelé par atexit à chaque arrêt — stoppe le scheduler, ferme le pool DB."""
+    scheduler = _demarrage["scheduler"]
+    if scheduler is not None:
+        try:
+            scheduler.shutdown(wait=False)   # plus aucun job sur un pool en cours de fermeture
+        except Exception:
+            pass
     _expediteur.vider(timeout=10)   # laisse partir les messages déjà soumis
     _sauvegarder_sessions()
     fermer_pool()
@@ -10079,10 +10090,14 @@ def _shutdown_bot():
     log.info("Bot arrêté proprement — pool DB fermé.")
 
 
-def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: int = None):
+def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: Optional[int] = None):
     """Démarre le bot : secrets, PostgreSQL, pool, tables, sessions, URL
     publique, scheduler, arrêt propre, puis Waitress sur hote:port (PORT par
-    défaut). Retourne le scheduler ; servir=False s'arrête avant Waitress."""
+    défaut). Retourne le scheduler ; servir=False s'arrête avant Waitress.
+    Un second appel dans le même processus rend le scheduler déjà démarré."""
+    if _demarrage["scheduler"] is not None:
+        return _demarrage["scheduler"]
+    port = PORT if port is None else port
     log.info("━" * 60)
     log.info("🚀 TontineBot Pro v9.18 — Barack & AI Development Facilities Ltd")
     log.info("   BADF Ltd — Cameroun 🇨🇲")
@@ -10090,7 +10105,7 @@ def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: int = None):
     log.info(f"   Owner           : {OWNER_WA}")
     log.info(f"   WhatsApp       : Green API — Instance {GREENAPI_INSTANCE_ID or '(non configurée)'}")
     log.info(f"   Base de données : {PG_USER}@{PG_HOST}:{PG_PORT}/{PG_DB}")
-    log.info(f"   Port Flask      : {PORT}")
+    log.info(f"   Écoute HTTP     : {hote}:{port}")
     log.info(f"   Numéro BADF MTN : {NUMERO_BADF_MTN}")
     log.info("━" * 60)
     log.info("💡 Mode paiement : MANUEL (screenshot → admin confirme)")
@@ -10145,17 +10160,19 @@ def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: int = None):
 
     # ── 4. Scheduler ───────────────────────────────────────────────────────
     scheduler = demarrer_scheduler()
+    _demarrage["scheduler"] = scheduler
     log.info("✅ Scheduler démarré.")
     log.info("━" * 60)
     log.info("🟢 TontineBot Pro v9.18 — Prêt à recevoir des messages.")
     log.info("━" * 60)
 
-    atexit.register(_shutdown_bot)
+    if not _demarrage["arret_enregistre"]:
+        atexit.register(_shutdown_bot)
+        _demarrage["arret_enregistre"] = True
 
     if not servir:
         return scheduler
     from waitress import serve
-    port = PORT if port is None else port
     log.info(f"🚀 Waitress WSGI — {WAITRESS_THREADS} threads — port {port}")
     serve(app, host=hote, port=port, threads=WAITRESS_THREADS,
           channel_timeout=120, cleanup_interval=30)
