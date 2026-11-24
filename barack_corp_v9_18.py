@@ -334,8 +334,8 @@ logging.basicConfig(
 log   = logging.getLogger("BarackCorp")
 audit = logging.getLogger("Audit")
 audit.addHandler(logging.FileHandler("audit_securite.log", encoding="utf-8"))
-from audit import log_audit, _masquer_wa   # Journal d'audit (module audit.py)
 audit.setLevel(logging.WARNING)
+from audit import log_audit, _masquer_wa   # Journal d'audit (module audit.py)
 
 # ══════════════════════════════════════════════════════════════════════════
 # ÉTAT EN MÉMOIRE
