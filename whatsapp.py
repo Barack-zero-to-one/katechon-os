@@ -2,9 +2,10 @@
 Envoi WhatsApp par Green API : outbox persistante, requête Green API,
 expéditeur unique (wa_dispatch), diffusion de groupe et fonctions wa_*.
 
-Extrait de barack_corp_v9_18.py. Ce module est le seul lecteur de
-GREENAPI_INSTANCE_ID, GREENAPI_TOKEN, GREENAPI_BASE et OWNER_WA ; le bot les
-réexporte. Aucune dépendance au bot : la base passe par db.py.
+Extrait de barack_corp_v9_18.py. Ce module lit une fois dans l'environnement
+GREENAPI_INSTANCE_ID, GREENAPI_TOKEN, GREENAPI_BASE et OWNER_WA ; le bot en
+importe les valeurs au démarrage (les remplacer ici après l'import ne change
+pas sa copie). Aucune dépendance au bot : la base passe par db.py.
 """
 import json
 import logging
@@ -20,7 +21,7 @@ from db import get_conn, release_conn, fetchone, fetchall
 
 __all__ = [
     "GREENAPI_INSTANCE_ID", "GREENAPI_TOKEN", "GREENAPI_BASE", "OWNER_WA",
-    "_outbox_lock", "_outbox_enqueue", "_outbox_drain", "_wa_request", "_chat_id",
+    "_outbox_lock", "_outbox_path", "_outbox_enqueue", "_outbox_drain", "_wa_request", "_chat_id",
     "_wa_send_direct", "WA_ECART_PAR_CHAT", "WA_DEBIT_GLOBAL", "_expediteur",
     "_wa_send_groupe_direct", "_wa_send", "_wa_send_groupe", "_wa_send_group_chatid",
     "wa_kick_membre", "wa_quitter_groupe", "wa_prive", "wa_owner", "wa_admins_tontine",
