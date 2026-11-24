@@ -39,6 +39,7 @@
 """
 
 import atexit
+import sys
 import concurrent.futures
 import hashlib
 import hmac
@@ -62,6 +63,7 @@ import psycopg2.extras
 import requests
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers import SchedulerNotRunningError
 
 import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
 import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
@@ -10069,21 +10071,63 @@ def demarrer_scheduler():
 # POINT D'ENTRÉE
 # ══════════════════════════════════════════════════════════════════════════
 
-# Un seul démarrage par processus : demarrer() rend le scheduler déjà lancé au
-# lieu d'en démarrer un second, et n'enregistre l'arrêt propre qu'une fois.
-_demarrage = {"scheduler": None, "arret_enregistre": False}
+# Un seul démarrage par processus : l'initialisation (pool, tables, sessions,
+# scheduler) ne s'exécute qu'une fois, sous verrou ; un appel ultérieur peut
+# encore servir HTTP. L'arrêt propre est enregistré une seule fois.
+_demarrage = {"scheduler": None, "arret_enregistre": False, "initialise": False,
+              "sessions_restaurees": False, "adresses_servies": set()}
+_demarrage_lock = threading.Lock()
+# Attente maximale des jobs en cours quand _shutdown_bot est appelé directement.
+# À la sortie normale de l'interpréteur, concurrent.futures a déjà attendu les
+# workers (sans limite) avant les handlers atexit : la limite ne joue pas là.
+_ARRET_ATTENTE_JOBS = 10
+
+
+def _enregistrer_arret():
+    if not _demarrage["arret_enregistre"]:
+        atexit.register(_shutdown_bot)
+        _demarrage["arret_enregistre"] = True
+
+
+def _arreter_scheduler(scheduler):
+    """Arrête le scheduler en attendant ses jobs en cours, au plus
+    _ARRET_ATTENTE_JOBS secondes ; tout échec est journalisé."""
+    erreurs = []
+
+    def _arret():
+        try:
+            scheduler.shutdown(wait=True)
+        except SchedulerNotRunningError:
+            pass                      # jamais démarré ou déjà arrêté : rien à signaler
+        except Exception as e:
+            erreurs.append(e)
+
+    fil = threading.Thread(target=_arret, name="ArretScheduler", daemon=True)
+    try:
+        fil.start()
+    except RuntimeError:
+        # Python 3.12+ : aucun thread ne peut démarrer pendant atexit. Les jobs
+        # sont déjà terminés à ce stade ; on arrête directement.
+        _arret()
+        if erreurs:
+            log.warning(f"⚠️ Arrêt du scheduler en échec : {erreurs[0]}")
+        return
+    fil.join(_ARRET_ATTENTE_JOBS)
+    if fil.is_alive():
+        log.warning(f"⚠️ Jobs encore en cours après {_ARRET_ATTENTE_JOBS}s — fermeture du pool quand même")
+    elif erreurs:
+        log.warning(f"⚠️ Arrêt du scheduler en échec : {erreurs[0]}")
 
 
 def _shutdown_bot():
-    """Appelé par atexit à chaque arrêt — stoppe le scheduler, ferme le pool DB."""
+    """Appelé par atexit à chaque arrêt — stoppe le scheduler (jobs en cours
+    attendus, délai borné), puis ferme le pool DB."""
     scheduler = _demarrage["scheduler"]
     if scheduler is not None:
-        try:
-            scheduler.shutdown(wait=False)   # plus aucun job sur un pool en cours de fermeture
-        except Exception:
-            pass
+        _arreter_scheduler(scheduler)
     _expediteur.vider(timeout=10)   # laisse partir les messages déjà soumis
-    _sauvegarder_sessions()
+    if _demarrage.get("sessions_restaurees"):
+        _sauvegarder_sessions()     # jamais avant la restauration : la sauvegarde serait écrasée à vide
     fermer_pool()
     _msg_executor.shutdown(wait=False)
     _download_executor.shutdown(wait=False)
@@ -10094,10 +10138,32 @@ def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: Optional[int] = N
     """Démarre le bot : secrets, PostgreSQL, pool, tables, sessions, URL
     publique, scheduler, arrêt propre, puis Waitress sur hote:port (PORT par
     défaut). Retourne le scheduler ; servir=False s'arrête avant Waitress.
-    Un second appel dans le même processus rend le scheduler déjà démarré."""
-    if _demarrage["scheduler"] is not None:
-        return _demarrage["scheduler"]
+    L'initialisation ne s'exécute qu'une fois par processus, même sous appels
+    simultanés ; un appel ultérieur avec servir=True sert quand même HTTP."""
     port = PORT if port is None else port
+    with _demarrage_lock:
+        if not _demarrage["initialise"]:
+            _initialiser(hote, port)
+        scheduler = _demarrage["scheduler"]
+
+    if not servir:
+        return scheduler
+    adresses = _demarrage.setdefault("adresses_servies", set())
+    with _demarrage_lock:
+        if (hote, port) in adresses:
+            log.warning(f"⚠️ {hote}:{port} est déjà servi par ce processus — pas de second serveur")
+            return scheduler
+        adresses.add((hote, port))
+    from waitress import serve
+    log.info(f"🚀 Waitress WSGI — {WAITRESS_THREADS} threads — port {port}")
+    serve(app, host=hote, port=port, threads=WAITRESS_THREADS,
+          channel_timeout=120, cleanup_interval=30)
+    return scheduler
+
+
+def _initialiser(hote: str, port: int):
+    """Étapes de démarrage, dans l'ordre : secrets, PostgreSQL, pool (arrêt
+    propre enregistré aussitôt), tables, sessions, URL publique, scheduler."""
     log.info("━" * 60)
     log.info("🚀 TontineBot Pro v9.18 — Barack & AI Development Facilities Ltd")
     log.info("   BADF Ltd — Cameroun 🇨🇲")
@@ -10133,19 +10199,21 @@ def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: Optional[int] = N
         if _secrets_faibles:
             log.error(f"❌ ARRÊT — secret(s) trop court(s) (min 16 caractères) : {', '.join(_secrets_faibles)}")
         log.error("   Configurez-les dans le fichier ENV avant de redémarrer. Aucun fallback par défaut n'existe (repo public).")
-        exit(1)
+        sys.exit(1)
     log.info("✅ Secrets critiques validés (présents, ≥16 caractères).")
 
     # ── 1. Vérification PostgreSQL ─────────────────────────────────────────
     log.info("🔍 Vérification PostgreSQL...")
     if not tester_connexion_postgresql():
         log.error("❌ ARRÊT — PostgreSQL inaccessible.")
-        exit(1)
+        sys.exit(1)
 
     # ── 2. Init pool + tables ──────────────────────────────────────────────
-    init_pool()
+    reinitialiser_pool()              # ouvre le pool sous verrou (ferme un éventuel ancien pool)
+    _enregistrer_arret()              # le pool ouvert sera fermé même si la suite échoue
     init_db()
     _restaurer_sessions()
+    _demarrage["sessions_restaurees"] = True
     log.info("✅ Base de données v9.18 initialisée.")
 
     # ── 3. Détecter l'URL publique ngrok ──────────────────────────────────
@@ -10159,24 +10227,12 @@ def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: Optional[int] = N
         log.warning("   ⚠️ URL ngrok non détectée — configurez NGROK_DOMAIN dans .env")
 
     # ── 4. Scheduler ───────────────────────────────────────────────────────
-    scheduler = demarrer_scheduler()
-    _demarrage["scheduler"] = scheduler
+    _demarrage["scheduler"] = demarrer_scheduler()
+    _demarrage["initialise"] = True
     log.info("✅ Scheduler démarré.")
     log.info("━" * 60)
     log.info("🟢 TontineBot Pro v9.18 — Prêt à recevoir des messages.")
     log.info("━" * 60)
-
-    if not _demarrage["arret_enregistre"]:
-        atexit.register(_shutdown_bot)
-        _demarrage["arret_enregistre"] = True
-
-    if not servir:
-        return scheduler
-    from waitress import serve
-    log.info(f"🚀 Waitress WSGI — {WAITRESS_THREADS} threads — port {port}")
-    serve(app, host=hote, port=port, threads=WAITRESS_THREADS,
-          channel_timeout=120, cleanup_interval=30)
-    return scheduler
 
 
 if __name__ == "__main__":
