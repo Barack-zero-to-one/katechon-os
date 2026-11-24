@@ -10074,9 +10074,13 @@ def demarrer_scheduler():
 # Un seul démarrage par processus : l'initialisation (pool, tables, sessions,
 # scheduler) ne s'exécute qu'une fois, sous verrou ; un appel ultérieur peut
 # encore servir HTTP. L'arrêt propre est enregistré une seule fois.
-_demarrage = {"scheduler": None, "arret_enregistre": False, "initialise": False}
+_demarrage = {"scheduler": None, "arret_enregistre": False, "initialise": False,
+              "sessions_restaurees": False, "adresses_servies": set()}
 _demarrage_lock = threading.Lock()
-_ARRET_ATTENTE_JOBS = 10   # secondes d'attente maximale des jobs en cours à l'arrêt
+# Attente maximale des jobs en cours quand _shutdown_bot est appelé directement.
+# À la sortie normale de l'interpréteur, concurrent.futures a déjà attendu les
+# workers (sans limite) avant les handlers atexit : la limite ne joue pas là.
+_ARRET_ATTENTE_JOBS = 10
 
 
 def _enregistrer_arret():
@@ -10099,7 +10103,15 @@ def _arreter_scheduler(scheduler):
             erreurs.append(e)
 
     fil = threading.Thread(target=_arret, name="ArretScheduler", daemon=True)
-    fil.start()
+    try:
+        fil.start()
+    except RuntimeError:
+        # Python 3.12+ : aucun thread ne peut démarrer pendant atexit. Les jobs
+        # sont déjà terminés à ce stade ; on arrête directement.
+        _arret()
+        if erreurs:
+            log.warning(f"⚠️ Arrêt du scheduler en échec : {erreurs[0]}")
+        return
     fil.join(_ARRET_ATTENTE_JOBS)
     if fil.is_alive():
         log.warning(f"⚠️ Jobs encore en cours après {_ARRET_ATTENTE_JOBS}s — fermeture du pool quand même")
@@ -10114,7 +10126,8 @@ def _shutdown_bot():
     if scheduler is not None:
         _arreter_scheduler(scheduler)
     _expediteur.vider(timeout=10)   # laisse partir les messages déjà soumis
-    _sauvegarder_sessions()
+    if _demarrage.get("sessions_restaurees"):
+        _sauvegarder_sessions()     # jamais avant la restauration : la sauvegarde serait écrasée à vide
     fermer_pool()
     _msg_executor.shutdown(wait=False)
     _download_executor.shutdown(wait=False)
@@ -10135,6 +10148,12 @@ def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: Optional[int] = N
 
     if not servir:
         return scheduler
+    adresses = _demarrage.setdefault("adresses_servies", set())
+    with _demarrage_lock:
+        if (hote, port) in adresses:
+            log.warning(f"⚠️ {hote}:{port} est déjà servi par ce processus — pas de second serveur")
+            return scheduler
+        adresses.add((hote, port))
     from waitress import serve
     log.info(f"🚀 Waitress WSGI — {WAITRESS_THREADS} threads — port {port}")
     serve(app, host=hote, port=port, threads=WAITRESS_THREADS,
@@ -10190,13 +10209,11 @@ def _initialiser(hote: str, port: int):
         sys.exit(1)
 
     # ── 2. Init pool + tables ──────────────────────────────────────────────
-    if pool_actif():
-        reinitialiser_pool()          # nouvel essai après un démarrage interrompu
-    else:
-        init_pool()
+    reinitialiser_pool()              # ouvre le pool sous verrou (ferme un éventuel ancien pool)
     _enregistrer_arret()              # le pool ouvert sera fermé même si la suite échoue
     init_db()
     _restaurer_sessions()
+    _demarrage["sessions_restaurees"] = True
     log.info("✅ Base de données v9.18 initialisée.")
 
     # ── 3. Détecter l'URL publique ngrok ──────────────────────────────────
