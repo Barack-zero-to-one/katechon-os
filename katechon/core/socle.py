@@ -188,6 +188,9 @@ def inscrire_dans_tontine(membre_id: int, tontine_id: int,
     """
     conn = get_conn()
     try:
+        # Premier statement de la transaction (règle de verrou_ordre_tontine) : le
+        # cycle et la capacité lus ensuite ne peuvent plus changer sous nos pieds.
+        verrou_ordre_tontine(conn, tontine_id)
         membre = fetchone(conn,
             "SELECT nom_complet FROM membres WHERE id=%s", (membre_id,))
         if not membre:
@@ -198,7 +201,14 @@ def inscrire_dans_tontine(membre_id: int, tontine_id: int,
         if not tontine:
             raise ValueError(f"Tontine {tontine_id} introuvable.")
 
-        verrou_ordre_tontine(conn, tontine_id)  # sérialise capacité et ordres de cette tontine
+        deja = fetchone(conn, """SELECT 1 AS x FROM adhesions a
+                                 WHERE a.membre_id=%s AND a.tontine_id=%s AND a.statut='Actif'
+                                   AND EXISTS (SELECT 1 FROM liste_passage lp
+                                               WHERE lp.membre_id=a.membre_id AND lp.tontine_id=a.tontine_id
+                                                 AND lp.cycle=%s)""",
+                        (membre_id, tontine_id, tontine["cycle_actuel"]))
+        if deja:
+            raise ValueError(f"{membre['nom_complet']} est déjà inscrit dans {tontine['nom']}.")
 
         nb_actuel = fetchone(conn,
             "SELECT COUNT(*) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",

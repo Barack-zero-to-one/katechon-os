@@ -1207,17 +1207,19 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             # Membre existe déjà → proposer de l'inscrire dans cette tontine
             mid = existant["id"]
             release_conn(conn)
+            sess["etape"] = "menu"
             try:
                 inscrire_dans_tontine(mid, tid)
-                log_audit("INSCRIPTION_MANUELLE", f"Membre {mid} → tontine {tid}", wa)
-                wa_prive(num,
-                    f"👋 Bienvenue dans *{tnom}* !\n"
-                    f"Vous avez été ajouté à cette tontine par un admin.")
-                sess["etape"] = "menu"
-                return f"✅ Membre existant (ID:{mid}) inscrit dans *{tnom}*."
-            except Exception as e:
-                sess["etape"] = "menu"
+            except ValueError as e:              # refus métier : tontine pleine, déjà inscrit
                 return f"❌ {e}"
+            except Exception as e:               # erreur technique : jamais le texte SQL à l'admin
+                log.error(f"❌ ajout membre existant {mid} → tontine {tid} : {e}")
+                return "❌ Inscription impossible pour le moment. Réessayez plus tard."
+            log_audit("INSCRIPTION_MANUELLE", f"Membre {mid} → tontine {tid}", wa)
+            wa_prive(num,
+                f"👋 Bienvenue dans *{tnom}* !\n"
+                f"Vous avez été ajouté à cette tontine par un admin.")
+            return f"✅ Membre existant (ID:{mid}) inscrit dans *{tnom}*."
         kyc_hash = hashlib.sha256(f"{nom}{num}MANUEL".encode()).hexdigest()
         cur = q(conn, """INSERT INTO membres (nom_complet, kyc_hash, whatsapp, adhesion_payee, statut_global)
                          VALUES (%s,%s,%s,1,'En_attente_kyc') RETURNING id""",
@@ -1225,13 +1227,16 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         mid = cur.fetchone()[0]
         conn.commit()
         release_conn(conn)
+        log_audit("AJOUT_MANUEL", f"{nom} par admin {wa}", num)   # le membre existe désormais
         try:
             inscrire_dans_tontine(mid, tid)
         except Exception as e:
-            # Le membre est créé ; l'inscription a échoué (tontine pleine...) : l'admin le sait.
+            # Le membre est créé ; l'inscription a échoué : l'admin le sait, sans texte SQL.
             sess["etape"] = "menu"
-            return f"❌ {nom} ({num}) est enregistré mais pas inscrit dans *{tnom}* : {e}"
-        log_audit("AJOUT_MANUEL", f"{nom} par admin {wa}", num)
+            if not isinstance(e, ValueError):
+                log.error(f"❌ ajout nouveau membre {mid} → tontine {tid} : {e}")
+            raison = str(e) if isinstance(e, ValueError) else "erreur technique, réessayez plus tard"
+            return f"❌ {nom} ({num}) est enregistré mais pas inscrit dans *{tnom}* : {raison}"
         wa_prive(num,
             f"👋 Bienvenue *{nom}* dans Barack Corp !\n"
             f"Un admin vous a ajouté à la tontine *{tnom}*.\n"
