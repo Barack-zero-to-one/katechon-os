@@ -15,12 +15,12 @@ import re
 from datetime import date as _date, datetime, time
 from typing import Optional
 
-import ira_engine
+from katechon.finance import ira_engine
 from katechon.security import webhook_security as ws
 from katechon.core.audit import log_audit
 from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
 from katechon.messaging.messages import msg_dissuasion
-from trust_graph import _update_score_confiance
+from katechon.finance.trust_graph import _update_score_confiance
 from katechon.messaging.whatsapp import OWNER_WA, wa_admin, wa_owner, wa_prive
 
 __all__ = ["FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "IRA_HOURLY_PCT",
@@ -30,7 +30,8 @@ __all__ = ["FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "I
     "enregistrer_liste_passage", "inscrire_dans_tontine", "normaliser_numero",
     "valider_numero_cameroun", "calculer_ira_mise", "get_membre_by_wa", "get_tontines_admin",
     "est_owner", "est_admin", "incrementer_tentatives_fraude", "_alerter_burst_fraude",
-    "_JOURS_SEMAINE", "_est_jour_collecte", "_est_jour_cotisation", "_verifier_credit_comm"]
+    "_JOURS_SEMAINE", "_est_jour_collecte", "_est_jour_cotisation", "_verifier_credit_comm",
+    "PORT", "DELAI_SUSPENSION_HEURES", "DELAI_ALERTE_FUGUE", "DELAI_BLOCAGE_FUGUE", "BACKUP_ROTATION", "HEURE_BACKUP", "PG_HOST", "PG_PORT", "PG_DB", "PG_USER", "PG_PASS", "PG_BIN", "BACKUP_DIR", "NGROK_DOMAIN", "NGROK_TOKEN"]
 
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
@@ -435,3 +436,26 @@ def _verifier_credit_comm(conn, tontine_id: int):
                             f"Tapez CREDIT_VERSE {tontine_id} pour confirmer manuellement.")
     except Exception as _e:
         log.warning(f"⚠️ _verifier_credit_comm tontine#{tontine_id} : {_e}")
+
+# ── Réglages d'exploitation (port, sanctions, sauvegarde, PostgreSQL, webhook public) ──
+# Extraits du bot avec les jobs et le scheduler (katechon/finance/jobs.py, katechon/core/scheduler.py).
+PORT             = 5000
+
+DELAI_SUSPENSION_HEURES = 72
+DELAI_ALERTE_FUGUE      = 3
+DELAI_BLOCAGE_FUGUE     = 7
+BACKUP_ROTATION         = 7
+HEURE_BACKUP           = 2
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────
+PG_HOST = os.getenv("PG_HOST", "localhost")
+PG_PORT = os.getenv("PG_PORT", "5432")
+PG_DB   = os.getenv("PG_DB",   "barack_corp")
+PG_USER = os.getenv("PG_USER", "postgres")
+PG_PASS = os.getenv("PG_PASS", "")
+PG_BIN  = os.getenv("PG_BIN",  r"C:\Program Files\PostgreSQL\18\bin")
+BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
+
+# ── Webhook public (ngrok ou domaine) ────────────────────────────────────
+NGROK_DOMAIN  = os.getenv("NGROK_DOMAIN", "lennox-unbiographical-jasmin.ngrok-free.dev")
+NGROK_TOKEN   = os.getenv("NGROK_TOKEN",  "")

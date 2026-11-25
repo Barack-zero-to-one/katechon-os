@@ -30,9 +30,9 @@ from groupe import (
 )
 from menu_admin import traiter_menu_admin
 from menu_membre import traiter_menu_membre
-from ocr import lire_screenshot_mobile_money
+from katechon.finance.ocr import lire_screenshot_mobile_money
 from owner import traiter_menu_owner
-from paiement import (
+from katechon.finance.paiement import (
     enregistrer_cotisation_manuelle,
     hash_screenshot,
     reference_deja_utilisee,

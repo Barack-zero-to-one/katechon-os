@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from katechon.core.audit import log_audit
 from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn
 from katechon.core.etat import _sessions_owner
-from paiement import rapport_dettes_badf_admin
+from katechon.finance.paiement import rapport_dettes_badf_admin
 from katechon.core.socle import _est_jour_cotisation, est_owner
 from katechon.messaging.whatsapp import OWNER_WA, wa_groupe, wa_owner, wa_prive
 

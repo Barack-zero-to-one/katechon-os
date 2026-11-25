@@ -37,7 +37,7 @@ DOSSIER_PAR_DEFAUT = r"Sample_receipts\ORANGE MONEY AND MOMO"
 # PIPELINE OCR — le module réel du bot, plus aucune copie
 # ══════════════════════════════════════════════════════════════════════════════
 
-from ocr import lire_screenshot_mobile_money  # noqa: E402  (après la vérification des dépendances)
+from katechon.finance.ocr import lire_screenshot_mobile_money  # noqa: E402  (après la vérification des dépendances)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
