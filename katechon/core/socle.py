@@ -80,18 +80,26 @@ SESSION_TIMEOUT = 300
 
 class BouffageARegler(Exception):
     """Un tour bloqué ou approuvé mais impayé interdit de reconstruire la liste.
-    args[0] : les ID des passages concernés."""
+    args[0] : les tours concernés, tels que renvoyés par bouffage_a_regler."""
 
 
-def msg_bouffage_a_regler(ids) -> str:
-    return ("❌ Un bouffage bloqué ou approuvé attend son règlement (passage "
-            + ", ".join(f"#{i}" for i in ids)
-            + ") : réglez-le (DEBLOQUER, BOUFFAGE_COMPLET, ANNULER_ACCORD ou expiration "
-              "du blocage) avant de modifier la liste.")
+def msg_bouffage_a_regler(tours) -> str:
+    """Refus nommant chaque tour et l'issue qui lui correspond (bloqué ou approuvé)."""
+    bloques   = [f"#{x['id']}" for x in tours if not x["approuve"]]
+    approuves = [f"#{x['id']} approuvé" for x in tours if x["approuve"]]
+    parties = []
+    if bloques:
+        parties.append("passage " + ", ".join(bloques) + " bloqué : DEBLOQUER, BOUFFAGE_COMPLET "
+                       "ou interception à l'expiration du blocage")
+    if approuves:
+        parties.append("passage " + ", ".join(approuves) + " : versé à la prochaine heure de "
+                       "bouffage, ou ANNULER_ACCORD")
+    return ("❌ Un bouffage bloqué ou approuvé attend son règlement (" + " ; ".join(parties)
+            + ") : la liste ne peut pas être modifiée avant.")
 
 
 _SQL_A_REGLER = """
-    SELECT lp.id
+    SELECT lp.id, lp.bloque_suspect
     FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
     WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
       AND (%s::int IS NULL OR lp.membre_id = %s::int)
@@ -108,7 +116,7 @@ _SQL_A_REGLER_VERROU = """
 
 
 def bouffage_a_regler(conn, tontine_id: int, membre_id: int = None, verrouiller: bool = False) -> list:
-    """ID des tours du cycle en cours bloqués (contrôle suspect) ou approuvés
+    """Tours ({"id", "approuve"}) du cycle en cours bloqués (contrôle suspect) ou approuvés
     (DEBLOQUER, BOUFFAGE_COMPLET) sans avoir encore été versés.
 
     Tant qu'il y en a, ni une cession ni une nouvelle liste ne doivent changer le
@@ -118,9 +126,11 @@ def bouffage_a_regler(conn, tontine_id: int, membre_id: int = None, verrouiller:
     blocage posé par le job de bouffage pendant la modification est attendu puis vu.
     """
     if not verrouiller:
-        return [l["id"] for l in fetchall(conn, _SQL_A_REGLER, (tontine_id, membre_id, membre_id))]
-    lignes = fetchall(conn, _SQL_A_REGLER_VERROU, (tontine_id, membre_id, membre_id))
-    return [l["id"] for l in lignes if l["bloque_suspect"] or l["debloque_le"]]
+        lignes = fetchall(conn, _SQL_A_REGLER, (tontine_id, membre_id, membre_id))
+    else:
+        lignes = [l for l in fetchall(conn, _SQL_A_REGLER_VERROU, (tontine_id, membre_id, membre_id))
+                  if l["bloque_suspect"] or l["debloque_le"]]
+    return [{"id": l["id"], "approuve": not l["bloque_suspect"]} for l in lignes]
 
 
 def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tuple:

@@ -390,7 +390,7 @@ def notifier_prochain_bouffage():
                     if p.get("_declenche") or _passage_notifie(conn, p.get("id")):
                         # Le bouffage est déjà enregistré ('Notifie' est commité avec lui) : seules
                         # des notifications ont échoué. Ni relance ni annonce d'échec (double versement).
-                        log.error(f"⚠️ bouffage passage#{p.get('id')} déclenché, notifications incomplètes : {e}")
+                        log.error(f"⚠️ bouffage passage#{p.get('id')} traité (versé ou bloqué), notifications incomplètes : {e}")
                         continue
                     if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)):
                         # Panne de base avant le versement : rien n'est commité, @healed relance
@@ -501,23 +501,32 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
                    SET statut='En_attente', bloque_suspect=1, date_blocage=NOW()
                    WHERE id=%s""", (passage["id"],))
         conn.commit()
-        wa_admins_tontine(t["id"],
-            f"🚨 *BOUFFAGE SUSPENDU — {t['nom']}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Bénéficiaire : *{passage['nom_complet']}*\n\n"
-            f"⚠️ *Comportement suspect détecté :*\n"
-            f"{alerte_suspect}\n\n"
-            f"Le bouffage est *suspendu* en attente de votre validation.\n\n"
-            f"Pour débloquer tapez :\n"
-            f"*admin* → option *DEBLOQUER {passage['id']}*\n\n"
-            f"_TontineBot Pro — BADF Ltd_"
-        )
-        wa_owner(
-            f"🚨 *BOUFFAGE SUSPECT BLOQUÉ*\n"
-            f"Tontine : {t['nom']}\n"
-            f"Membre  : {passage['nom_complet']}\n"
-            f"Raison  : {alerte_suspect}"
-        )
+        # Blocage commité : au-delà, une erreur d'envoi ne doit pas passer pour un
+        # versement raté. Le owner d'abord (sans base), chaque envoi isolé.
+        passage["_declenche"] = True
+        try:
+            wa_owner(
+                f"🚨 *BOUFFAGE SUSPECT BLOQUÉ*\n"
+                f"Tontine : {t['nom']}\n"
+                f"Membre  : {passage['nom_complet']}\n"
+                f"Raison  : {alerte_suspect}"
+            )
+        except Exception as e:
+            log.error(f"alerte owner blocage #{passage['id']} : {e}")
+        try:
+            wa_admins_tontine(t["id"],
+                f"🚨 *BOUFFAGE SUSPENDU — {t['nom']}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Bénéficiaire : *{passage['nom_complet']}*\n\n"
+                f"⚠️ *Comportement suspect détecté :*\n"
+                f"{alerte_suspect}\n\n"
+                f"Le bouffage est *suspendu* en attente de votre validation.\n\n"
+                f"Pour débloquer tapez :\n"
+                f"*admin* → option *DEBLOQUER {passage['id']}*\n\n"
+                f"_TontineBot Pro — BADF Ltd_"
+            )
+        except Exception as e:
+            log.error(f"alerte admins blocage #{passage['id']} : {e}")
         log_audit("BOUFFAGE_SUSPECT_BLOQUE",
                   f"{passage['nom_complet']} | {t['nom']} | {alerte_suspect}",
                   passage["whatsapp"])
@@ -625,7 +634,7 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
         caution_reelle    = caution_mont,
         dettes_ira        = dettes_ira,
     )
-    passage["_declenche"] = True   # au-delà, une erreur ne doit ni relancer ni annoncer un échec
+    passage["_declenche"] = True   # versé ou bloqué : au-delà, ni relance ni annonce d'échec
 
     # Enregistrer la caution en base (informatif)
     if caution_mont > 0:

@@ -813,7 +813,8 @@ def traiter_reponse_numero_bouffage(wa: str, texte: str, membre: dict):
             cur.close()
 
         log_audit("BOUFFAGE_NUMERO_RECU",
-                  f"Bouffage#{bouffage['id']} | Membre#{membre['id']} | {numero} ({operateur})", wa)
+                  f"Bouffage#{','.join(str(r['id']) for r in regles)} | Membre#{membre['id']} | "
+                  f"{numero} ({operateur})", wa)
 
         wa_admins_tontine(bouffage["tontine_id"],
             f"💸 *NUMÉRO REÇU — {bouffage['tontine_nom']}*\n"
