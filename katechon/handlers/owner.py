@@ -402,6 +402,7 @@ def _owner_membres_stats() -> str:
         actifs  = fetchone(conn, "SELECT COUNT(*) n FROM membres WHERE statut_global='Actif'")["n"]
         suspendus = fetchone(conn, "SELECT COUNT(*) n FROM membres WHERE statut_global='Suspendu_global'")["n"]
         bannis  = fetchone(conn, "SELECT COUNT(*) n FROM membres WHERE statut_global='Banni'")["n"]
+        attente_kyc = fetchone(conn, "SELECT COUNT(*) n FROM membres WHERE statut_global='En_attente_kyc'")["n"]
         nouveaux_j = fetchone(conn, """
             SELECT COUNT(*) n FROM membres WHERE date_adhesion::date = CURRENT_DATE
         """)["n"]
@@ -415,7 +416,8 @@ def _owner_membres_stats() -> str:
             f"  Total inscrits   : *{total}*\n"
             f"  Actifs           : {actifs}\n"
             f"  Suspendus        : {suspendus}\n"
-            f"  Bannis           : {bannis}\n\n"
+            f"  Bannis           : {bannis}\n"
+            f"  En attente KYC   : {attente_kyc}\n\n"
             f"  Nouveaux aujourd'hui : {nouveaux_j}\n"
             f"  Nouveaux ce mois     : {nouveaux_m}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -428,8 +430,11 @@ def _owner_membres_stats() -> str:
 def _owner_fugitifs_stats() -> str:
     conn = get_conn()
     try:
+        # Seules les vraies fugues comptent : la table porte aussi les avertissements
+        # de retard (Avertissement_1/2) et les signaux prédictifs du Trust Graph.
         total_fugitifs = fetchone(conn, """
             SELECT COUNT(DISTINCT membre_id) n FROM alertes_fugue
+            WHERE type_alerte IN ('Blocage','Interception_caution')
         """)["n"]
         cautions_saisies = fetchone(conn, """
             SELECT COUNT(*) n, COALESCE(SUM(montant), 0) v
@@ -441,12 +446,16 @@ def _owner_fugitifs_stats() -> str:
         """)
         # Liste des 5 derniers fugitifs
         derniers = fetchall(conn, """
-            SELECT m.nom_complet, m.whatsapp, t.nom AS tontine,
-                   af.created_at
-            FROM alertes_fugue af
-            JOIN membres m ON m.id = af.membre_id
-            JOIN tontines t ON t.id = af.tontine_id
-            ORDER BY af.created_at DESC LIMIT 5
+            SELECT * FROM (
+                SELECT DISTINCT ON (af.membre_id)
+                       m.nom_complet, m.whatsapp, t.nom AS tontine, af.created_at
+                FROM alertes_fugue af
+                JOIN membres m ON m.id = af.membre_id
+                JOIN tontines t ON t.id = af.tontine_id
+                WHERE af.type_alerte IN ('Blocage','Interception_caution')
+                ORDER BY af.membre_id, af.created_at DESC
+            ) dernieres_fugues
+            ORDER BY created_at DESC LIMIT 5
         """)
         lignes = []
         for f in derniers:
