@@ -181,9 +181,11 @@ COUNTRY_CONFIG = {
 DEFAULT_COUNTRY = "CM"  # Cameroun par défaut
 
 
+# PUBLIC_URL et _ARRET_ATTENTE_JOBS ne sont pas réexportés : ce sont des valeurs que
+# le scheduler réaffecte ou que l'on règle ; une copie ici ne suivrait pas.
 from katechon.core.scheduler import (   # katechon/core/scheduler.py
-    PUBLIC_URL, detecter_url_publique, tester_connexion_postgresql, creer_base_postgresql,
-    demarrer_scheduler, _demarrage, _demarrage_lock, _ARRET_ATTENTE_JOBS, _enregistrer_arret,
+    detecter_url_publique, tester_connexion_postgresql, creer_base_postgresql,
+    demarrer_scheduler, _demarrage, _demarrage_lock, _enregistrer_arret,
     _arreter_scheduler, _shutdown_bot, demarrer, _initialiser,
 )
 
