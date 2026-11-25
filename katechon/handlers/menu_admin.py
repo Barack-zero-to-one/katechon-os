@@ -1639,7 +1639,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
 
         # Réinitialiser le blocage + déclencher bouffage complet
         q(conn, """UPDATE liste_passage
-                   SET statut='En_attente', bloque_suspect=0, date_blocage=NULL
+                   SET statut='En_attente', bloque_suspect=0, date_blocage=NULL, debloque_le=NOW()
                    WHERE id=%s""", (passage_id,))
         conn.commit()
         release_conn(conn)
@@ -1668,32 +1668,35 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             return "❌ Format : *DEBLOQUER 42* (ID du passage)"
         passage_id = int(parts[1])
         conn = get_conn()
-        passage = fetchone(conn, """
-            SELECT lp.*, m.nom_complet, m.whatsapp
-            FROM liste_passage lp
-            LEFT JOIN membres m ON m.id = lp.membre_id
-            WHERE lp.id=%s AND lp.tontine_id=%s
-        """, (passage_id, tid))
-        if not passage:
+        try:
+            # Ligne verrouillée : le job des bouffages suspects expirés ne peut pas
+            # l'intercepter entre la vérification et le déblocage.
+            passage = fetchone(conn, """
+                SELECT lp.*, m.nom_complet, m.whatsapp
+                FROM liste_passage lp
+                LEFT JOIN membres m ON m.id = lp.membre_id
+                WHERE lp.id=%s AND lp.tontine_id=%s
+                FOR UPDATE OF lp
+            """, (passage_id, tid))
+            if not passage:
+                return f"❌ Passage #{passage_id} introuvable pour cette tontine."
+            # Seul un bouffage retenu par le contrôle suspect et encore en attente se
+            # débloque : remettre en attente un tour payé, cédé ou intercepté le
+            # ferait repayer à la prochaine heure de bouffage.
+            if passage["statut"] != "En_attente":
+                return (f"❌ Le passage #{passage_id} n'est pas un bouffage bloqué en attente "
+                        f"(statut : {passage['statut']}) : rien à débloquer.")
+            if not passage["bloque_suspect"]:
+                return f"❌ Le passage #{passage_id} n'est pas bloqué par le contrôle suspect : rien à débloquer."
+            # Même garde-fou que BOUFFAGE_COMPLET : pas d'auto-déblocage.
+            if passage.get("whatsapp") == wa:
+                return "❌ Vous ne pouvez pas débloquer votre propre bouffage."
+            q(conn, """UPDATE liste_passage
+                       SET bloque_suspect=0, date_blocage=NULL, debloque_le=NOW()
+                       WHERE id=%s""", (passage_id,))
+            conn.commit()
+        finally:
             release_conn(conn)
-            return f"❌ Passage #{passage_id} introuvable pour cette tontine."
-        # Seul un bouffage retenu par le contrôle suspect et encore en attente se
-        # débloque : remettre en attente un tour payé, cédé ou intercepté le
-        # ferait repayer à la prochaine heure de bouffage.
-        if passage["statut"] != "En_attente" or not passage["bloque_suspect"]:
-            release_conn(conn)
-            return (f"❌ Le passage #{passage_id} n'est pas un bouffage bloqué en attente "
-                    f"(statut : {passage['statut']}) : rien à débloquer.")
-        # Même garde-fou que BOUFFAGE_COMPLET : pas d'auto-déblocage.
-        if passage.get("whatsapp") == wa:
-            release_conn(conn)
-            return "❌ Vous ne pouvez pas débloquer votre propre bouffage."
-        q(conn, """UPDATE liste_passage
-                   SET bloque_suspect=0, date_blocage=NULL
-                   WHERE id=%s AND statut='En_attente' AND bloque_suspect=1""",
-          (passage_id,))
-        conn.commit()
-        release_conn(conn)
         log_audit("BOUFFAGE_DEBLOQUE",
                   f"Passage#{passage_id} | {passage['nom_complet']} | Admin:{wa}")
         wa_owner(

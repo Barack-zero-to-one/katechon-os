@@ -340,9 +340,11 @@ def notifier_prochain_bouffage():
             FROM liste_passage lp
             LEFT JOIN membres m ON m.id = lp.membre_id
             WHERE lp.tontine_id=%s AND lp.cycle=%s
-              AND lp.statut='En_attente' AND lp.date_bouffage=%s
-            ORDER BY lp.ordre LIMIT 1
-        """, (t["id"], t["cycle_actuel"], today))
+              AND lp.statut='En_attente' AND lp.bloque_suspect=0
+              AND (lp.date_bouffage=%s
+                   OR (lp.date_bouffage < %s AND lp.debloque_le IS NOT NULL))
+            ORDER BY lp.date_bouffage, lp.ordre LIMIT 1
+        """, (t["id"], t["cycle_actuel"], today, today))
 
         if not passage:
             continue
@@ -358,7 +360,8 @@ def notifier_prochain_bouffage():
 
         # ── Vérification historique cotisation avant bouffage ────────────
         # Détecte le schéma : mauvais payeur qui cotise juste avant son tour
-        alerte_suspect = _verifier_historique_avant_bouffage(
+        # Un tour débloqué par l'admin (DEBLOQUER, BOUFFAGE_COMPLET) a déjà été jugé.
+        alerte_suspect = None if passage.get("debloque_le") else _verifier_historique_avant_bouffage(
             conn, passage["mbr_id"], t["id"], passage["ordre"]
         )
         if alerte_suspect:
