@@ -19,7 +19,6 @@ import psycopg2.extras
 import requests
 from apscheduler.schedulers import SchedulerNotRunningError
 from apscheduler.schedulers.background import BackgroundScheduler
-from katechon.routes import enregistrer_routes
 from katechon.core.app import _DASH_TOKEN, _HEALTH_TOKEN, app
 from katechon.core.db import fermer_pool, reinitialiser_pool
 from katechon.core.etat import (
@@ -277,8 +276,9 @@ def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: Optional[int] = N
     L'initialisation ne s'exécute qu'une fois par processus, même sous appels
     simultanés ; un appel ultérieur avec servir=True sert quand même HTTP."""
     port = PORT if port is None else port
-    enregistrer_routes(app)       # idempotent : webhook et dashboard même sans le point d'entrée
+    from katechon.routes import enregistrer_routes   # import tardif : scheduler reste léger
     with _demarrage_lock:
+        enregistrer_routes(app)   # idempotent : webhook et dashboard même sans le point d'entrée
         if not _demarrage["initialise"]:
             _initialiser(hote, port)
         scheduler = _demarrage["scheduler"]

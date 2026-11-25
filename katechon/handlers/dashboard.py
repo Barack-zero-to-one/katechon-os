@@ -8,7 +8,8 @@ l'orchestrateur métier par choix d'architecture (le HTML vivait déjà dans
 dashboard.html ; la logique Python le rejoint ici).
 
 Câblage par INJECTION DE DÉPENDANCES (pas d'import de barack_corp → zéro import
-circulaire) :
+circulaire), fait une seule fois par katechon.routes.enregistrer_routes(app) ;
+un second appel sur la même app lèverait (endpoint déjà présent) :
 
     from katechon.handlers import dashboard
     dashboard.register_dashboard(

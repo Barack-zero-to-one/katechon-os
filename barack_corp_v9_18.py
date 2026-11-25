@@ -290,7 +290,7 @@ def format_montant(montant: int, pays_code: str = "CM") -> str:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from katechon.finance.paiement import (   # extrait dans paiement.py
+from katechon.finance.paiement import (   # katechon/finance/paiement.py
     hash_screenshot, screenshot_deja_utilise, enregistrer_screenshot, reference_deja_utilisee,
     enregistrer_reference, screenshot_near_duplicate, MontantAberrantError,
     enregistrer_cotisation_manuelle, _incrementer_slip_cycle, _reclasser_en_dernier,
@@ -307,7 +307,7 @@ from katechon.finance.paiement import (   # extrait dans paiement.py
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from katechon.handlers.menu_admin import (   # extrait dans menu_admin.py
+from katechon.handlers.menu_admin import (   # katechon/handlers/menu_admin.py
     kick_membre_si_bot_admin, wa_mentionner_retardataires, _passer_a_cotisation_suivante,
     traiter_menu_admin,
 )
@@ -318,7 +318,7 @@ from katechon.handlers.menu_admin import (   # extrait dans menu_admin.py
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from katechon.handlers.menu_membre import (   # extrait dans menu_membre.py
+from katechon.handlers.menu_membre import (   # katechon/handlers/menu_membre.py
     _demarrer_collecte_nom, traiter_kyc, _finaliser_nom, traiter_menu_membre, _repondre_rang,
     _repondre_caution, _init_paiement_cotisation,
 )
@@ -330,7 +330,7 @@ from katechon.handlers.menu_membre import (   # extrait dans menu_membre.py
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from katechon.handlers.owner import (   # extrait dans owner.py
+from katechon.handlers.owner import (   # katechon/handlers/owner.py
     traiter_menu_owner, _owner_menu_principal, _bloc_ira_membres, _owner_rapport_jour,
     _owner_rapport_semaine, _owner_rapport_mois, _owner_historique_n_jours,
     _owner_tontines_actives, _owner_reserve_badf, _owner_membres_stats, _owner_fugitifs_stats,
@@ -342,7 +342,7 @@ from katechon.handlers.owner import (   # extrait dans owner.py
 # ÉVÉNEMENTS GROUPE — bot ajouté / membre quitte
 # ══════════════════════════════════════════════════════════════════════════
 
-from katechon.handlers.groupe import (   # extrait dans groupe.py
+from katechon.handlers.groupe import (   # katechon/handlers/groupe.py
     _est_nom_valide, _auto_inscrire_participants, _envoyer_config_dm_admins, _bot_ajoute_groupe,
     traiter_config_tontine, _groupe_liste_cotisations, _traiter_commande_groupe,
     _groupe_rappel_manuel, _greenapi_get_pushname, _greenapi_get_group_members,
@@ -355,7 +355,7 @@ from katechon.handlers.groupe import (   # extrait dans groupe.py
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from katechon.handlers.webhook import (   # extrait dans webhook.py
+from katechon.handlers.webhook import (   # katechon/handlers/webhook.py
     webhook_whatsapp_verify, _traiter_groupe_participants, webhook_whatsapp_greenapi,
     _greenapi_telecharger_media, _traiter_message_greenapi, _traiter_screenshot_cotisation_bytes,
     register_webhook,
