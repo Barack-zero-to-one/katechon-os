@@ -7,7 +7,7 @@ bot.
 """
 import logging
 
-from db import get_conn, release_conn, fetchone
+from katechon.core.db import get_conn, release_conn, fetchone
 
 __all__ = ["init_db"]
 

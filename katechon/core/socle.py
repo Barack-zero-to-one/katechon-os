@@ -17,11 +17,11 @@ from typing import Optional
 
 import ira_engine
 from katechon.security import webhook_security as ws
-from audit import log_audit
-from db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
-from messages import msg_dissuasion
+from katechon.core.audit import log_audit
+from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
+from katechon.messaging.messages import msg_dissuasion
 from trust_graph import _update_score_confiance
-from whatsapp import OWNER_WA, wa_admin, wa_owner, wa_prive
+from katechon.messaging.whatsapp import OWNER_WA, wa_admin, wa_owner, wa_prive
 
 __all__ = ["FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "IRA_HOURLY_PCT",
     "IRA_CAP_PCT", "IRA_FLOOR", "IRA_GRACE_MIN", "FRAIS_REACTIV", "FRAIS_CHGNUM",

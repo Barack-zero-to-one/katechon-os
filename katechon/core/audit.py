@@ -9,7 +9,7 @@ db.py, jamais du bot. Le handler fichier du logger "Audit"
 import logging
 from datetime import datetime
 
-from db import get_conn, q, release_conn
+from katechon.core.db import get_conn, q, release_conn
 
 __all__ = ["log_audit", "_masquer_wa"]
 

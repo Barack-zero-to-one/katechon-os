@@ -68,11 +68,11 @@ from apscheduler.schedulers import SchedulerNotRunningError
 import ira_engine  # Moteur IRA v2 (barème pur, testé hors DB)
 from katechon.security import webhook_security as ws        # Durcissement webhook : anti-rejeu + token + SSRF (module pur)
 from katechon.security import screenshot_integrity as si    # Anti-recyclage renforcé : référence + perceptual hash (module pur)
-import wa_dispatch                   # File d'envoi WhatsApp : un expéditeur, priorités, écart par destinataire (module pur)
+from katechon.messaging import wa_dispatch                   # File d'envoi WhatsApp : un expéditeur, priorités, écart par destinataire (module pur)
 from ocr import (                    # Lecture des reçus : OpenCV, PDF SwitchN, Tesseract (module pur)
     _pretraiter_screenshot_whatsapp, _lire_pdf_switchn, lire_screenshot_mobile_money,
 )
-from messages import (               # Textes du bot et liste de passage (module pur)
+from katechon.messaging.messages import (               # Textes du bot et liste de passage (module pur)
     BOT_NOM, MSG_DISSUASION, msg_dissuasion, msg_intro_groupe, MSG_INTRO_GROUPE,
     msg_dm_admin_bienvenue, parser_liste_passage, msg_kyc_groupe, MSG_BIENVENUE_DM,
     MENU_MEMBRE_TXT, MENU_ADMIN_TXT, MENU_CAS_DIFFICILES,
@@ -84,7 +84,7 @@ from messages import (               # Textes du bot et liste de passage (module
 
 PORT             = 5000
 # Frais, barème IRA, numéros collecteurs, seuil de fraude et réglages webhook : socle.py.
-from socle import (   # extrait dans socle.py
+from katechon.core.socle import (   # extrait dans socle.py
     FRAIS_FMP, HEURE_LIMITE_DEF, IRA_CLIFF_PCT, IRA_DAILY_PCT, IRA_HOURLY_PCT, IRA_CAP_PCT,
     IRA_FLOOR, IRA_GRACE_MIN, FRAIS_REACTIV, FRAIS_CHGNUM, NUMERO_BADF_MTN, NUMERO_BADF_ORANGE,
     MAX_TENTATIVES_FRAUDE, GREENAPI_WEBHOOK_SECRET, WEBHOOK_REPLAY_TTL, _replay_guard,
@@ -93,7 +93,7 @@ from socle import (   # extrait dans socle.py
     get_tontines_admin, est_owner, est_admin, incrementer_tentatives_fraude, _alerter_burst_fraude,
     _JOURS_SEMAINE, _est_jour_collecte, _est_jour_cotisation, _verifier_credit_comm,
 )
-from etat import (   # sessions, limiteur, exécuteurs : etat.py
+from katechon.core.etat import (   # sessions, limiteur, exécuteurs : etat.py
     WAITRESS_THREADS, RATE_LIMIT_MAX, RATE_LIMIT_FENETRE, RATE_LIMIT_GLOBAL_MAX, _sessions_membre,
     _sessions_admin, _sessions_kyc, _sessions_config, _rate_limiter, _sessions_lock, _msg_executor,
     _download_executor, _groupes_intro_envoyes, session_valide, rate_limit_ok, _sessions_path,
@@ -118,14 +118,14 @@ PG_BIN  = os.getenv("PG_BIN",  r"C:\Program Files\PostgreSQL\18\bin")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 
 # ── WhatsApp — Green API (compte perso existant, scan QR) ─────────────────
-from whatsapp import (               # Envoi Green API : outbox, expéditeur, wa_* (module whatsapp.py)
+from katechon.messaging.whatsapp import (               # Envoi Green API : outbox, expéditeur, wa_* (module whatsapp.py)
     GREENAPI_INSTANCE_ID, GREENAPI_TOKEN, GREENAPI_BASE, OWNER_WA,
     _outbox_lock, _outbox_path, _outbox_enqueue, _outbox_drain, _wa_request, _chat_id,
     _wa_send_direct, WA_ECART_PAR_CHAT, WA_DEBIT_GLOBAL, _expediteur, _wa_send_groupe_direct,
     _wa_send, _wa_send_groupe, _wa_send_group_chatid, wa_kick_membre, wa_quitter_groupe,
     wa_prive, wa_owner, wa_admins_tontine, wa_groupe, wa_admin,
 )
-from health import (                 # @healed, état de santé, auto-réparation (module health.py)
+from katechon.core.health import (                 # @healed, état de santé, auto-réparation (module health.py)
     healed, _health_state, _health_lock, _self_heal_db, _self_heal_check,
     _self_heal_outbox, _check_greenapi,
 )
@@ -203,19 +203,11 @@ PUBLIC_URL    = ""
 # LOGGING
 # ══════════════════════════════════════════════════════════════════════════
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("barack_corp.log",    encoding="utf-8"),
-        logging.StreamHandler()
-    ]
+from katechon.core.app import (   # journal, app Flask, jetons, /health : katechon/core/app.py
+    log, audit, app, _DASH_TOKEN, _HEALTH_TOKEN, _BOT_START_FILE, _BOT_START, _add_security_headers,
+    health, health_detail,
 )
-log   = logging.getLogger("BarackCorp")
-audit = logging.getLogger("Audit")
-audit.addHandler(logging.FileHandler("audit_securite.log", encoding="utf-8"))
-audit.setLevel(logging.WARNING)
-from audit import log_audit, _masquer_wa   # Journal d'audit (module audit.py)
+from katechon.core.audit import log_audit, _masquer_wa   # Journal d'audit (module audit.py)
 
 # ══════════════════════════════════════════════════════════════════════════
 # BASE DE DONNÉES — POSTGRESQL + POOL DE CONNEXIONS
@@ -226,7 +218,7 @@ from audit import log_audit, _masquer_wa   # Journal d'audit (module audit.py)
 # Chaque thread prend une connexion et la rend aussitôt avec release_conn().
 # ══════════════════════════════════════════════════════════════════════════
 
-from db import (                     # Accès PostgreSQL : pool, disjoncteur, helpers (module db.py)
+from katechon.core.db import (                     # Accès PostgreSQL : pool, disjoncteur, helpers (module db.py)
     configurer as _configurer_db, init_pool, fermer_pool, reinitialiser_pool, pool_actif,
     get_conn, q, release_conn, fetchone, fetchall, verrou_ordre_tontine,
 )
@@ -234,7 +226,7 @@ from db import (                     # Accès PostgreSQL : pool, disjoncteur, he
 _configurer_db(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS)
 
 
-from schema import init_db   # Schéma PostgreSQL : tables, migrations, index (module schema.py)
+from katechon.core.schema import init_db   # Schéma PostgreSQL : tables, migrations, index (module schema.py)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -426,38 +418,6 @@ from menu_membre import (   # extrait dans menu_membre.py
     _demarrer_collecte_nom, traiter_kyc, _finaliser_nom, traiter_menu_membre, _repondre_rang,
     _repondre_caution, _init_paiement_cotisation,
 )
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# FLASK — WEBHOOKS
-# ══════════════════════════════════════════════════════════════════════════
-
-app = Flask(__name__)
-# Pas de fallback hardcodé : ce fichier est sur un repo public GitHub, donc
-# toute valeur par défaut ici serait un secret public. Si la variable est
-# absente, secret_key vaut "" — Flask lève à la première utilisation de la
-# session, et le check fail-closed dans __main__ empêche même de démarrer.
-app.secret_key  = os.getenv("FLASK_SECRET_KEY", "")
-_DASH_TOKEN     = os.getenv("DASHBOARD_TOKEN",  "")
-_HEALTH_TOKEN   = os.getenv("HEALTH_TOKEN",     "")
-_BOT_START_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_start")
-try:
-    with open(_BOT_START_FILE) as _f:
-        _BOT_START = datetime.fromisoformat(_f.read().strip())
-except Exception:
-    _BOT_START = datetime.now()
-    try:
-        with open(_BOT_START_FILE, "w") as _f:
-            _f.write(_BOT_START.isoformat())
-    except Exception:
-        pass
-
-@app.after_request
-def _add_security_headers(response):
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    return response
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1681,47 +1641,6 @@ dashboard.register_dashboard(
     get_conn=get_conn, release_conn=release_conn,
     bot_start=_BOT_START, dash_token=_DASH_TOKEN, logger=log,
 )
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# ROUTE DE SANTÉ
-# ══════════════════════════════════════════════════════════════════════════
-
-@app.route("/health", methods=["GET"])
-def health():
-    if not _HEALTH_TOKEN or not hmac.compare_digest(request.args.get("token", ""), _HEALTH_TOKEN):
-        return jsonify({"status": "unauthorized"}), 401
-    try:
-        conn = get_conn()
-        fetchone(conn, "SELECT 1 AS ok")
-        release_conn(conn)
-        db_ok = True
-    except Exception:
-        db_ok = False
-    return jsonify({
-        "status":    "ok" if db_ok else "db_error",
-        "version":   "9.18",
-        "timestamp": datetime.now().isoformat(),
-        "db":        "ok" if db_ok else "error",
-    }), 200 if db_ok else 503
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# AUTO-HEALING — logique dans health.py ; ici la route de détail (app Flask)
-# ══════════════════════════════════════════════════════════════════════════
-
-
-@app.route("/health/detail", methods=["GET"])
-def health_detail():
-    """Endpoint santé détaillé pour monitoring externe."""
-    if not _HEALTH_TOKEN or not hmac.compare_digest(request.args.get("token", ""), _HEALTH_TOKEN):
-        return jsonify({"status": "unauthorized"}), 401
-    with _health_lock:
-        state = dict(_health_state)
-    state["uptime_sec"] = int(time_module.time() - state["started_at"])
-    state["timestamp"]  = datetime.now().isoformat()
-    overall = state["db_ok"] and state["wa_ok"]
-    return jsonify(state), 200 if overall else 503
 
 
 # ══════════════════════════════════════════════════════════════════════════

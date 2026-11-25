@@ -11,12 +11,12 @@ deux jobs.
 """
 from datetime import datetime, timedelta
 
-from audit import log_audit
-from db import fetchall, fetchone, get_conn, q, release_conn
-from etat import _sessions_owner
+from katechon.core.audit import log_audit
+from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn
+from katechon.core.etat import _sessions_owner
 from paiement import rapport_dettes_badf_admin
-from socle import _est_jour_cotisation, est_owner
-from whatsapp import OWNER_WA, wa_groupe, wa_owner, wa_prive
+from katechon.core.socle import _est_jour_cotisation, est_owner
+from katechon.messaging.whatsapp import OWNER_WA, wa_groupe, wa_owner, wa_prive
 
 __all__ = ["traiter_menu_owner", "_owner_menu_principal", "_bloc_ira_membres",
     "_owner_rapport_jour", "_owner_rapport_semaine", "_owner_rapport_mois",

@@ -16,13 +16,13 @@ from datetime import datetime
 from typing import Optional
 
 import requests
-from audit import log_audit
-from db import fetchall, fetchone, get_conn, q, release_conn
-from etat import _groupes_intro_envoyes, _sessions_config, _sessions_lock, session_valide
-from health import healed
-from messages import MSG_INTRO_GROUPE, msg_dm_admin_bienvenue, msg_intro_groupe, msg_kyc_groupe
-from socle import FRAIS_FMP, est_admin, est_owner, normaliser_numero
-from whatsapp import (
+from katechon.core.audit import log_audit
+from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn
+from katechon.core.etat import _groupes_intro_envoyes, _sessions_config, _sessions_lock, session_valide
+from katechon.core.health import healed
+from katechon.messaging.messages import MSG_INTRO_GROUPE, msg_dm_admin_bienvenue, msg_intro_groupe, msg_kyc_groupe
+from katechon.core.socle import FRAIS_FMP, est_admin, est_owner, normaliser_numero
+from katechon.messaging.whatsapp import (
     GREENAPI_BASE,
     GREENAPI_INSTANCE_ID,
     GREENAPI_TOKEN,

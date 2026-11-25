@@ -10,10 +10,10 @@ import logging
 import time as time_module
 from datetime import datetime, timedelta, timezone
 
-from audit import log_audit
-from db import get_conn, release_conn, fetchone, fetchall
-from health import healed, _health_lock, _health_state
-from whatsapp import wa_owner, _outbox_path
+from katechon.core.audit import log_audit
+from katechon.core.db import get_conn, release_conn, fetchone, fetchall
+from katechon.core.health import healed, _health_lock, _health_state
+from katechon.messaging.whatsapp import wa_owner, _outbox_path
 
 __all__ = ["comptabilite_badf_quotidienne", "surveillance_anomalies_quotidienne", "_zto_state",
            "zto_supervision_quotidienne"]

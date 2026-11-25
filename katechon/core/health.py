@@ -15,8 +15,8 @@ import time as time_module
 import psycopg2
 import requests
 
-from db import get_conn, fetchone, release_conn, reinitialiser_pool
-from whatsapp import (GREENAPI_BASE, GREENAPI_INSTANCE_ID, GREENAPI_TOKEN, OWNER_WA,
+from katechon.core.db import get_conn, fetchone, release_conn, reinitialiser_pool
+from katechon.messaging.whatsapp import (GREENAPI_BASE, GREENAPI_INSTANCE_ID, GREENAPI_TOKEN, OWNER_WA,
                       _outbox_drain, _outbox_enqueue, _wa_send)
 
 __all__ = ["healed", "_health_state", "_health_lock", "_self_heal_db", "_self_heal_check",
