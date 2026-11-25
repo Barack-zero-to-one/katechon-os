@@ -792,15 +792,15 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             if not courant or courant["statut_global"] != "Suspendu_global":
                 return f"ℹ️ {m['nom_complet']} n'est pas suspendu (statut: {courant['statut_global'] if courant else '?'})."
             # Une suspension appartient à la tontine qui l'a prononcée (sanction non levée).
-            # Elle ne bloque que si cette tontine peut encore la lever : tontine Active où le
-            # membre a une adhésion non quittée. Sinon (tontine quittée, terminée, ou sans
+            # Elle ne bloque que si cette tontine peut encore la lever : tontine non terminée
+            # (une tontine Suspendue pour dette BADF redevient Active) où le membre a une adhésion non quittée. Sinon (tontine quittée, terminée, ou sans
             # tontine) personne d'autre ne pourrait la lever : elle est levée ici.
             actives = fetchall(conn, """
                 SELECT s.id, s.tontine_id,
                        (s.tontine_id IS NOT NULL AND s.tontine_id <> %s AND EXISTS (
                             SELECT 1 FROM adhesions a JOIN tontines t ON t.id = a.tontine_id
                             WHERE a.membre_id = s.membre_id AND a.tontine_id = s.tontine_id
-                              AND a.statut <> 'Quitte' AND t.statut = 'Active')) AS bloquante
+                              AND a.statut <> 'Quitte' AND t.statut <> 'Terminee')) AS bloquante
                 FROM sanctions s
                 WHERE s.membre_id=%s AND s.levee_le IS NULL AND s.type_sanction = ANY(%s)
                 FOR UPDATE OF s""", (tid, m["id"], list(_TYPES_SUSPENSION)))
@@ -811,7 +811,12 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                         f"seul son admin peut lever cette suspension.")
             if levables:
                 q(conn, "UPDATE sanctions SET levee_le=NOW() WHERE id = ANY(%s)", (levables,))
-            q(conn, "UPDATE adhesions SET statut='Actif' WHERE membre_id=%s AND tontine_id=%s", (m["id"], tid))
+            # Adhésion suspendue remise Actif (une pause ou une exonération reste telle quelle),
+            # et nouveau sursis : sans cela le job 72 h la resuspendrait dans l'heure.
+            q(conn, """UPDATE adhesions SET statut='Actif' WHERE membre_id=%s AND tontine_id=%s
+                       AND statut='Suspendu'""", (m["id"], tid))
+            q(conn, "UPDATE adhesions SET nb_avertissements_retard=0 WHERE membre_id=%s AND tontine_id=%s",
+              (m["id"], tid))
             if not ailleurs:
                 q(conn, "UPDATE membres SET statut_global='Actif', suspendu_retard=0 WHERE id=%s", (m["id"],))
             conn.commit()
