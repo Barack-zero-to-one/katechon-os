@@ -42,7 +42,6 @@ import atexit
 import sys
 import concurrent.futures
 import hashlib
-import hmac
 import base64
 import os
 import re
@@ -61,7 +60,6 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 import requests
-from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers import SchedulerNotRunningError
 
@@ -83,8 +81,8 @@ from katechon.messaging.messages import (               # Textes du bot et liste
 # ══════════════════════════════════════════════════════════════════════════
 
 PORT             = 5000
-# Frais, barème IRA, numéros collecteurs, seuil de fraude et réglages webhook : socle.py.
-from katechon.core.socle import (   # extrait dans socle.py
+# Frais, barème IRA, numéros collecteurs, seuil de fraude et réglages webhook : katechon/core/socle.py.
+from katechon.core.socle import (   # katechon/core/socle.py
     FRAIS_FMP, HEURE_LIMITE_DEF, IRA_CLIFF_PCT, IRA_DAILY_PCT, IRA_HOURLY_PCT, IRA_CAP_PCT,
     IRA_FLOOR, IRA_GRACE_MIN, FRAIS_REACTIV, FRAIS_CHGNUM, NUMERO_BADF_MTN, NUMERO_BADF_ORANGE,
     MAX_TENTATIVES_FRAUDE, GREENAPI_WEBHOOK_SECRET, WEBHOOK_REPLAY_TTL, _replay_guard,
@@ -93,7 +91,7 @@ from katechon.core.socle import (   # extrait dans socle.py
     get_tontines_admin, est_owner, est_admin, incrementer_tentatives_fraude, _alerter_burst_fraude,
     _JOURS_SEMAINE, _est_jour_collecte, _est_jour_cotisation, _verifier_credit_comm,
 )
-from katechon.core.etat import (   # sessions, limiteur, exécuteurs : etat.py
+from katechon.core.etat import (   # sessions, limiteur, exécuteurs : katechon/core/etat.py
     WAITRESS_THREADS, RATE_LIMIT_MAX, RATE_LIMIT_FENETRE, RATE_LIMIT_GLOBAL_MAX, _sessions_membre,
     _sessions_admin, _sessions_kyc, _sessions_config, _rate_limiter, _sessions_lock, _msg_executor,
     _download_executor, _groupes_intro_envoyes, session_valide, rate_limit_ok, _sessions_path,
@@ -118,14 +116,14 @@ PG_BIN  = os.getenv("PG_BIN",  r"C:\Program Files\PostgreSQL\18\bin")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 
 # ── WhatsApp — Green API (compte perso existant, scan QR) ─────────────────
-from katechon.messaging.whatsapp import (               # Envoi Green API : outbox, expéditeur, wa_* (module whatsapp.py)
+from katechon.messaging.whatsapp import (               # Envoi Green API : outbox, expéditeur, wa_* (katechon/messaging/whatsapp.py)
     GREENAPI_INSTANCE_ID, GREENAPI_TOKEN, GREENAPI_BASE, OWNER_WA,
     _outbox_lock, _outbox_path, _outbox_enqueue, _outbox_drain, _wa_request, _chat_id,
     _wa_send_direct, WA_ECART_PAR_CHAT, WA_DEBIT_GLOBAL, _expediteur, _wa_send_groupe_direct,
     _wa_send, _wa_send_groupe, _wa_send_group_chatid, wa_kick_membre, wa_quitter_groupe,
     wa_prive, wa_owner, wa_admins_tontine, wa_groupe, wa_admin,
 )
-from katechon.core.health import (                 # @healed, état de santé, auto-réparation (module health.py)
+from katechon.core.health import (                 # @healed, état de santé, auto-réparation (katechon/core/health.py)
     healed, _health_state, _health_lock, _self_heal_db, _self_heal_check,
     _self_heal_outbox, _check_greenapi,
 )
@@ -207,7 +205,7 @@ from katechon.core.app import (   # journal, app Flask, jetons, /health : katech
     log, audit, app, _DASH_TOKEN, _HEALTH_TOKEN, _BOT_START_FILE, _BOT_START, _add_security_headers,
     health, health_detail,
 )
-from katechon.core.audit import log_audit, _masquer_wa   # Journal d'audit (module audit.py)
+from katechon.core.audit import log_audit, _masquer_wa   # Journal d'audit (katechon/core/audit.py)
 
 # ══════════════════════════════════════════════════════════════════════════
 # BASE DE DONNÉES — POSTGRESQL + POOL DE CONNEXIONS
@@ -218,7 +216,7 @@ from katechon.core.audit import log_audit, _masquer_wa   # Journal d'audit (modu
 # Chaque thread prend une connexion et la rend aussitôt avec release_conn().
 # ══════════════════════════════════════════════════════════════════════════
 
-from katechon.core.db import (                     # Accès PostgreSQL : pool, disjoncteur, helpers (module db.py)
+from katechon.core.db import (                     # Accès PostgreSQL : pool, disjoncteur, helpers (katechon/core/db.py)
     configurer as _configurer_db, init_pool, fermer_pool, reinitialiser_pool, pool_actif,
     get_conn, q, release_conn, fetchone, fetchall, verrou_ordre_tontine,
 )
@@ -226,7 +224,7 @@ from katechon.core.db import (                     # Accès PostgreSQL : pool, d
 _configurer_db(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS)
 
 
-from katechon.core.schema import init_db   # Schéma PostgreSQL : tables, migrations, index (module schema.py)
+from katechon.core.schema import init_db   # Schéma PostgreSQL : tables, migrations, index (katechon/core/schema.py)
 
 
 # ══════════════════════════════════════════════════════════════════════════

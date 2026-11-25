@@ -39,8 +39,10 @@ audit.addHandler(logging.FileHandler("audit_securite.log", encoding="utf-8"))
 audit.setLevel(logging.WARNING)
 
 
-# Nom et dossier racine fixés : identiques à ceux de l'app quand elle vivait dans
-# barack_corp_v9_18.py à la racine (Flask(__name__) importé sous ce nom).
+# Nom fixe et dossier racine du dépôt. Importé, le bot nommait l'app
+# « barack_corp_v9_18 » ; lancé en script par le watchdog, elle s'appelait
+# « __main__ ». Le nom est désormais toujours « barack_corp_v9_18 » : seul le
+# nom du logger Flask (app.logger) change sous le watchdog, aucun réglage n'en dépend.
 app = Flask("barack_corp_v9_18", root_path=str(RACINE))
 # Pas de fallback hardcodé : ce fichier est sur un repo public GitHub, donc
 # toute valeur par défaut ici serait un secret public. Si la variable est

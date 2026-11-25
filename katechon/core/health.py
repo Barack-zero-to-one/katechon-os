@@ -4,8 +4,8 @@ partagé, auto-réparation du pool PostgreSQL, supervision de la base et de
 Green API, drain de l'outbox au rétablissement.
 
 Extrait de barack_corp_v9_18.py sans changement de comportement. Dépend de
-db.py et whatsapp.py, jamais du bot. Les routes /health et /health/detail
-restent dans le bot avec l'application Flask et lisent l'état réexporté.
+katechon.core.db et katechon.messaging.whatsapp, jamais du bot. Les routes
+/health et /health/detail vivent avec l'app Flask dans katechon/core/app.py.
 """
 import functools
 import logging
