@@ -85,8 +85,9 @@ class BouffageARegler(Exception):
 
 def msg_bouffage_a_regler(tours, action: str = "modifier la liste") -> str:
     """Refus nommant chaque tour et l'issue qui lui correspond (bloqué ou approuvé)."""
-    bloques   = [f"#{x['id']}" for x in tours if not x["approuve"]]
-    approuves = [f"#{x['id']} approuvé" for x in tours if x["approuve"]]
+    bloques   = [f"#{x['id']}" for x in tours if x["etat"] == "bloque"]
+    approuves = [f"#{x['id']} approuvé" for x in tours if x["etat"] == "approuve"]
+    echecs    = [f"#{x['id']} en échec technique" for x in tours if x["etat"] == "echec"]
     parties = []
     if bloques:
         parties.append("passage " + ", ".join(bloques) + " bloqué : DEBLOQUER, BOUFFAGE_COMPLET "
@@ -94,20 +95,23 @@ def msg_bouffage_a_regler(tours, action: str = "modifier la liste") -> str:
     if approuves:
         parties.append("passage " + ", ".join(approuves) + " : versé à la prochaine heure de "
                        "bouffage, ou ANNULER_ACCORD")
+    if echecs:
+        parties.append("passage " + ", ".join(echecs) + " : réessayé à la prochaine heure de "
+                       "bouffage, ou ANNULER_ACCORD pour abandonner sa reprise")
     return ("❌ Un bouffage bloqué ou approuvé attend son règlement (" + " ; ".join(parties)
             + f") : impossible de {action} avant.")
 
 
 _SQL_A_REGLER = """
-    SELECT lp.id, lp.bloque_suspect
+    SELECT lp.id, lp.bloque_suspect, lp.debloque_le
     FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
     WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
       AND (%s::int IS NULL OR lp.membre_id = %s::int)
-      AND (lp.bloque_suspect = 1 OR lp.debloque_le IS NOT NULL)
+      AND (lp.bloque_suspect = 1 OR lp.debloque_le IS NOT NULL OR lp.echec_le IS NOT NULL)
     ORDER BY lp.ordre"""
 
 _SQL_A_REGLER_VERROU = """
-    SELECT lp.id, lp.bloque_suspect, lp.debloque_le
+    SELECT lp.id, lp.bloque_suspect, lp.debloque_le, lp.echec_le
     FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
     WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
       AND (%s::int IS NULL OR lp.membre_id = %s::int)
@@ -129,8 +133,12 @@ def bouffage_a_regler(conn, tontine_id: int, membre_id: int = None, verrouiller:
         lignes = fetchall(conn, _SQL_A_REGLER, (tontine_id, membre_id, membre_id))
     else:
         lignes = [l for l in fetchall(conn, _SQL_A_REGLER_VERROU, (tontine_id, membre_id, membre_id))
-                  if l["bloque_suspect"] or l["debloque_le"]]
-    return [{"id": l["id"], "approuve": not l["bloque_suspect"]} for l in lignes]
+                  if l["bloque_suspect"] or l["debloque_le"] or l["echec_le"]]
+    # Un tour en échec technique compte aussi : sinon une nouvelle liste le supprimerait sans
+    # qu'il soit jamais repris ; ANNULER_ACCORD permet d'abandonner sa reprise.
+    return [{"id": l["id"],
+             "etat": "bloque" if l["bloque_suspect"] else "approuve" if l["debloque_le"] else "echec"}
+            for l in lignes]
 
 
 def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tuple:

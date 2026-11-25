@@ -82,6 +82,7 @@ def traiter_bouffages_suspects_expires():
             JOIN tontines t ON t.id  = lp.tontine_id
             WHERE lp.bloque_suspect = 1
               AND lp.statut = 'En_attente'
+              AND t.statut = 'Active'          -- tontine en pause : l'admin ne peut pas débloquer
               AND lp.cycle = t.cycle_actuel
               AND lp.date_blocage < NOW() - INTERVAL '48 hours'
         """)
@@ -94,7 +95,7 @@ def traiter_bouffages_suspects_expires():
             if not fetchone(conn, """SELECT lp.id FROM liste_passage lp
                                      JOIN tontines t ON t.id = lp.tontine_id
                                      WHERE lp.id=%s AND lp.bloque_suspect=1 AND lp.statut='En_attente'
-                                       AND lp.cycle = t.cycle_actuel
+                                       AND lp.cycle = t.cycle_actuel AND t.statut = 'Active'
                                        AND lp.date_blocage < NOW() - INTERVAL '48 hours'
                                      FOR UPDATE OF lp""", (p["id"],)):
                 conn.rollback()

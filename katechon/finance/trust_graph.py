@@ -865,17 +865,14 @@ def commande_admin_cas_resolu(wa_admin: str, args_texte: str) -> str:
                 actuel = fetchone(conn, "SELECT statut FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
                                   (c["membre_id"], c["tontine_id"]))
         else:
-            # Comme une cession : refusé tant qu'un tour bloqué ou approuvé attend son
-            # règlement (import local : socle importe ce module).
-            from katechon.core.socle import bouffage_a_regler, msg_bouffage_a_regler
-            a_regler = bouffage_a_regler(conn, c["tontine_id"], c["membre_id"], verrouiller=True)
-            if a_regler:
-                conn.rollback()
-                return msg_bouffage_a_regler(a_regler, "retirer ce membre")
             q(conn, "UPDATE adhesions SET statut='Quitte' WHERE membre_id=%s AND tontine_id=%s",
               (c["membre_id"], c["tontine_id"]))
             # Comme une cession (menu 9 C) : ses tours non servis ne seront pas payés.
-            q(conn, """UPDATE liste_passage SET statut='Cede'
+            # Un tour bloqué ou approuvé est libéré avec le reste : le retrait prime sur le
+            # soupçon (ni interception ni saisie de caution).
+            q(conn, """UPDATE liste_passage
+                       SET statut='Cede', bloque_suspect=0, date_blocage=NULL,
+                           debloque_le=NULL, debloque_pour=NULL, bouffage_complet=0
                        WHERE membre_id=%s AND tontine_id=%s AND statut='En_attente'""",
               (c["membre_id"], c["tontine_id"]))
         q(conn, "UPDATE cas_difficiles SET statut='Termine' WHERE id = ANY(%s)", ([x["id"] for x in cas],))

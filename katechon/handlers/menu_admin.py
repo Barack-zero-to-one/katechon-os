@@ -1078,12 +1078,16 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             release_conn(conn)
             return f"❌ Le bénéficiaire doit d'abord être membre de {tnom} (option 11 pour l'ajouter)."
         d    = sess["data"]
-        if bouffage_a_regler(conn, tid, d["cas_mbr_id"], verrouiller=True):
-            release_conn(conn)
-            sess["etape"] = "menu"
-            return (f"❌ Un bouffage bloqué ou approuvé de {d['cas_mbr_nom']} attend son règlement : "
-                    f"réglez-le avant la cession.")
         t_db = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
+        # Le retrait prime sur le soupçon : un tour bloqué ou approuvé non versé est libéré
+        # (Cede), jamais transmis au cessionnaire : ni interception, ni versement sur l'accord
+        # d'un autre. Un tour en cours de versement (verrouillé) est attendu puis ignoré.
+        q(conn, """UPDATE liste_passage
+                   SET statut='Cede', bloque_suspect=0, date_blocage=NULL,
+                       debloque_le=NULL, debloque_pour=NULL, bouffage_complet=0
+                   WHERE tontine_id=%s AND membre_id=%s AND cycle=%s AND statut='En_attente'
+                     AND (bloque_suspect=1 OR debloque_le IS NOT NULL)""",
+          (tid, d["cas_mbr_id"], t_db["cycle_actuel"]))
         q(conn, """UPDATE liste_passage SET membre_id=%s
                    WHERE tontine_id=%s AND membre_id=%s AND cycle=%s AND statut='En_attente'""",
           (m2["id"], tid, d["cas_mbr_id"], t_db["cycle_actuel"]))
@@ -1722,7 +1726,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         conn = get_conn()
         try:
             passage = fetchone(conn, """
-                SELECT lp.statut, lp.debloque_le, lp.cycle, t.cycle_actuel, m.nom_complet
+                SELECT lp.statut, lp.debloque_le, lp.echec_le, lp.bloque_suspect,
+                       lp.cycle, t.cycle_actuel, m.nom_complet
                 FROM liste_passage lp
                 JOIN tontines t ON t.id = lp.tontine_id
                 LEFT JOIN membres m ON m.id = lp.membre_id
@@ -1731,16 +1736,27 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             """, (passage_id, tid))
             if not passage:
                 return f"❌ Passage #{passage_id} introuvable pour cette tontine."
-            if passage["statut"] != "En_attente" or not passage["debloque_le"] \
+            abandon = (passage["statut"] == "En_attente" and not passage["debloque_le"]
+                       and passage["echec_le"] and not passage["bloque_suspect"])
+            if abandon:
+                # Tour en échec technique : on renonce à sa reprise automatique.
+                q(conn, "UPDATE liste_passage SET echec_le=NULL WHERE id=%s", (passage_id,))
+                conn.commit()
+            elif passage["statut"] != "En_attente" or not passage["debloque_le"] \
                     or passage["cycle"] != passage["cycle_actuel"]:
                 return f"❌ Le passage #{passage_id} n'a pas d'accord en attente de versement : rien à annuler."
-            q(conn, """UPDATE liste_passage
+            else:
+                q(conn, """UPDATE liste_passage
                        SET bloque_suspect=1, date_blocage=NOW(),
                            debloque_le=NULL, debloque_pour=NULL, bouffage_complet=0
                        WHERE id=%s""", (passage_id,))
-            conn.commit()
+                conn.commit()
         finally:
             release_conn(conn)
+        if abandon:
+            log_audit("REPRISE_ABANDONNEE", f"Passage#{passage_id} | {passage['nom_complet']} | Admin:{wa}")
+            return (f"✅ Reprise automatique du passage #{passage_id} abandonnée : ce tour de "
+                    f"*{passage['nom_complet']}* ne sera plus versé automatiquement.")
         log_audit("ACCORD_ANNULE", f"Passage#{passage_id} | {passage['nom_complet']} | Admin:{wa}")
         wa_owner(f"↩️ *ACCORD ANNULÉ*\nAdmin  : {wa}\nMembre : {passage['nom_complet']}\nTontine: {tnom}")
         return (f"✅ Accord sur le passage #{passage_id} annulé : le bouffage de "
