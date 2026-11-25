@@ -8,9 +8,10 @@ l'orchestrateur métier par choix d'architecture (le HTML vivait déjà dans
 dashboard.html ; la logique Python le rejoint ici).
 
 Câblage par INJECTION DE DÉPENDANCES (pas d'import de barack_corp → zéro import
-circulaire) :
+circulaire), fait une seule fois par katechon.routes.enregistrer_routes(app) ;
+un second appel sur la même app lèverait (endpoint déjà présent) :
 
-    import dashboard
+    from katechon.handlers import dashboard
     dashboard.register_dashboard(
         app,
         get_conn=get_conn, release_conn=release_conn,
@@ -28,7 +29,8 @@ from datetime import datetime
 
 from flask import request, jsonify, session, Response
 
-_DASHBOARD_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+# dashboard.html reste à la racine du dépôt (deux dossiers au-dessus de katechon/handlers/).
+_DASHBOARD_HTML_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                                     "dashboard.html")
 
 
@@ -43,7 +45,7 @@ def register_dashboard(app, *, get_conn, release_conn, bot_start, dash_token,
         bot_start    : datetime de démarrage du bot (pour l'uptime).
         dash_token   : token secret d'accès (str) ; vide => accès refusé.
         logger       : logger pour les erreurs.
-        html_path    : chemin du dashboard.html (défaut : sibling).
+        html_path    : chemin du dashboard.html (défaut : racine du dépôt).
     """
     _dashboard_html = open(html_path, encoding="utf-8").read()
 

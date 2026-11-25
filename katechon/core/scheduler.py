@@ -61,7 +61,7 @@ from katechon.finance.supervision import (
 )
 from katechon.finance.trust_graph import alerter_risques_bouffage_imminent, lever_pauses_echues
 from katechon.messaging.whatsapp import GREENAPI_INSTANCE_ID, OWNER_WA, _expediteur, _outbox_drain
-from owner import envoyer_releve_fmp_post_bouffage, rapport_groupes_fin_journee
+from katechon.handlers.owner import envoyer_releve_fmp_post_bouffage, rapport_groupes_fin_journee
 
 __all__ = ["PUBLIC_URL", "detecter_url_publique", "tester_connexion_postgresql",
     "creer_base_postgresql", "demarrer_scheduler", "_demarrage", "_demarrage_lock",
@@ -276,7 +276,9 @@ def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: Optional[int] = N
     L'initialisation ne s'exécute qu'une fois par processus, même sous appels
     simultanés ; un appel ultérieur avec servir=True sert quand même HTTP."""
     port = PORT if port is None else port
+    from katechon.routes import enregistrer_routes   # import tardif : scheduler reste léger
     with _demarrage_lock:
+        enregistrer_routes(app)   # idempotent : webhook et dashboard même sans le point d'entrée
         if not _demarrage["initialise"]:
             _initialiser(hote, port)
         scheduler = _demarrage["scheduler"]
