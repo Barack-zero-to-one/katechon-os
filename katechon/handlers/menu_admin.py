@@ -1225,7 +1225,12 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         mid = cur.fetchone()[0]
         conn.commit()
         release_conn(conn)
-        inscrire_dans_tontine(mid, tid)
+        try:
+            inscrire_dans_tontine(mid, tid)
+        except Exception as e:
+            # Le membre est créé ; l'inscription a échoué (tontine pleine...) : l'admin le sait.
+            sess["etape"] = "menu"
+            return f"❌ {nom} ({num}) est enregistré mais pas inscrit dans *{tnom}* : {e}"
         log_audit("AJOUT_MANUEL", f"{nom} par admin {wa}", num)
         wa_prive(num,
             f"👋 Bienvenue *{nom}* dans Barack Corp !\n"

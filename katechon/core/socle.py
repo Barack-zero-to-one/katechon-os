@@ -180,50 +180,62 @@ def inscrire_dans_tontine(membre_id: int, tontine_id: int,
     """
     Inscrit un membre dans une tontine et l'ajoute à la liste de passage.
     Vérifie : capacité max, doublon.
+
+    Sous le verrou d'ordre de la tontine (verrou_ordre_tontine), la place
+    suivante est libre par construction : l'insertion se fait sans ON CONFLICT,
+    que PostgreSQL refuse sur la contrainte DEFERRABLE (tontine, cycle, ordre).
+    La connexion est rendue au pool sur tous les chemins, erreur comprise.
     """
-    conn    = get_conn()
-    membre  = fetchone(conn,
-        "SELECT nom_complet FROM membres WHERE id=%s", (membre_id,))
-    if not membre:
-        release_conn(conn)
-        raise ValueError(f"Membre {membre_id} introuvable.")
+    conn = get_conn()
+    try:
+        membre = fetchone(conn,
+            "SELECT nom_complet FROM membres WHERE id=%s", (membre_id,))
+        if not membre:
+            raise ValueError(f"Membre {membre_id} introuvable.")
 
-    tontine = fetchone(conn,
-        "SELECT capacite_max, cycle_actuel, nom FROM tontines WHERE id=%s", (tontine_id,))
-    if not tontine:
-        release_conn(conn)
-        raise ValueError(f"Tontine {tontine_id} introuvable.")
+        tontine = fetchone(conn,
+            "SELECT capacite_max, cycle_actuel, nom FROM tontines WHERE id=%s", (tontine_id,))
+        if not tontine:
+            raise ValueError(f"Tontine {tontine_id} introuvable.")
 
-    nb_actuel = fetchone(conn,
-        "SELECT COUNT(*) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
-        (tontine_id,))["n"]
-    if nb_actuel + nb_places > tontine["capacite_max"]:
-        release_conn(conn)
-        raise ValueError(
-            f"Tontine pleine : {nb_actuel}/{tontine['capacite_max']} membres.")
+        verrou_ordre_tontine(conn, tontine_id)  # sérialise capacité et ordres de cette tontine
 
-    # Adhésion
-    q(conn, """
-        INSERT INTO adhesions (membre_id, tontine_id, nombre_places)
-        VALUES (%s,%s,%s)
-        ON CONFLICT (membre_id, tontine_id)
-        DO UPDATE SET nombre_places=EXCLUDED.nombre_places, statut='Actif'
-    """, (membre_id, tontine_id, nb_places))
+        nb_actuel = fetchone(conn,
+            "SELECT COUNT(*) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
+            (tontine_id,))["n"]
+        if nb_actuel + nb_places > tontine["capacite_max"]:
+            raise ValueError(
+                f"Tontine pleine : {nb_actuel}/{tontine['capacite_max']} membres.")
 
-    # Ajouter à la liste de passage
-    cycle     = tontine["cycle_actuel"]
-    ordre_max = fetchone(conn,
-        "SELECT COALESCE(MAX(ordre),0) m FROM liste_passage WHERE tontine_id=%s AND cycle=%s",
-        (tontine_id, cycle))["m"]
-    for i in range(nb_places):
-        ordre_max += 1
+        # Adhésion (UNIQUE ordinaire sur membre_id, tontine_id : ON CONFLICT accepté)
         q(conn, """
-            INSERT INTO liste_passage (tontine_id, membre_id, cycle, ordre)
-            VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING
-        """, (tontine_id, membre_id, cycle, ordre_max))
+            INSERT INTO adhesions (membre_id, tontine_id, nombre_places)
+            VALUES (%s,%s,%s)
+            ON CONFLICT (membre_id, tontine_id)
+            DO UPDATE SET nombre_places=EXCLUDED.nombre_places, statut='Actif'
+        """, (membre_id, tontine_id, nb_places))
 
-    conn.commit()
-    release_conn(conn)
+        # Ajouter à la liste de passage, après le dernier ordre du cycle courant
+        cycle     = tontine["cycle_actuel"]
+        ordre_max = fetchone(conn,
+            "SELECT COALESCE(MAX(ordre),0) m FROM liste_passage WHERE tontine_id=%s AND cycle=%s",
+            (tontine_id, cycle))["m"]
+        for i in range(nb_places):
+            ordre_max += 1
+            q(conn, """
+                INSERT INTO liste_passage (tontine_id, membre_id, cycle, ordre)
+                VALUES (%s,%s,%s,%s)
+            """, (tontine_id, membre_id, cycle, ordre_max))
+
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        release_conn(conn)
     log.info(f"✅ Membre {membre_id} → tontine {tontine_id} ({nb_places} place(s))")
     log_audit("INSCRIPTION_TONTINE",
               f"Membre {membre_id} → {tontine['nom']} ({nb_places}p)")
