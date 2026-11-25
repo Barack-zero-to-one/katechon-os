@@ -467,7 +467,7 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
                 f"🤖 *TontineBot Pro — {group_name}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Tontine configurée avec succès !\n\n"
-                f"✅ *{inscrits} membre(s) auto-inscrit(s)* — aucun frais d'adhésion requis.\n\n"
+                f"✅ *{inscrits} membre(s) auto-inscrit(s)* — inscription automatique, aucune démarche requise pour l'instant.\n\n"
                 f"📸 Continuez à envoyer vos screenshots de cotisation comme d'habitude.\n\n"
                 f"📋 La vérification d'identité (KYC) sera demandée à chacun "
                 f"à la *fin du cycle en cours*.\n\n"
