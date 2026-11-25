@@ -16,10 +16,10 @@ from datetime import datetime, time, timedelta
 import ira_engine
 import psycopg2.extras
 from katechon.security import screenshot_integrity as si
-from audit import log_audit
-from db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
-from health import healed
-from socle import (
+from katechon.core.audit import log_audit
+from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
+from katechon.core.health import healed
+from katechon.core.socle import (
     FRAIS_FMP,
     HEURE_LIMITE_DEF,
     IRA_CLIFF_PCT,
@@ -33,7 +33,7 @@ from socle import (
     normaliser_numero,
     valider_numero_cameroun,
 )
-from whatsapp import wa_admins_tontine, wa_groupe, wa_owner, wa_prive, wa_quitter_groupe
+from katechon.messaging.whatsapp import wa_admins_tontine, wa_groupe, wa_owner, wa_prive, wa_quitter_groupe
 
 __all__ = ["hash_screenshot", "screenshot_deja_utilise", "enregistrer_screenshot",
     "reference_deja_utilisee", "enregistrer_reference", "screenshot_near_duplicate",

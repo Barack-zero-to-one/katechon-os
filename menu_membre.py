@@ -13,12 +13,12 @@ import re
 import time as time_module
 from typing import Optional
 
-from audit import log_audit
-from db import fetchall, fetchone, get_conn, q, release_conn
-from etat import _sessions_kyc, _sessions_lock, _sessions_membre, session_valide
-from messages import MENU_MEMBRE_TXT, MSG_BIENVENUE_DM, msg_dissuasion
+from katechon.core.audit import log_audit
+from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn
+from katechon.core.etat import _sessions_kyc, _sessions_lock, _sessions_membre, session_valide
+from katechon.messaging.messages import MENU_MEMBRE_TXT, MSG_BIENVENUE_DM, msg_dissuasion
 from paiement import traiter_reponse_numero_bouffage
-from socle import (
+from katechon.core.socle import (
     FRAIS_CHGNUM,
     FRAIS_FMP,
     NUMERO_BADF_MTN,
@@ -27,7 +27,7 @@ from socle import (
     normaliser_numero,
     valider_numero_cameroun,
 )
-from whatsapp import wa_admin, wa_prive
+from katechon.messaging.whatsapp import wa_admin, wa_prive
 
 __all__ = ["_demarrer_collecte_nom", "traiter_kyc", "_finaliser_nom", "traiter_menu_membre",
     "_repondre_rang", "_repondre_caution", "_init_paiement_cotisation"]

@@ -16,8 +16,8 @@ from pathlib import Path
 
 import requests
 
-import wa_dispatch
-from db import get_conn, release_conn, fetchone, fetchall
+from katechon.messaging import wa_dispatch
+from katechon.core.db import get_conn, release_conn, fetchone, fetchall
 
 __all__ = [
     "GREENAPI_INSTANCE_ID", "GREENAPI_TOKEN", "GREENAPI_BASE", "OWNER_WA",

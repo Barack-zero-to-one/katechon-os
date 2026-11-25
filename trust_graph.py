@@ -11,10 +11,10 @@ calculer_score_risque_fugue.
 import logging
 from datetime import datetime
 
-from audit import log_audit
-from db import get_conn, q, release_conn, fetchone, fetchall
-from health import healed
-from whatsapp import wa_prive, wa_owner
+from katechon.core.audit import log_audit
+from katechon.core.db import get_conn, q, release_conn, fetchone, fetchall
+from katechon.core.health import healed
+from katechon.messaging.whatsapp import wa_prive, wa_owner
 
 __all__ = [
     "_update_score_confiance", "POIDS_MAX_TRUST_GRAPH", "_agreger_score_risque_fugue",

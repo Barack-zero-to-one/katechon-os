@@ -17,7 +17,7 @@ import time as time_module
 from pathlib import Path
 
 from katechon.security.rate_limiter import RateLimiter
-from socle import SESSION_TIMEOUT
+from katechon.core.socle import SESSION_TIMEOUT
 
 __all__ = ["WAITRESS_THREADS", "RATE_LIMIT_MAX", "RATE_LIMIT_FENETRE", "RATE_LIMIT_GLOBAL_MAX",
     "_sessions_membre", "_sessions_admin", "_sessions_kyc", "_sessions_config", "_rate_limiter",

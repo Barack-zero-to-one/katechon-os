@@ -17,9 +17,9 @@ import time as time_module
 import requests
 from katechon.security import screenshot_integrity as si
 from katechon.security import webhook_security as ws
-from audit import log_audit
-from db import fetchone, get_conn, q, release_conn
-from etat import _download_executor, _msg_executor, _sessions_config, rate_limit_ok
+from katechon.core.audit import log_audit
+from katechon.core.db import fetchone, get_conn, q, release_conn
+from katechon.core.etat import _download_executor, _msg_executor, _sessions_config, rate_limit_ok
 from flask import jsonify, request
 from groupe import (
     _bot_ajoute_groupe,
@@ -39,7 +39,7 @@ from paiement import (
     screenshot_deja_utilise,
     screenshot_near_duplicate,
 )
-from socle import (
+from katechon.core.socle import (
     GREENAPI_WEBHOOK_SECRET,
     MEDIA_MAX_BYTES,
     _replay_guard,
@@ -49,7 +49,7 @@ from socle import (
     incrementer_tentatives_fraude,
     normaliser_numero,
 )
-from whatsapp import OWNER_WA, wa_prive
+from katechon.messaging.whatsapp import OWNER_WA, wa_prive
 
 __all__ = ["webhook_whatsapp_verify", "_traiter_groupe_participants", "webhook_whatsapp_greenapi",
     "_greenapi_telecharger_media", "_traiter_message_greenapi",

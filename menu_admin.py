@@ -15,11 +15,11 @@ import re
 import time as time_module
 from datetime import datetime
 
-import wa_dispatch
-from audit import log_audit
-from db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
-from etat import _sessions_admin, session_valide
-from messages import MENU_ADMIN_TXT, MENU_CAS_DIFFICILES, msg_dissuasion, parser_liste_passage
+from katechon.messaging import wa_dispatch
+from katechon.core.audit import log_audit
+from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
+from katechon.core.etat import _sessions_admin, session_valide
+from katechon.messaging.messages import MENU_ADMIN_TXT, MENU_CAS_DIFFICILES, msg_dissuasion, parser_liste_passage
 from paiement import (
     _get_retardataires,
     _solder_versement,
@@ -32,7 +32,7 @@ from paiement import (
     rejeter_cotisation,
     saisir_caution_et_compenser_groupe,
 )
-from socle import (
+from katechon.core.socle import (
     FRAIS_FMP,
     FRAIS_REACTIV,
     IRA_CAP_PCT,
@@ -54,7 +54,7 @@ from trust_graph import (
     commande_admin_score_risque,
     message_pause_refusee,
 )
-from whatsapp import OWNER_WA, wa_groupe, wa_kick_membre, wa_owner, wa_prive
+from katechon.messaging.whatsapp import OWNER_WA, wa_groupe, wa_kick_membre, wa_owner, wa_prive
 
 __all__ = ["kick_membre_si_bot_admin", "wa_mentionner_retardataires",
     "_passer_a_cotisation_suivante", "traiter_menu_admin"]
