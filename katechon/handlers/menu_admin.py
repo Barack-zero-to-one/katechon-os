@@ -65,18 +65,18 @@ log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie incha
 def _membre_de_la_tontine(conn, numero: str, tid: int, tnom: str):
     """Membre de la tontine de la session admin, recherché par numéro.
 
-    Retourne (membre, None) s'il a une adhésion dans cette tontine. Sinon
-    (None, refus) : refus est le message à renvoyer si le numéro appartient à
-    un membre d'une autre tontine, None s'il est inconnu (le flux garde alors
-    son propre message). Aucune action admin ne peut viser un autre groupe.
+    Retourne (membre, None) s'il a une adhésion dans cette tontine qu'il n'a
+    pas quittée. Sinon (None, refus), avec la même réponse pour un numéro
+    inconnu et pour le membre d'une autre tontine : un admin ne peut ni agir
+    sur un autre groupe, ni sonder l'annuaire du réseau.
     """
     membre = fetchone(conn, """SELECT * FROM membres WHERE whatsapp=%s
-                               AND id IN (SELECT membre_id FROM adhesions WHERE tontine_id=%s)""",
+                               AND id IN (SELECT membre_id FROM adhesions
+                                          WHERE tontine_id=%s AND statut <> 'Quitte')""",
                       (numero, tid))
     if membre:
         return membre, None
-    ailleurs = fetchone(conn, "SELECT id FROM membres WHERE whatsapp=%s", (numero,))
-    return None, (f"❌ Ce numéro n'est pas membre de {tnom}." if ailleurs else None)
+    return None, f"❌ Ce numéro n'est pas membre de {tnom}."
 
 
 def kick_membre_si_bot_admin(membre_id: int, tontine_id: int, raison: str = "") -> bool:
@@ -778,6 +778,15 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             sess["etape"] = "menu"
             return f"ℹ️ {m['nom_complet']} n'est pas suspendu (statut: {m['statut_global']})."
         conn = get_conn()
+        # La suspension est globale : seule la tontine qui l'a prononcée la lève.
+        derniere = fetchone(conn, """SELECT tontine_id FROM sanctions
+                                     WHERE membre_id=%s AND type_sanction='Suspension_72h'
+                                     ORDER BY date_sanction DESC, id DESC LIMIT 1""", (m["id"],))
+        if derniere and derniere["tontine_id"] is not None and derniere["tontine_id"] != tid:
+            release_conn(conn)
+            sess["etape"] = "menu"
+            return (f"❌ {m['nom_complet']} a été suspendu dans une autre tontine : "
+                    f"seul son admin peut lever cette suspension.")
         q(conn, "UPDATE membres SET statut_global='Actif' WHERE id=%s", (m["id"],))
         q(conn, "UPDATE adhesions SET statut='Actif' WHERE membre_id=%s AND tontine_id=%s", (m["id"], tid))
         conn.commit()
@@ -801,19 +810,19 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         txs     = fetchall(conn, """
             SELECT type_transaction, montant_brut, frais_fmp, frais_ira,
                    montant_net, statut, date_heure, periodes_payees
-            FROM transactions WHERE membre_id=%s ORDER BY date_heure DESC LIMIT 20
-        """, (m["id"],))
+            FROM transactions WHERE membre_id=%s AND tontine_id=%s ORDER BY date_heure DESC LIMIT 20
+        """, (m["id"], tid))
         adhs    = fetchall(conn, """
             SELECT t.nom, a.statut, a.nombre_places, a.jours_avance
             FROM adhesions a JOIN tontines t ON t.id=a.tontine_id
-            WHERE a.membre_id=%s
-        """, (m["id"],))
+            WHERE a.membre_id=%s AND a.tontine_id=%s
+        """, (m["id"], tid))
         caution = fetchone(conn,
             "SELECT COALESCE(SUM(montant),0) t FROM cautions_garantie "
-            "WHERE membre_id=%s AND statut='Bloquee'", (m["id"],))["t"]
+            "WHERE membre_id=%s AND tontine_id=%s AND statut='Bloquee'", (m["id"], tid))["t"]
         sanctions = fetchall(conn,
             "SELECT type_sanction, date_sanction, notes FROM sanctions "
-            "WHERE membre_id=%s ORDER BY date_sanction DESC LIMIT 5", (m["id"],))
+            "WHERE membre_id=%s AND tontine_id=%s ORDER BY date_sanction DESC LIMIT 5", (m["id"], tid))
         release_conn(conn)
         lines = [
             f"🔍 *HISTORIQUE — {m['nom_complet']}*",
@@ -1002,7 +1011,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         m2, refus_m2 = _membre_de_la_tontine(conn, num2, tid, tnom)
         if not m2:
             release_conn(conn)
-            return refus_m2 or "❌ Cessionnaire non trouvé."
+            return f"❌ Le bénéficiaire doit d'abord être membre de {tnom} (option 11 pour l'ajouter)."
+        if m2["id"] == sess["data"].get("cas_mbr_id"):
+            release_conn(conn)
+            return "❌ Le cédant et le bénéficiaire doivent être deux membres différents."
         d    = sess["data"]
         t_db = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
         q(conn, """UPDATE liste_passage SET membre_id=%s
@@ -1047,8 +1059,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "exoner_type":
         d    = sess["data"]
         t    = texte.upper()
+        if t == "0":
+            sess["etape"] = "menu"
+            return "↩️ Exonération annulée."
         if t not in ("A", "B", "C"):
-            return "❌ Tapez A, B ou C."
+            return "❌ Tapez A, B ou C (0 pour annuler)."
         conn = get_conn()
         if t in ("A", "C"):
             # Seules les dettes IRA de CETTE tontine : celles d'un autre groupe
@@ -1724,8 +1739,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         num      = normaliser_numero(parts[1])
         raison   = parts[2] if len(parts) > 2 else "Retiré par l'admin"
         conn     = get_conn()
-        membre   = fetchone(conn,
-            "SELECT id, nom_complet, whatsapp FROM membres WHERE whatsapp=%s", (num,))
+        membre, _ = _membre_de_la_tontine(conn, num, tid, tnom)   # nom et DM seulement pour un membre du groupe
         tontine  = fetchone(conn,
             "SELECT whatsapp_groupe, bot_est_admin, nom FROM tontines WHERE id=%s", (tid,))
         release_conn(conn)
