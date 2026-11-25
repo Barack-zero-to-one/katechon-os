@@ -400,14 +400,14 @@ def _owner_membres_stats() -> str:
     try:
         total   = fetchone(conn, "SELECT COUNT(*) n FROM membres")["n"]
         actifs  = fetchone(conn, "SELECT COUNT(*) n FROM membres WHERE statut_global='Actif'")["n"]
-        suspendus = fetchone(conn, "SELECT COUNT(*) n FROM membres WHERE statut_global='Suspendu'")["n"]
+        suspendus = fetchone(conn, "SELECT COUNT(*) n FROM membres WHERE statut_global='Suspendu_global'")["n"]
         bannis  = fetchone(conn, "SELECT COUNT(*) n FROM membres WHERE statut_global='Banni'")["n"]
         nouveaux_j = fetchone(conn, """
-            SELECT COUNT(*) n FROM membres WHERE created_at::date = CURRENT_DATE
+            SELECT COUNT(*) n FROM membres WHERE date_adhesion::date = CURRENT_DATE
         """)["n"]
         nouveaux_m = fetchone(conn, """
             SELECT COUNT(*) n FROM membres
-            WHERE created_at >= date_trunc('month', CURRENT_DATE)
+            WHERE date_adhesion >= date_trunc('month', CURRENT_DATE)
         """)["n"]
         return (
             f"👥 *STATISTIQUES MEMBRES — BADF Ltd*\n"
@@ -442,15 +442,15 @@ def _owner_fugitifs_stats() -> str:
         # Liste des 5 derniers fugitifs
         derniers = fetchall(conn, """
             SELECT m.nom_complet, m.whatsapp, t.nom AS tontine,
-                   af.date_detection
+                   af.created_at
             FROM alertes_fugue af
             JOIN membres m ON m.id = af.membre_id
             JOIN tontines t ON t.id = af.tontine_id
-            ORDER BY af.date_detection DESC LIMIT 5
+            ORDER BY af.created_at DESC LIMIT 5
         """)
         lignes = []
         for f in derniers:
-            date = f["date_detection"].strftime("%d/%m/%Y") if f["date_detection"] else "?"
+            date = f["created_at"].strftime("%d/%m/%Y") if f["created_at"] else "?"
             lignes.append(f"  {f['nom_complet']} — {f['tontine']} ({date})")
 
         return (
