@@ -40,6 +40,9 @@ from katechon.core.socle import (
     IRA_DAILY_PCT,
     NUMERO_BADF_MTN,
     NUMERO_BADF_ORANGE,
+    msg_bouffage_a_regler,
+    BouffageARegler,
+    bouffage_a_regler,
     enregistrer_liste_passage,
     est_owner,
     get_tontines_admin,
@@ -65,6 +68,7 @@ log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie incha
 # Sanctions qui mettent le membre en Suspendu_global ; chacune porte la tontine
 # qui l'a prononcée (tontine_id) et sa levée éventuelle (levee_le).
 _TYPES_SUSPENSION = ("Suspension_72h", "Interception_bouffage", "Fugue_post_bouffage")
+
 
 
 def _membre_de_la_tontine(conn, numero: str, tid: int, tnom: str, inclure_partis: bool = False):
@@ -339,7 +343,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             FROM liste_passage
             WHERE tontine_id=%s AND cycle=%s AND statut='En_attente'
         """, (tid, cycle_chk))
+        # Avant toute demande de confirmation : un tour bloqué ou approuvé interdit le remplacement.
+        a_regler = bouffage_a_regler(conn_chk, tid)
         release_conn(conn_chk)
+        if a_regler:
+            return msg_bouffage_a_regler(a_regler)
 
         if liste_existante and liste_existante["n"] > 0:
             # Une liste existe déjà — demander confirmation avant d'écraser
@@ -369,7 +377,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                 sess["data"].pop("confirme_remplacement", None)
             else:
                 return "Tapez *OUI* pour remplacer ou *NON* pour annuler."
-        nb_ok, nb_non_lies = enregistrer_liste_passage(tid, lignes_parsees, wa)
+        try:
+            nb_ok, nb_non_lies = enregistrer_liste_passage(tid, lignes_parsees, wa)
+        except BouffageARegler as e:
+            sess["data"].pop("liste_en_attente", None)
+            return msg_bouffage_a_regler(e.args[0])
 
         # Construire le récapitulatif
         recap_lignes = [
@@ -1067,6 +1079,15 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             return f"❌ Le bénéficiaire doit d'abord être membre de {tnom} (option 11 pour l'ajouter)."
         d    = sess["data"]
         t_db = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
+        # Le retrait prime sur le soupçon : un tour bloqué ou approuvé non versé est libéré
+        # (Cede), jamais transmis au cessionnaire : ni interception, ni versement sur l'accord
+        # d'un autre. Un tour en cours de versement (verrouillé) est attendu puis ignoré.
+        q(conn, """UPDATE liste_passage
+                   SET statut='Cede', bloque_suspect=0, date_blocage=NULL,
+                       debloque_le=NULL, debloque_pour=NULL, bouffage_complet=0
+                   WHERE tontine_id=%s AND membre_id=%s AND cycle=%s AND statut='En_attente'
+                     AND (bloque_suspect=1 OR debloque_le IS NOT NULL)""",
+          (tid, d["cas_mbr_id"], t_db["cycle_actuel"]))
         q(conn, """UPDATE liste_passage SET membre_id=%s
                    WHERE tontine_id=%s AND membre_id=%s AND cycle=%s AND statut='En_attente'""",
           (m2["id"], tid, d["cas_mbr_id"], t_db["cycle_actuel"]))
@@ -1308,6 +1329,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     # ── Option 13 : Saisir l'ordre initial de bouffage ───────────────────
     elif texte == "13" and sess["etape"] == "menu":
         conn    = get_conn()
+        a_regler = bouffage_a_regler(conn, tid)
+        if a_regler:
+            release_conn(conn)
+            return msg_bouffage_a_regler(a_regler)
         membres = fetchall(conn, """
             SELECT m.id, m.nom_complet, lp.ordre
             FROM adhesions a
@@ -1354,6 +1379,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         except ValueError:
             return "❌ Format invalide. Entrez des numéros séparés par des virgules."
         conn = get_conn()
+        a_regler = bouffage_a_regler(conn, tid, verrouiller=True)
+        if a_regler:
+            release_conn(conn)
+            sess["etape"] = "menu"
+            return msg_bouffage_a_regler(a_regler)
         cycle = fetchone(conn,
             "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))["cycle_actuel"]
         # Réinitialiser la liste de passage et recréer dans le bon ordre
@@ -1684,66 +1714,20 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             "   ↩️  *0* → retour menu"
         )
 
-    # ── Commande BOUFFAGE_COMPLET — cas grave, admin donne tout ─────────
-    if texte.upper().startswith("BOUFFAGE_COMPLET ") and sess["etape"] == "menu":
-        parts = texte.strip().split(None, 2)
-        if len(parts) < 2 or not parts[1].isdigit():
-            return "❌ Format : *BOUFFAGE_COMPLET 42 raison*"
-        passage_id = int(parts[1])
-        raison     = parts[2] if len(parts) > 2 else "Cas exceptionnel — décision admin"
-        conn = get_conn()
-        passage = fetchone(conn, """
-            SELECT lp.*, m.nom_complet, m.whatsapp
-            FROM liste_passage lp
-            LEFT JOIN membres m ON m.id = lp.membre_id
-            WHERE lp.id=%s AND lp.tontine_id=%s AND lp.bloque_suspect=1
-        """, (passage_id, tid))
-        if not passage:
-            release_conn(conn)
-            return f"❌ Passage suspect #{passage_id} introuvable."
-
-        # Anti-fraude : un admin ne peut pas accorder son propre bouffage
-        if passage.get("whatsapp") == wa:
-            release_conn(conn)
-            return "❌ Vous ne pouvez pas accorder un bouffage sur votre propre numéro."
-
-        # Réinitialiser le blocage + déclencher bouffage complet
-        q(conn, """UPDATE liste_passage
-                   SET statut='En_attente', bloque_suspect=0, date_blocage=NULL
-                   WHERE id=%s""", (passage_id,))
-        conn.commit()
-        release_conn(conn)
-
-        log_audit("BOUFFAGE_COMPLET_ADMIN",
-                  f"Passage#{passage_id} | {passage['nom_complet']} | "
-                  f"Admin:{wa} | Raison:{raison}")
-        wa_owner(
-            f"✅ *BOUFFAGE COMPLET ACCORDÉ*\n"
-            f"Admin   : {wa}\n"
-            f"Membre  : {passage['nom_complet']}\n"
-            f"Tontine : {tnom}\n"
-            f"Raison  : {raison}"
-        )
-        return (
-            f"✅ Bouffage complet accordé à *{passage['nom_complet']}*.\n"
-            f"Raison : _{raison}_\n\n"
-            f"Il recevra la cagnotte intégrale à la prochaine heure de bouffage.\n"
-            f"Cette décision a été notifiée au owner BADF."
-        )
-
-    # ── Commande DEBLOQUER — débloquer un bouffage suspendu ──────────────
-    if texte.upper().startswith("DEBLOQUER ") and sess["etape"] == "menu":
+    # ── Commande ANNULER_ACCORD — retirer un accord pas encore versé ─────
+    # Le tour redevient bloqué (contrôle suspect) : l'admin peut le débloquer à nouveau,
+    # sinon le job d'expiration l'intercepte 48 h plus tard. Seule issue pour un accord
+    # qui ne peut plus être versé (membre suspendu ou banni depuis l'accord).
+    if texte.upper().startswith("ANNULER_ACCORD ") and sess["etape"] == "menu":
         parts = texte.strip().split()
         if len(parts) < 2 or not parts[1].isdigit():
-            return "❌ Format : *DEBLOQUER 42* (ID du passage)"
+            return "❌ Format : *ANNULER_ACCORD 42* (ID du passage)"
         passage_id = int(parts[1])
         conn = get_conn()
         try:
-            # Ligne verrouillée le temps de la vérification et de la mise à jour : deux
-            # DEBLOQUER simultanés se sérialisent. (Le job des bouffages suspects expirés
-            # ne verrouille pas ses lignes : cette course-là reste à corriger côté job.)
             passage = fetchone(conn, """
-                SELECT lp.*, m.nom_complet, m.whatsapp, t.cycle_actuel
+                SELECT lp.statut, lp.debloque_le, lp.echec_le, lp.bloque_suspect,
+                       lp.cycle, t.cycle_actuel, m.nom_complet
                 FROM liste_passage lp
                 JOIN tontines t ON t.id = lp.tontine_id
                 LEFT JOIN membres m ON m.id = lp.membre_id
@@ -1752,9 +1736,70 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             """, (passage_id, tid))
             if not passage:
                 return f"❌ Passage #{passage_id} introuvable pour cette tontine."
+            abandon = (passage["statut"] == "En_attente" and not passage["debloque_le"]
+                       and passage["echec_le"] and not passage["bloque_suspect"])
+            if abandon:
+                # Tour en échec technique : on renonce à sa reprise automatique.
+                q(conn, "UPDATE liste_passage SET echec_le=NULL WHERE id=%s", (passage_id,))
+                conn.commit()
+            elif passage["statut"] != "En_attente" or not passage["debloque_le"] \
+                    or passage["cycle"] != passage["cycle_actuel"]:
+                return f"❌ Le passage #{passage_id} n'a pas d'accord en attente de versement : rien à annuler."
+            else:
+                q(conn, """UPDATE liste_passage
+                       SET bloque_suspect=1, date_blocage=NOW(),
+                           debloque_le=NULL, debloque_pour=NULL, bouffage_complet=0
+                       WHERE id=%s""", (passage_id,))
+                conn.commit()
+        finally:
+            release_conn(conn)
+        if abandon:
+            log_audit("REPRISE_ABANDONNEE", f"Passage#{passage_id} | {passage['nom_complet']} | Admin:{wa}")
+            return (f"✅ Reprise automatique du passage #{passage_id} abandonnée : ce tour de "
+                    f"*{passage['nom_complet']}* ne sera plus versé automatiquement.")
+        log_audit("ACCORD_ANNULE", f"Passage#{passage_id} | {passage['nom_complet']} | Admin:{wa}")
+        wa_owner(f"↩️ *ACCORD ANNULÉ*\nAdmin  : {wa}\nMembre : {passage['nom_complet']}\nTontine: {tnom}")
+        return (f"✅ Accord sur le passage #{passage_id} annulé : le bouffage de "
+                f"*{passage['nom_complet']}* est de nouveau bloqué. Sans DEBLOQUER sous 48 h, "
+                f"il sera intercepté.")
+
+    # ── Commandes BOUFFAGE_COMPLET (cagnotte intégrale) et DEBLOQUER — accord de l'admin ──
+    if (texte.upper().startswith("BOUFFAGE_COMPLET ") or texte.upper().startswith("DEBLOQUER ")) \
+            and sess["etape"] == "menu":
+        complet = texte.upper().startswith("BOUFFAGE_COMPLET ")
+        if complet:
+            parts = texte.strip().split(None, 2)
+            if len(parts) < 2 or not parts[1].isdigit():
+                return "❌ Format : *BOUFFAGE_COMPLET 42 raison*"
+            raison = parts[2] if len(parts) > 2 else "Cas exceptionnel — décision admin"
+        else:
+            parts = texte.strip().split()
+            if len(parts) < 2 or not parts[1].isdigit():
+                return "❌ Format : *DEBLOQUER 42* (ID du passage)"
+        passage_id = int(parts[1])
+        conn = get_conn()
+        try:
+            # Ligne verrouillée : deux décisions simultanées se sérialisent, et le job des
+            # bouffages suspects expirés relit la ligne sous verrou avant d'intercepter.
+            passage = fetchone(conn, """
+                SELECT lp.*, m.nom_complet, m.whatsapp, m.statut_global, t.cycle_actuel, t.heure_bouffage,
+                       t.statut AS statut_tontine, a.statut AS statut_adhesion
+                FROM liste_passage lp
+                JOIN tontines t ON t.id = lp.tontine_id
+                LEFT JOIN membres m ON m.id = lp.membre_id
+                LEFT JOIN adhesions a ON a.membre_id = lp.membre_id AND a.tontine_id = lp.tontine_id
+                WHERE lp.id=%s AND lp.tontine_id=%s
+                FOR UPDATE OF lp
+            """, (passage_id, tid))
+            if not passage:
+                return f"❌ Passage #{passage_id} introuvable pour cette tontine."
+            if passage["statut_tontine"] != "Active":
+                # Le job de bouffage ne sert que les tontines actives : un accord ici
+                # promettrait un versement qui ne viendrait pas.
+                return (f"❌ {tnom} n'est pas active (statut : {passage['statut_tontine']}) : "
+                        f"aucun bouffage ne peut être versé pour l'instant.")
             # Seul un bouffage retenu par le contrôle suspect et encore en attente se
-            # débloque : remettre en attente un tour payé, cédé ou intercepté le
-            # ferait repayer à la prochaine heure de bouffage.
+            # débloque : remettre en attente un tour payé, cédé ou intercepté le ferait repayer.
             if passage["statut"] != "En_attente":
                 return (f"❌ Le passage #{passage_id} n'est pas un bouffage bloqué en attente "
                         f"(statut : {passage['statut']}) : rien à débloquer.")
@@ -1763,33 +1808,60 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             if passage["cycle"] != passage["cycle_actuel"]:
                 return (f"❌ Le passage #{passage_id} appartient au cycle {passage['cycle']}, "
                         f"terminé : rien à débloquer.")
-            # Même garde-fou que BOUFFAGE_COMPLET : pas d'auto-déblocage.
             if passage.get("whatsapp") == wa:
                 return "❌ Vous ne pouvez pas débloquer votre propre bouffage."
+            if passage["membre_id"] and (passage["statut_global"] in ("Suspendu_global", "Banni")
+                                         or passage["statut_adhesion"] != "Actif"):
+                # Le job ne verse pas à un membre inactif : l'accord promettrait un versement fictif.
+                return (f"❌ {passage['nom_complet']} n'est pas actif dans {tnom} (suspendu, banni ou sorti) : "
+                        f"son bouffage ne peut pas être versé. Réactivez-le d'abord (option 5), puis "
+                        f"débloquez ; sinon ce tour sera intercepté à l'expiration de son blocage de 48 h.")
+            # Accord lié au titulaire actuel : une cession ou une nouvelle liste l'annule.
             q(conn, """UPDATE liste_passage
-                       SET bloque_suspect=0, date_blocage=NULL
-                       WHERE id=%s""", (passage_id,))
+                       SET bloque_suspect=0, date_blocage=NULL,
+                           debloque_le=NOW(), debloque_pour=%s, bouffage_complet=%s
+                       WHERE id=%s""", (passage["membre_id"], 1 if complet else 0, passage_id))
+            # Un autre tour du membre encore bloqué suspend ce versement (voir _payer_passage).
+            autre_bloque = fetchone(conn, """
+                SELECT COUNT(*) AS n FROM liste_passage
+                WHERE tontine_id=%s AND membre_id=%s AND cycle=%s AND statut='En_attente'
+                  AND bloque_suspect=1 AND id<>%s""",
+                (tid, passage["membre_id"], passage["cycle_actuel"], passage_id))["n"]
             conn.commit()
         finally:
             release_conn(conn)
+        heure = passage.get("heure_bouffage") or "17:00"
+        avertissement = (f"\n⚠️ Un autre tour de {passage['nom_complet']} est encore bloqué : ce "
+                         f"versement attend que ce blocage soit levé." if autre_bloque else "")
+        if complet:
+            log_audit("BOUFFAGE_COMPLET_ADMIN",
+                      f"Passage#{passage_id} | {passage['nom_complet']} | "
+                      f"Admin:{wa} | Raison:{raison}")
+            wa_owner(
+                f"✅ *BOUFFAGE COMPLET ACCORDÉ*\n"
+                f"Admin   : {wa}\n"
+                f"Membre  : {passage['nom_complet']}\n"
+                f"Tontine : {tnom}\n"
+                f"Raison  : {raison}"
+            )
+            return (
+                f"✅ Bouffage complet accordé à *{passage['nom_complet']}*.\n"
+                f"Raison : _{raison}_\n\n"
+                f"Il recevra la cagnotte intégrale à la prochaine heure de bouffage ({heure}).\n"
+                f"Cette décision a été notifiée au owner BADF."
+            ) + avertissement
         log_audit("BOUFFAGE_DEBLOQUE",
                   f"Passage#{passage_id} | {passage['nom_complet']} | Admin:{wa}")
         wa_owner(
             f"✅ *BOUFFAGE DÉBLOQUÉ*\n"
             f"Admin  : {wa}\n"
             f"Membre : {passage['nom_complet']}\n"
-            f"Tontine: {tnom}\n"
-            f"⚠️ Virement à organiser : le bouffage automatique ne reprend pas un tour "
-            f"dont l'heure est passée."
+            f"Tontine: {tnom}"
         )
-        # Message honnête : le job horaire ne paie que le tour du jour à son heure ; un
-        # tour débloqué après coup n'est plus intercepté, mais il n'est pas repayé seul.
         return (
-            f"✅ Blocage levé pour *{passage['nom_complet']}* : son bouffage ne sera "
-            f"ni intercepté ni sa caution saisie.\n"
-            f"⚠️ Le bouffage automatique ne reprend pas un tour dont l'heure est passée : "
-            f"le owner BADF est prévenu pour organiser le virement."
-        )
+            f"✅ Bouffage de *{passage['nom_complet']}* débloqué.\n"
+            f"Il sera versé à la prochaine heure de bouffage ({heure})."
+        ) + avertissement
 
     # ── Commande NOUVEAU_CYCLE — relancer un cycle après fin de cycle ────
     if texte.upper() == "NOUVEAU_CYCLE" and sess["etape"] == "menu":

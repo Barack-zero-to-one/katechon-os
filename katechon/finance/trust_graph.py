@@ -868,7 +868,11 @@ def commande_admin_cas_resolu(wa_admin: str, args_texte: str) -> str:
             q(conn, "UPDATE adhesions SET statut='Quitte' WHERE membre_id=%s AND tontine_id=%s",
               (c["membre_id"], c["tontine_id"]))
             # Comme une cession (menu 9 C) : ses tours non servis ne seront pas payés.
-            q(conn, """UPDATE liste_passage SET statut='Cede'
+            # Un tour bloqué ou approuvé est libéré avec le reste : le retrait prime sur le
+            # soupçon (ni interception ni saisie de caution).
+            q(conn, """UPDATE liste_passage
+                       SET statut='Cede', bloque_suspect=0, date_blocage=NULL,
+                           debloque_le=NULL, debloque_pour=NULL, bouffage_complet=0
                        WHERE membre_id=%s AND tontine_id=%s AND statut='En_attente'""",
               (c["membre_id"], c["tontine_id"]))
         q(conn, "UPDATE cas_difficiles SET statut='Termine' WHERE id = ANY(%s)", ([x["id"] for x in cas],))

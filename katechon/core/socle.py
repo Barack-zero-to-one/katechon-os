@@ -23,7 +23,7 @@ from katechon.messaging.messages import msg_dissuasion
 from katechon.finance.trust_graph import _update_score_confiance
 from katechon.messaging.whatsapp import OWNER_WA, wa_admin, wa_owner, wa_prive
 
-__all__ = ["FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "IRA_HOURLY_PCT",
+__all__ = ["BouffageARegler", "bouffage_a_regler", "msg_bouffage_a_regler", "FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "IRA_HOURLY_PCT",
     "IRA_CAP_PCT", "IRA_FLOOR", "IRA_GRACE_MIN", "FRAIS_REACTIV", "FRAIS_CHGNUM",
     "NUMERO_BADF_MTN", "NUMERO_BADF_ORANGE", "MAX_TENTATIVES_FRAUDE", "GREENAPI_WEBHOOK_SECRET",
     "WEBHOOK_REPLAY_TTL", "_replay_guard", "MEDIA_MAX_BYTES", "SESSION_TIMEOUT",
@@ -78,6 +78,69 @@ MEDIA_MAX_BYTES = int(os.getenv("MEDIA_MAX_BYTES", str(15 * 1024 * 1024)))  # 15
 SESSION_TIMEOUT = 300
 
 
+class BouffageARegler(Exception):
+    """Un tour bloqué ou approuvé mais impayé interdit de reconstruire la liste.
+    args[0] : les tours concernés, tels que renvoyés par bouffage_a_regler."""
+
+
+def msg_bouffage_a_regler(tours, action: str = "modifier la liste") -> str:
+    """Refus nommant chaque tour et l'issue qui lui correspond (bloqué ou approuvé)."""
+    bloques   = [f"#{x['id']}" for x in tours if x["etat"] == "bloque"]
+    approuves = [f"#{x['id']} approuvé" for x in tours if x["etat"] == "approuve"]
+    echecs    = [f"#{x['id']} en échec technique" for x in tours if x["etat"] == "echec"]
+    parties = []
+    if bloques:
+        parties.append("passage " + ", ".join(bloques) + " bloqué : DEBLOQUER, BOUFFAGE_COMPLET "
+                       "ou interception à l'expiration du blocage")
+    if approuves:
+        parties.append("passage " + ", ".join(approuves) + " : versé à la prochaine heure de "
+                       "bouffage, ou ANNULER_ACCORD")
+    if echecs:
+        parties.append("passage " + ", ".join(echecs) + " : réessayé à la prochaine heure de "
+                       "bouffage, ou ANNULER_ACCORD pour abandonner sa reprise")
+    return ("❌ Un bouffage bloqué ou approuvé attend son règlement (" + " ; ".join(parties)
+            + f") : impossible de {action} avant.")
+
+
+_SQL_A_REGLER = """
+    SELECT lp.id, lp.bloque_suspect, lp.debloque_le
+    FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
+    WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
+      AND (%s::int IS NULL OR lp.membre_id = %s::int)
+      AND (lp.bloque_suspect = 1 OR lp.debloque_le IS NOT NULL OR lp.echec_le IS NOT NULL)
+    ORDER BY lp.ordre"""
+
+_SQL_A_REGLER_VERROU = """
+    SELECT lp.id, lp.bloque_suspect, lp.debloque_le, lp.echec_le
+    FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
+    WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
+      AND (%s::int IS NULL OR lp.membre_id = %s::int)
+    ORDER BY lp.ordre
+    FOR UPDATE OF lp"""
+
+
+def bouffage_a_regler(conn, tontine_id: int, membre_id: int = None, verrouiller: bool = False) -> list:
+    """Tours ({"id", "approuve"}) du cycle en cours bloqués (contrôle suspect) ou approuvés
+    (DEBLOQUER, BOUFFAGE_COMPLET) sans avoir encore été versés.
+
+    Tant qu'il y en a, ni une cession ni une nouvelle liste ne doivent changer le
+    titulaire ou supprimer le tour : l'accord serait perdu, ou la sanction du job
+    d'expiration frapperait un autre membre. Avec `verrouiller`, tous les tours en
+    attente sont verrouillés (FOR UPDATE) dans la transaction de l'appelant : un
+    blocage posé par le job de bouffage pendant la modification est attendu puis vu.
+    """
+    if not verrouiller:
+        lignes = fetchall(conn, _SQL_A_REGLER, (tontine_id, membre_id, membre_id))
+    else:
+        lignes = [l for l in fetchall(conn, _SQL_A_REGLER_VERROU, (tontine_id, membre_id, membre_id))
+                  if l["bloque_suspect"] or l["debloque_le"] or l["echec_le"]]
+    # Un tour en échec technique compte aussi : sinon une nouvelle liste le supprimerait sans
+    # qu'il soit jamais repris ; ANNULER_ACCORD permet d'abandonner sa reprise.
+    return [{"id": l["id"],
+             "etat": "bloque" if l["bloque_suspect"] else "approuve" if l["debloque_le"] else "echec"}
+            for l in lignes]
+
+
 def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tuple:
     """
     Enregistre la liste parsée dans liste_passage.
@@ -87,6 +150,11 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
     """
     conn  = get_conn()
     verrou_ordre_tontine(conn, tontine_id)  # FORTERESSE : sérialise l'ordre de cette tontine
+    a_regler = bouffage_a_regler(conn, tontine_id, verrouiller=True)
+    if a_regler:
+        conn.rollback()
+        release_conn(conn)
+        raise BouffageARegler(a_regler)
     cycle = fetchone(conn,
         "SELECT cycle_actuel FROM tontines WHERE id=%s", (tontine_id,))["cycle_actuel"]
 

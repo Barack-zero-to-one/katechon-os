@@ -13,6 +13,8 @@ import os
 import shutil
 import subprocess
 import time as time_module
+
+import psycopg2
 from datetime import datetime, timedelta
 
 from katechon.core.audit import log_audit
@@ -80,12 +82,24 @@ def traiter_bouffages_suspects_expires():
             JOIN tontines t ON t.id  = lp.tontine_id
             WHERE lp.bloque_suspect = 1
               AND lp.statut = 'En_attente'
+              AND t.statut = 'Active'          -- tontine en pause : l'admin ne peut pas débloquer
+              AND lp.cycle = t.cycle_actuel
               AND lp.date_blocage < NOW() - INTERVAL '48 hours'
         """)
 
         for p in passages:
             membre_id  = p["mbr_id"]
             tontine_id = p["tontine_id"]
+            # Relu sous verrou : un DEBLOQUER ou BOUFFAGE_COMPLET validé depuis la lecture
+            # l'emporte ; le tour n'est alors ni intercepté ni la caution saisie.
+            if not fetchone(conn, """SELECT lp.id FROM liste_passage lp
+                                     JOIN tontines t ON t.id = lp.tontine_id
+                                     WHERE lp.id=%s AND lp.bloque_suspect=1 AND lp.statut='En_attente'
+                                       AND lp.cycle = t.cycle_actuel AND t.statut = 'Active'
+                                       AND lp.date_blocage < NOW() - INTERVAL '48 hours'
+                                     FOR UPDATE OF lp""", (p["id"],)):
+                conn.rollback()
+                continue
 
             # Dettes IRA
             dettes_ira = fetchone(conn, """
@@ -156,6 +170,7 @@ def traiter_bouffages_suspects_expires():
                    "Dette résiduelle — bouffage suspect non débloqué"))
 
             # Virer le reliquat au membre si positif
+            a_virer = None
             if solde_membre > 0:
                 # montant_ira = 0 : les dettes IRA sont déjà soldées par la
                 # caution ci-dessus, ce reliquat n'en déduit aucune.
@@ -164,8 +179,9 @@ def traiter_bouffages_suspects_expires():
                             caution, montant_net, statut, montant_ira)
                            VALUES (%s,%s,%s,%s,0,%s,'En_attente',0)""",
                   (membre_id, tontine_id, p["id"], solde_membre, solde_membre))
-                conn.commit()
-                wa_admins_tontine(tontine_id,
+                # Pas de commit ici : il libérerait le verrou du tour avant l'interception.
+                # L'ordre de virement part après le commit (rien d'annoncé s'il échoue).
+                a_virer = (tontine_id,
                     f"💳 *À VIRER AU MEMBRE — {p['tontine_nom']}*\n\n"
                     f"Membre : *{p['nom_complet']}*\n"
                     f"Montant net après déduction dettes : *{solde_membre:,} FCFA*\n\n"
@@ -176,7 +192,7 @@ def traiter_bouffages_suspects_expires():
             # Marquer le passage comme intercepté
             q(conn, """UPDATE liste_passage
                        SET statut='Intercepte', bloque_suspect=0
-                       WHERE id=%s""", (p["id"],))
+                       WHERE id=%s AND bloque_suspect=1 AND statut='En_attente'""", (p["id"],))
 
             # Suspendre le membre, en traçant la tontine qui suspend (réactivation isolée)
             # (un membre banni le reste : jamais rétrogradé en suspendu levable)
@@ -187,6 +203,8 @@ def traiter_bouffages_suspects_expires():
                   (membre_id, tontine_id))
 
             conn.commit()
+            if a_virer:
+                wa_admins_tontine(*a_virer)
 
             # Notifier l'admin
             wa_admins_tontine(tontine_id,
@@ -334,43 +352,225 @@ def notifier_prochain_bouffage():
     heure_now = datetime.now().strftime("%H:00")
     today     = datetime.now().date()
     conn      = get_conn()
-    tontines  = fetchall(conn,
-        "SELECT * FROM tontines WHERE statut='Active' AND heure_bouffage=%s",
-        (heure_now,))
+    try:
+        tontines  = fetchall(conn,
+            "SELECT * FROM tontines WHERE statut='Active' AND heure_bouffage=%s",
+            (heure_now,))
 
-    for t in tontines:
-        passage = fetchone(conn, """
-            SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
-            FROM liste_passage lp
-            LEFT JOIN membres m ON m.id = lp.membre_id
-            WHERE lp.tontine_id=%s AND lp.cycle=%s
-              AND lp.statut='En_attente' AND lp.date_bouffage=%s
-            ORDER BY lp.ordre LIMIT 1
-        """, (t["id"], t["cycle_actuel"], today))
+        for t in tontines:
+            passage = fetchone(conn, """
+                SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
+                FROM liste_passage lp
+                LEFT JOIN membres m ON m.id = lp.membre_id
+                WHERE lp.tontine_id=%s AND lp.cycle=%s
+                  AND lp.statut='En_attente' AND lp.bloque_suspect=0 AND lp.date_bouffage=%s
+                ORDER BY lp.ordre LIMIT 1
+            """, (t["id"], t["cycle_actuel"], today))
 
-        if not passage:
-            continue
+            a_payer = [passage] if passage else []
+            # Rattrapage : tours débloqués par l'admin pour ce même titulaire, ou en échec
+            # technique, dont la date est passée ; payés APRÈS le tour du jour, qui n'est donc
+            # jamais remplacé.
+            a_payer += fetchall(conn, """
+                SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
+                FROM liste_passage lp
+                LEFT JOIN membres m ON m.id = lp.membre_id
+                WHERE lp.tontine_id=%s AND lp.cycle=%s
+                  AND lp.statut='En_attente' AND lp.bloque_suspect=0
+                  AND ((lp.debloque_le IS NOT NULL AND lp.debloque_pour = lp.membre_id)
+                       OR lp.echec_le IS NOT NULL)     -- tour en échec technique : repris ici
+                  AND lp.date_bouffage < %s
+                ORDER BY lp.date_bouffage, lp.ordre
+            """, (t["id"], t["cycle_actuel"], today))
+            for p in a_payer:
+                try:
+                    _payer_passage(conn, t, p, rattrapage=p.get("date_bouffage") != today)
+                except Exception as e:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    if p.get("_declenche") or _passage_notifie(conn, p.get("id")):
+                        # Versé (bouffage enregistré avec 'Notifie') ou bloqué : seules des
+                        # notifications ont échoué. Ni relance ni annonce d'échec (double versement) ;
+                        # le owner (sans base) vérifie que l'avis est bien parti.
+                        log.error(f"⚠️ bouffage passage#{p.get('id')} traité (versé ou bloqué), notifications incomplètes : {e}")
+                        try:
+                            wa_owner(
+                                f"⚠️ *AVIS INCOMPLET — {t['nom']}*\n\n"
+                                f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
+                                f"(passage #{p.get('id')}) est enregistré, mais ses messages n'ont pas "
+                                f"tous été envoyés. Vérifiez que le membre et les admins ont reçu l'avis ; "
+                                f"ne virez rien en dehors de BOUFFAGE_VIRE."
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    # Échec avant le versement : rien n'est commité. Le tour est marqué en échec
+                    # (echec_le) : la requête de rattrapage le reprend à la prochaine heure de
+                    # bouffage. Personne n'est jamais invité à virer à la main, donc une relance
+                    # (@healed, ou le rattrapage) ne peut pas doubler un versement manuel.
+                    try:
+                        q(conn, """UPDATE liste_passage SET echec_le=NOW()
+                                   WHERE id=%s AND statut='En_attente'""", (p.get("id"),))
+                        conn.commit()
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                    if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+                        # Panne de base : @healed relance le job, qui reprend le tour. Si la panne
+                        # dure au-delà des relances, echec_le n'a pas pu être écrit et rien ne
+                        # reprendra ce tour : le owner (prévenu sans passer par la base) vérifie.
+                        try:
+                            wa_owner(
+                                f"🛑 *PANNE DE BASE — {t['nom']}*\n\n"
+                                f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
+                                f"(passage #{p.get('id')}) a échoué : base injoignable. Relance "
+                                f"automatique en cours. Si la panne dure, vérifiez ce tour une fois la "
+                                f"base rétablie : sans bouffage enregistré, marquez-le en échec "
+                                f"(echec_le) pour que le rattrapage le reprenne. Ne virez rien à la main."
+                            )
+                        except Exception:
+                            pass
+                        raise
+                    log.error(f"❌ bouffage passage#{p.get('id')} tontine#{t['id']} : {e}")
+                    alerte = (
+                        f"⚠️ *BOUFFAGE NON DÉCLENCHÉ — {t['nom']}*\n\n"
+                        f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
+                        f"(passage #{p.get('id')}) n'a pas pu être déclenché : erreur technique.\n"
+                        f"Il sera réessayé automatiquement à la prochaine heure de bouffage : "
+                        f"ne virez rien à la main. Le owner BADF suit ce tour."
+                    )
+                    # Envois séparés, le owner d'abord : wa_admins_tontine passe par la base.
+                    for envoyer in (lambda: wa_owner(alerte), lambda: wa_admins_tontine(t["id"], alerte)):
+                        try:
+                            envoyer()
+                        except Exception:
+                            pass
+    finally:
+        release_conn(conn)
 
-        # Membre non encore enrôlé
-        if not passage.get("membre_id"):
+
+def _passage_notifie(conn, passage_id) -> bool:
+    """Le tour a-t-il été commité 'Notifie' (bouffage enregistré) ? Faux si on ne peut pas le lire."""
+    try:
+        etat = fetchone(conn, "SELECT statut FROM liste_passage WHERE id=%s", (passage_id,))
+        return bool(etat) and etat["statut"] == "Notifie"
+    except Exception:
+        return False
+
+
+def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> None:
+    """Calcule et déclenche le bouffage d'un tour (DM bénéficiaire, admin, groupe).
+
+    Un tour approuvé par l'admin (DEBLOQUER, BOUFFAGE_COMPLET) pour ce même membre
+    ne repasse pas le contrôle suspect ; un bouffage complet verse la cagnotte brute,
+    sans caution, IRA ni cotisations manquantes (les dettes IRA restent dues).
+    """
+    # Relu sous verrou (tenu jusqu'au commit 'Notifie' ou au blocage) : un ANNULER_ACCORD,
+    # une cession ou une nouvelle liste survenus depuis la lecture l'emportent.
+    actuel = fetchone(conn, """SELECT statut, bloque_suspect, membre_id, debloque_le,
+                                      debloque_pour, bouffage_complet
+                               FROM liste_passage WHERE id=%s FOR UPDATE""", (passage["id"],))
+    cles = ("statut", "bloque_suspect", "membre_id", "debloque_le", "debloque_pour", "bouffage_complet")
+    if not actuel or any(actuel[k] != passage.get(k) for k in cles):
+        conn.rollback()
+        if not rattrapage:
+            # Le tour du jour ne serait repris par aucun passage suivant : on prévient.
+            alerte = (
+                f"⚠️ *BOUFFAGE DU JOUR NON VERSÉ — {t['nom']}*\n\n"
+                f"Le passage #{passage['id']} a été modifié pendant son traitement "
+                f"(nouvelle liste, cession ou blocage) : il n'a pas été versé.\n"
+                f"Vérifiez la liste ; le owner BADF est prévenu."
+            )
+            for envoyer in (lambda: wa_owner(alerte), lambda: wa_admins_tontine(t["id"], alerte)):
+                try:
+                    envoyer()
+                except Exception:
+                    pass
+        return
+
+    approuve = bool(passage.get("debloque_le")) and passage.get("debloque_pour") == passage.get("membre_id")
+    complet  = approuve and bool(passage.get("bouffage_complet"))
+
+    if approuve and not fetchone(conn, """
+            SELECT 1 AS ok FROM membres m
+            JOIN adhesions a ON a.membre_id = m.id AND a.tontine_id = %s AND a.statut = 'Actif'
+            WHERE m.id = %s AND m.statut_global NOT IN ('Suspendu_global','Banni')""",
+            (t["id"], passage["membre_id"])):
+        # L'accord ne couvre pas une suspension, un bannissement ou une sortie survenus depuis.
+        conn.rollback()
+        try:
+            wa_admins_tontine(t["id"],
+                f"⚠️ *BOUFFAGE APPROUVÉ NON VERSÉ — {t['nom']}*\n\n"
+                f"*{passage.get('nom_complet') or '?'}* n'est plus actif dans la tontine "
+                f"(suspendu, banni ou sorti) : son bouffage approuvé (passage #{passage['id']}) "
+                f"n'est pas versé.\n\n"
+                f"Réactivez-le (option 5), ou tapez *ANNULER_ACCORD {passage['id']}* pour "
+                f"rebloquer ce tour.")
+        except Exception as e:
+            log.error(f"alerte accord non versé #{passage['id']} : {e}")
+        return
+
+    if approuve and fetchone(conn, """
+            SELECT 1 AS x FROM liste_passage lp JOIN tontines tt ON tt.id = lp.tontine_id
+            WHERE lp.tontine_id=%s AND lp.membre_id=%s AND lp.cycle = tt.cycle_actuel
+              AND lp.statut='En_attente' AND lp.bloque_suspect=1""",
+            (t["id"], passage["membre_id"])):
+        # Un signal suspect plus récent sur un autre tour du membre (bloqué à l'instant,
+        # ou encore en attente de décision) suspend l'accord : rien n'est versé tant
+        # que ce blocage n'est pas levé.
+        conn.rollback()
+        try:
+            wa_admins_tontine(t["id"],
+                f"⏸️ *BOUFFAGE APPROUVÉ SUSPENDU — {t['nom']}*\n\n"
+                f"Un autre tour de *{passage.get('nom_complet') or '?'}* vient d'être bloqué "
+                f"par le contrôle suspect : son bouffage approuvé (passage #{passage['id']}) "
+                f"n'est pas versé tant que ce blocage n'est pas levé (DEBLOQUER), "
+                f"ou tapez *ANNULER_ACCORD {passage['id']}*.")
+        except Exception as e:
+            log.error(f"alerte accord suspendu #{passage['id']} : {e}")
+        return
+
+    # Membre non encore enrôlé
+    if not passage.get("membre_id"):
+        conn.rollback()   # libère le verrou du tour avant l'envoi
+        try:
             wa_admins_tontine(t["id"],
                 f"⚠️ *BOUFFAGE BLOQUÉ — {t['nom']}*\n\n"
                 f"Le bénéficiaire *{passage.get('nickname','?')}* "
                 f"n'est pas encore enrôlé.\n\n"
                 f"Demandez-lui de taper *menu* en DM au bot.")
-            continue
+        except Exception as e:
+            log.error(f"alerte non enrôlé #{passage['id']} : {e}")
+        return
 
-        # ── Vérification historique cotisation avant bouffage ────────────
-        # Détecte le schéma : mauvais payeur qui cotise juste avant son tour
-        alerte_suspect = _verifier_historique_avant_bouffage(
-            conn, passage["mbr_id"], t["id"], passage["ordre"]
-        )
-        if alerte_suspect:
-            # Bloquer le bouffage — admin doit valider manuellement
-            q(conn, """UPDATE liste_passage
-                       SET statut='En_attente', bloque_suspect=1, date_blocage=NOW()
-                       WHERE id=%s""", (passage["id"],))
-            conn.commit()
+    # ── Vérification historique cotisation avant bouffage ────────────
+    # Détecte le schéma : mauvais payeur qui cotise juste avant son tour
+    alerte_suspect = None if approuve else _verifier_historique_avant_bouffage(
+        conn, passage["mbr_id"], t["id"], passage["ordre"]
+    )
+    if alerte_suspect:
+        # Bloquer le bouffage — admin doit valider manuellement
+        q(conn, """UPDATE liste_passage
+                   SET statut='En_attente', bloque_suspect=1, date_blocage=NOW()
+                   WHERE id=%s""", (passage["id"],))
+        conn.commit()
+        # Blocage commité : au-delà, une erreur d'envoi ne doit pas passer pour un
+        # versement raté. Le owner d'abord (sans base), chaque envoi isolé.
+        passage["_declenche"] = True
+        try:
+            wa_owner(
+                f"🚨 *BOUFFAGE SUSPECT BLOQUÉ*\n"
+                f"Tontine : {t['nom']}\n"
+                f"Membre  : {passage['nom_complet']}\n"
+                f"Raison  : {alerte_suspect}"
+            )
+        except Exception as e:
+            log.error(f"alerte owner blocage #{passage['id']} : {e}")
+        try:
             wa_admins_tontine(t["id"],
                 f"🚨 *BOUFFAGE SUSPENDU — {t['nom']}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -382,178 +582,181 @@ def notifier_prochain_bouffage():
                 f"*admin* → option *DEBLOQUER {passage['id']}*\n\n"
                 f"_TontineBot Pro — BADF Ltd_"
             )
-            wa_owner(
-                f"🚨 *BOUFFAGE SUSPECT BLOQUÉ*\n"
-                f"Tontine : {t['nom']}\n"
-                f"Membre  : {passage['nom_complet']}\n"
-                f"Raison  : {alerte_suspect}"
-            )
-            log_audit("BOUFFAGE_SUSPECT_BLOQUE",
-                      f"{passage['nom_complet']} | {t['nom']} | {alerte_suspect}",
-                      passage["whatsapp"])
-            continue
+        except Exception as e:
+            log.error(f"alerte admins blocage #{passage['id']} : {e}")
+        log_audit("BOUFFAGE_SUSPECT_BLOQUE",
+                  f"{passage['nom_complet']} | {t['nom']} | {alerte_suspect}",
+                  passage["whatsapp"])
+        return
 
-        # ── Trust Graph — alerte admin au moment du bouffage ─────────────────
-        score_trust = calculer_score_risque_fugue(conn, passage["mbr_id"], t["id"])
-        if score_trust["niveau"] == "erreur":
-            # Échec du calcul — ne JAMAIS traiter comme "zéro risque" (fail-open).
-            # Le bouffage se poursuit (pas de blocage automatique sur une erreur
-            # technique), mais l'admin est prévenu pour vérification manuelle.
-            wa_admins_tontine(t["id"],
-                f"⚠️ *SCORE DE RISQUE INDISPONIBLE — {t['nom']}*\n\n"
-                f"Le calcul du score de risque a échoué pour "
-                f"*{passage['nom_complet']}* au moment de son bouffage.\n"
-                f"Le bouffage se poursuit normalement — vérifiez sa situation "
-                f"manuellement si besoin.\n\n"
-                f"_TontineBot Pro — BADF Ltd_"
-            )
-            log_audit("TRUST_GRAPH_ERREUR",
-                      f"{passage['nom_complet']} | {t['nom']}", passage.get("whatsapp", ""))
-        elif score_trust["niveau"] in ("orange", "rouge"):
-            emoji_tg = "🔴" if score_trust["niveau"] == "rouge" else "🟠"
-            signaux_txt = "\n".join(f"  • {s}" for s in score_trust["signaux"])
-            wa_admins_tontine(t["id"],
-                f"{emoji_tg} *ALERTE TRUST GRAPH — BOUFFAGE IMMINENT — {t['nom']}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Bénéficiaire : *{passage['nom_complet']}*\n"
-                f"Score fugue  : *{score_trust['score']}/100* {emoji_tg}\n\n"
-                f"Signaux :\n{signaux_txt}\n\n"
-                f"👉 *{score_trust['recommandation']}*\n\n"
-                f"Le bouffage se déclenche normalement. C'est vous qui décidez.\n\n"
-                f"_TontineBot Pro — BADF Ltd_"
-            )
-            log_audit("BOUFFAGE_TRUST_ALERTE",
-                      f"{passage['nom_complet']} | Score:{score_trust['score']} | {t['nom']}",
-                      passage.get("whatsapp", ""))
-
-        # Calcul financier — SUM(nombre_places), pas COUNT(*) : un membre peut détenir plusieurs places
-        nb_places    = fetchone(conn,
-            "SELECT COALESCE(SUM(nombre_places),0) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
-            (t["id"],))["n"]
-        montant_brut = nb_places * t["montant_place"]
-        caution_pct  = t["caution_pourcent"] if t["caution_active"] else 0
-        caution_mont = int(montant_brut * caution_pct / 100)
-
-        # Dettes IRA
-        dettes_ira  = fetchall(conn,
-            "SELECT id, montant FROM dettes_ira WHERE membre_id=%s AND tontine_id=%s AND statut='Due'",
-            (passage["mbr_id"], t["id"]))
-        total_ira   = sum(d["montant"] for d in dettes_ira)
-
-        # Cotisations manquantes — ce qu'il devait payer avant son tour
-        cotis_payees     = fetchone(conn, """
-            SELECT COUNT(*) n FROM transactions
-            WHERE membre_id=%s AND tontine_id=%s
-              AND type_transaction='Cotisation' AND statut='Confirmee'
-        """, (passage["mbr_id"], t["id"]))["n"]
-        cotis_attendues  = passage["ordre"]  # il devait cotiser autant de fois que son rang
-        cotis_manquantes = max(0, cotis_attendues - cotis_payees)
-        _places_benef = fetchone(conn,
-            "SELECT nombre_places FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
-            (passage["mbr_id"], t["id"]))
-        nb_places_benef = (_places_benef["nombre_places"] if _places_benef else 1) or 1
-        dette_cotis      = cotis_manquantes * t["montant_place"] * nb_places_benef
-
-        # Montant net final = cagnotte - caution - IRA - cotisations manquantes
-        montant_net = max(0, montant_brut - caution_mont - total_ira - dette_cotis)
-
-        # Résumé déductions pour l'admin
-        deductions_txt = f"  Cagnotte brute      : *{montant_brut:,} FCFA*\n"
-        if caution_mont > 0:
-            deductions_txt += f"  Caution 10%         : *-{caution_mont:,} FCFA*\n"
-        if total_ira > 0:
-            deductions_txt += f"  Pénalités IRA       : *-{total_ira:,} FCFA*\n"
-        if dette_cotis > 0:
-            deductions_txt += (
-                f"  Cotis manquantes    : *-{dette_cotis:,} FCFA*"
-                f" ({cotis_manquantes} × {t['montant_place']:,})\n"
-            )
-        deductions_txt += f"  ─────────────────────────\n"
-        deductions_txt += f"  *NET À VIRER        : {montant_net:,} FCFA*"
-
-        # Déclencher le bouffage manuel
-        q(conn, "UPDATE liste_passage SET statut='Notifie' WHERE id=%s",
-          (passage["id"],))
-        conn.commit()
-
-        # La caution dans declencher_bouffage_manuel inclut toutes les déductions
-        total_deductions = caution_mont + total_ira + dette_cotis
-        bouffage_id = declencher_bouffage_manuel(
-            conn         = conn,
-            membre_id    = passage["mbr_id"],
-            tontine_id   = t["id"],
-            passage_id   = passage["id"],
-            montant_brut = montant_brut,
-            caution      = total_deductions,
-            deductions_detail = deductions_txt,
-            caution_reelle    = caution_mont,
-            dettes_ira        = dettes_ira,
-        )
-
-        # Enregistrer la caution en base (informatif)
-        if caution_mont > 0:
-            try:
-                q(conn, """INSERT INTO cautions_garantie
-                           (membre_id, tontine_id, passage_id, montant, pourcent)
-                           VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
-                  (passage["mbr_id"], t["id"], passage["id"],
-                   caution_mont, caution_pct))
-                conn.commit()
-            except Exception:
-                pass
-
-        # ── Bordereau transparent au bénéficiaire AVANT le virement ──────
-        # Le membre voit le calcul ligne par ligne. Diminue 80% des contestations.
-        bordereau = (
-            f"🧾 *BORDEREAU DE BOUFFAGE*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"*{passage['nom_complet']}*\n"
-            f"{t['nom']} — Cycle {t.get('cycle_actuel', 1)}\n\n"
-            f"💰 *Cagnotte brute* : *{montant_brut:,} FCFA*\n"
-        )
-        if caution_mont > 0:
-            bordereau += (
-                f"\n🔒 *Caution 10%* : -{caution_mont:,} FCFA\n"
-                f"   _Cette caution n'est pas perdue._\n"
-                f"   _Elle vous sera rendue intégralement_\n"
-                f"   _à la fin du cycle si vous continuez_\n"
-                f"   _à cotiser jusqu'au bout._\n"
-            )
-        if total_ira > 0:
-            bordereau += (
-                f"\n⏰ *Pénalités IRA* : -{total_ira:,} FCFA\n"
-                f"   _150 FCFA × jours de retard accumulés_\n"
-                f"   _sur vos cotisations passées._\n"
-            )
-        if dette_cotis > 0:
-            bordereau += (
-                f"\n📋 *Cotisations manquantes* : -{dette_cotis:,} FCFA\n"
-                f"   _{cotis_manquantes} cotisation(s) non payée(s)_\n"
-                f"   _× {t['montant_place']:,} FCFA chacune._\n"
-            )
-        bordereau += (
-            f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💵 *NET À RECEVOIR : {montant_net:,} FCFA*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"L'administrateur va vous virer ce montant\n"
-            f"sur votre Mobile Money dans les prochaines heures.\n\n"
+    # ── Trust Graph — alerte admin au moment du bouffage ─────────────────
+    score_trust = calculer_score_risque_fugue(conn, passage["mbr_id"], t["id"])
+    if score_trust["niveau"] == "erreur":
+        # Échec du calcul — ne JAMAIS traiter comme "zéro risque" (fail-open).
+        # Le bouffage se poursuit (pas de blocage automatique sur une erreur
+        # technique), mais l'admin est prévenu pour vérification manuelle.
+        wa_admins_tontine(t["id"],
+            f"⚠️ *SCORE DE RISQUE INDISPONIBLE — {t['nom']}*\n\n"
+            f"Le calcul du score de risque a échoué pour "
+            f"*{passage['nom_complet']}* au moment de son bouffage.\n"
+            f"Le bouffage se poursuit normalement — vérifiez sa situation "
+            f"manuellement si besoin.\n\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
-        wa_prive(passage["whatsapp"], bordereau)
+        log_audit("TRUST_GRAPH_ERREUR",
+                  f"{passage['nom_complet']} | {t['nom']}", passage.get("whatsapp", ""))
+    elif score_trust["niveau"] in ("orange", "rouge") and not approuve:   # déjà décidé par l'admin
+        emoji_tg = "🔴" if score_trust["niveau"] == "rouge" else "🟠"
+        signaux_txt = "\n".join(f"  • {s}" for s in score_trust["signaux"])
+        wa_admins_tontine(t["id"],
+            f"{emoji_tg} *ALERTE TRUST GRAPH — BOUFFAGE IMMINENT — {t['nom']}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Bénéficiaire : *{passage['nom_complet']}*\n"
+            f"Score fugue  : *{score_trust['score']}/100* {emoji_tg}\n\n"
+            f"Signaux :\n{signaux_txt}\n\n"
+            f"👉 *{score_trust['recommandation']}*\n\n"
+            f"Le bouffage se déclenche normalement. C'est vous qui décidez.\n\n"
+            f"_TontineBot Pro — BADF Ltd_"
+        )
+        log_audit("BOUFFAGE_TRUST_ALERTE",
+                  f"{passage['nom_complet']} | Score:{score_trust['score']} | {t['nom']}",
+                  passage.get("whatsapp", ""))
 
-        # Annonce dans le groupe (sans montant — discrétion)
-        if t.get("whatsapp_groupe"):
-            wa_groupe(t["whatsapp_groupe"],
-                f"🏆 *{t['nom']} — BOUFFAGE DU JOUR*\n\n"
-                f"Le bénéficiaire du jour a été notifié en message privé.\n"
-                f"Les cotisations continuent normalement.\n\n"
-                f"_TontineBot Pro — BADF Ltd_")
+    # Calcul financier — SUM(nombre_places), pas COUNT(*) : un membre peut détenir plusieurs places
+    nb_places    = fetchone(conn,
+        "SELECT COALESCE(SUM(nombre_places),0) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
+        (t["id"],))["n"]
+    montant_brut = nb_places * t["montant_place"]
+    caution_pct  = t["caution_pourcent"] if t["caution_active"] else 0
+    caution_mont = int(montant_brut * caution_pct / 100)
 
-        log.info(f"Bouffage déclenché : {passage['nom_complet']} — {t['nom']}")
-        log_audit("BOUFFAGE_DECLENCHE",
-                  f"{passage['nom_complet']} | {t['nom']} | {montant_net:,} FCFA")
+    # Dettes IRA
+    dettes_ira  = fetchall(conn,
+        "SELECT id, montant FROM dettes_ira WHERE membre_id=%s AND tontine_id=%s AND statut='Due'",
+        (passage["mbr_id"], t["id"]))
+    total_ira   = sum(d["montant"] for d in dettes_ira)
 
-    release_conn(conn)
+    # Cotisations manquantes — ce qu'il devait payer avant son tour
+    cotis_payees     = fetchone(conn, """
+        SELECT COUNT(*) n FROM transactions
+        WHERE membre_id=%s AND tontine_id=%s
+          AND type_transaction='Cotisation' AND statut='Confirmee'
+    """, (passage["mbr_id"], t["id"]))["n"]
+    cotis_attendues  = passage["ordre"]  # il devait cotiser autant de fois que son rang
+    cotis_manquantes = max(0, cotis_attendues - cotis_payees)
+    _places_benef = fetchone(conn,
+        "SELECT nombre_places FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
+        (passage["mbr_id"], t["id"]))
+    nb_places_benef = (_places_benef["nombre_places"] if _places_benef else 1) or 1
+    dette_cotis      = cotis_manquantes * t["montant_place"] * nb_places_benef
+
+    if complet:
+        # BOUFFAGE_COMPLET : cagnotte intégrale, rien n'est retenu ; les dettes IRA restent dues.
+        caution_mont, dettes_ira, total_ira = 0, [], 0
+        cotis_manquantes, dette_cotis = 0, 0
+
+    # Montant net final = cagnotte - caution - IRA - cotisations manquantes
+    montant_net = max(0, montant_brut - caution_mont - total_ira - dette_cotis)
+
+    # Résumé déductions pour l'admin
+    deductions_txt = f"  Cagnotte brute      : *{montant_brut:,} FCFA*\n"
+    if caution_mont > 0:
+        deductions_txt += f"  Caution 10%         : *-{caution_mont:,} FCFA*\n"
+    if total_ira > 0:
+        deductions_txt += f"  Pénalités IRA       : *-{total_ira:,} FCFA*\n"
+    if dette_cotis > 0:
+        deductions_txt += (
+            f"  Cotis manquantes    : *-{dette_cotis:,} FCFA*"
+            f" ({cotis_manquantes} × {t['montant_place']:,})\n"
+        )
+    deductions_txt += f"  ─────────────────────────\n"
+    deductions_txt += f"  *NET À VIRER        : {montant_net:,} FCFA*"
+
+    # Déclencher le bouffage manuel
+    # Pas de commit ici : 'Notifie' est commité avec la ligne bouffages_manuels par
+    # declencher_bouffage_manuel, sinon une panne entre les deux perdrait le tour.
+    q(conn, "UPDATE liste_passage SET statut='Notifie' WHERE id=%s",
+      (passage["id"],))
+
+    # La caution dans declencher_bouffage_manuel inclut toutes les déductions
+    total_deductions = caution_mont + total_ira + dette_cotis
+    bouffage_id = declencher_bouffage_manuel(
+        conn         = conn,
+        membre_id    = passage["mbr_id"],
+        tontine_id   = t["id"],
+        passage_id   = passage["id"],
+        montant_brut = montant_brut,
+        caution      = total_deductions,
+        deductions_detail = deductions_txt,
+        caution_reelle    = caution_mont,
+        dettes_ira        = dettes_ira,
+        # Marqué dès le commit du bouffage, avant ses propres messages.
+        apres_commit      = lambda: passage.__setitem__("_declenche", True),
+    )
+
+    # Enregistrer la caution en base (informatif)
+    if caution_mont > 0:
+        try:
+            q(conn, """INSERT INTO cautions_garantie
+                       (membre_id, tontine_id, passage_id, montant, pourcent)
+                       VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+              (passage["mbr_id"], t["id"], passage["id"],
+               caution_mont, caution_pct))
+            conn.commit()
+        except Exception:
+            conn.rollback()   # sinon la transaction reste avortée pour le tour suivant
+
+    # ── Bordereau transparent au bénéficiaire AVANT le virement ──────
+    # Le membre voit le calcul ligne par ligne. Diminue 80% des contestations.
+    bordereau = (
+        f"🧾 *BORDEREAU DE BOUFFAGE*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"*{passage['nom_complet']}*\n"
+        f"{t['nom']} — Cycle {t.get('cycle_actuel', 1)}\n\n"
+        f"💰 *Cagnotte brute* : *{montant_brut:,} FCFA*\n"
+    )
+    if caution_mont > 0:
+        bordereau += (
+            f"\n🔒 *Caution 10%* : -{caution_mont:,} FCFA\n"
+            f"   _Cette caution n'est pas perdue._\n"
+            f"   _Elle vous sera rendue intégralement_\n"
+            f"   _à la fin du cycle si vous continuez_\n"
+            f"   _à cotiser jusqu'au bout._\n"
+        )
+    if total_ira > 0:
+        bordereau += (
+            f"\n⏰ *Pénalités IRA* : -{total_ira:,} FCFA\n"
+            f"   _150 FCFA × jours de retard accumulés_\n"
+            f"   _sur vos cotisations passées._\n"
+        )
+    if dette_cotis > 0:
+        bordereau += (
+            f"\n📋 *Cotisations manquantes* : -{dette_cotis:,} FCFA\n"
+            f"   _{cotis_manquantes} cotisation(s) non payée(s)_\n"
+            f"   _× {t['montant_place']:,} FCFA chacune._\n"
+        )
+    bordereau += (
+        f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 *NET À RECEVOIR : {montant_net:,} FCFA*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"L'administrateur va vous virer ce montant\n"
+        f"sur votre Mobile Money dans les prochaines heures.\n\n"
+        f"_TontineBot Pro — BADF Ltd_"
+    )
+    wa_prive(passage["whatsapp"], bordereau)
+
+    # Annonce dans le groupe (sans montant — discrétion)
+    if t.get("whatsapp_groupe") and not rattrapage:   # un rattrapage n'est pas le bouffage du jour
+        wa_groupe(t["whatsapp_groupe"],
+            f"🏆 *{t['nom']} — BOUFFAGE DU JOUR*\n\n"
+            f"Le bénéficiaire du jour a été notifié en message privé.\n"
+            f"Les cotisations continuent normalement.\n\n"
+            f"_TontineBot Pro — BADF Ltd_")
+
+    log.info(f"Bouffage déclenché : {passage['nom_complet']} — {t['nom']}")
+    log_audit("BOUFFAGE_DECLENCHE",
+              f"{passage['nom_complet']} | {t['nom']} | {montant_net:,} FCFA")
+
 
 
 def rappel_ouverture():

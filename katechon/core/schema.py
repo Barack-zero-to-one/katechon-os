@@ -354,6 +354,13 @@ def init_db():
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS date_blocage TIMESTAMPTZ",
         # Levée d'une suspension par l'admin de SA tontine (réactivation isolée par tontine).
         "ALTER TABLE sanctions ADD COLUMN IF NOT EXISTS levee_le TIMESTAMPTZ",
+        # Accord de l'admin sur un tour bloqué (DEBLOQUER, BOUFFAGE_COMPLET) : le job de
+        # bouffage rattrape ce tour, pour ce titulaire seulement (debloque_pour).
+        "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS debloque_le TIMESTAMPTZ",
+        "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS debloque_pour INTEGER",
+        "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS bouffage_complet INTEGER NOT NULL DEFAULT 0",
+        # Tour dont le versement a échoué techniquement : repris par le rattrapage, jamais à la main.
+        "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS echec_le TIMESTAMPTZ",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_ouverture TEXT NOT NULL DEFAULT '05:00'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_rappel TEXT NOT NULL DEFAULT '14:00'",
         "ALTER TABLE admins_groupe ADD COLUMN IF NOT EXISTS numero_collecte TEXT",

@@ -620,7 +620,8 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
                                 caution: int,
                                 deductions_detail: str = "",
                                 caution_reelle: int = None,
-                                dettes_ira: list = None) -> int:
+                                dettes_ira: list = None,
+                                apres_commit=None) -> int:
     """
     Déclenche le flux de bouffage manuel.
     DM au bénéficiaire pour son numéro MM.
@@ -657,6 +658,8 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
         q(conn, "UPDATE dettes_ira SET bouffage_id=%s WHERE id = ANY(%s) AND statut='Due'",
           (bouffage_id, [d["id"] for d in dettes_ira]))
     conn.commit()
+    if apres_commit:
+        apres_commit()   # l'appelant sait que le bouffage est enregistré, quoi qu'il arrive ensuite
 
     membre  = fetchone(conn,
         "SELECT nom_complet, whatsapp FROM membres WHERE id=%s", (membre_id,))
@@ -684,6 +687,13 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
               f"cette cagnotte, ne sont *pas* restituées (IRA de retard et/ou "
               f"cotisations manquantes).\n\n"
         )
+    elif caution == 0:
+        # Rien de retenu (bouffage complet, caution désactivée) : pas de section caution.
+        decompte = (
+            f"  Cagnotte brute    : {montant_brut:>10,} FCFA\n"
+            f"  ─────────────────────────────────\n"
+            f"  *MONTANT NET      : {montant_net:>10,} FCFA*\n\n"
+        )
     else:
         decompte = (
             f"  Cagnotte brute    : {montant_brut:>10,} FCFA\n"
@@ -701,7 +711,7 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*I. DÉCOMPTE FINANCIER*\n\n"
         f"{decompte}"
-        f"*III. INSTRUCTIONS*\n\n"
+        f"*{'II' if caution == 0 else 'III'}. INSTRUCTIONS*\n\n"   # sans retenue, pas de section II
         f"  Envoyez votre numéro Mobile Money, précédé de l'opérateur :\n\n"
         f"    *MTN +237690XXXXXX*\n"
         f"  ou\n"
@@ -752,7 +762,7 @@ def traiter_reponse_numero_bouffage(wa: str, texte: str, membre: dict):
             SELECT bm.*, t.nom AS tontine_nom
             FROM bouffages_manuels bm JOIN tontines t ON t.id = bm.tontine_id
             WHERE bm.membre_id=%s AND bm.statut='En_attente'
-            ORDER BY bm.id DESC LIMIT 1
+            ORDER BY (bm.expiration IS NULL), bm.id DESC LIMIT 1
         """, (membre["id"],))
         if not bouffage:
             return None
@@ -786,9 +796,17 @@ def traiter_reponse_numero_bouffage(wa: str, texte: str, membre: dict):
             if not b2 or b2["statut"] != "En_attente":
                 conn.rollback()
                 return "ℹ️ Ce bouffage a déjà été traité."
+            # Un membre peut avoir deux bouffages en attente (tour du jour + rattrapage, ou
+            # plusieurs places) : son numéro vaut pour tous ceux dont on lui a demandé le
+            # numéro (expiration renseignée) dans cette tontine, chacun annoncé à l'admin.
             cur.execute("""UPDATE bouffages_manuels
                            SET statut='Vire', numero_mm=%s, operateur_cashout=%s
-                           WHERE id=%s""", (numero, operateur, bouffage["id"]))
+                           WHERE membre_id=%s AND tontine_id=%s AND statut='En_attente'
+                             AND (id=%s OR (expiration IS NOT NULL
+                                            AND expiration > NOW() - INTERVAL '1 day'))
+                           RETURNING id, montant_net""",
+                        (numero, operateur, bouffage["membre_id"], bouffage["tontine_id"], bouffage["id"]))
+            regles = sorted(cur.fetchall(), key=lambda r: r["id"])
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -798,16 +816,18 @@ def traiter_reponse_numero_bouffage(wa: str, texte: str, membre: dict):
             cur.close()
 
         log_audit("BOUFFAGE_NUMERO_RECU",
-                  f"Bouffage#{bouffage['id']} | Membre#{membre['id']} | {numero} ({operateur})", wa)
+                  f"Bouffage#{','.join(str(r['id']) for r in regles)} | Membre#{membre['id']} | "
+                  f"{numero} ({operateur})", wa)
 
         wa_admins_tontine(bouffage["tontine_id"],
             f"💸 *NUMÉRO REÇU — {bouffage['tontine_nom']}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Bénéficiaire : *{membre['nom_complet']}*\n"
-            f"Montant net  : *{bouffage['montant_net']:,} FCFA*\n"
-            f"Numéro MM    : *{numero}* ({'MTN' if operateur == 'cm.mtn' else 'Orange'})\n\n"
+            + "".join(f"Montant net  : *{r['montant_net']:,} FCFA* (bouffage #{r['id']})\n" for r in regles)
+            + f"Numéro MM    : *{numero}* ({'MTN' if operateur == 'cm.mtn' else 'Orange'})\n\n"
             f"Effectuez le virement, puis tapez :\n"
-            f"*admin {bouffage['tontine_nom']}* puis *BOUFFAGE_VIRE {bouffage['id']}*\n\n"
+            f"*admin {bouffage['tontine_nom']}* puis "
+            + " et ".join(f"*BOUFFAGE_VIRE {r['id']}*" for r in regles) + "\n\n"
             f"_TontineBot Pro — BADF Ltd_"
         )
         return (
