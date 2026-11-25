@@ -1669,7 +1669,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         passage_id = int(parts[1])
         conn = get_conn()
         passage = fetchone(conn, """
-            SELECT lp.*, m.nom_complet
+            SELECT lp.*, m.nom_complet, m.whatsapp
             FROM liste_passage lp
             LEFT JOIN membres m ON m.id = lp.membre_id
             WHERE lp.id=%s AND lp.tontine_id=%s
@@ -1677,7 +1677,20 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         if not passage:
             release_conn(conn)
             return f"❌ Passage #{passage_id} introuvable pour cette tontine."
-        q(conn, "UPDATE liste_passage SET statut='En_attente' WHERE id=%s",
+        # Seul un bouffage retenu par le contrôle suspect et encore en attente se
+        # débloque : remettre en attente un tour payé, cédé ou intercepté le
+        # ferait repayer à la prochaine heure de bouffage.
+        if passage["statut"] != "En_attente" or not passage["bloque_suspect"]:
+            release_conn(conn)
+            return (f"❌ Le passage #{passage_id} n'est pas un bouffage bloqué en attente "
+                    f"(statut : {passage['statut']}) : rien à débloquer.")
+        # Même garde-fou que BOUFFAGE_COMPLET : pas d'auto-déblocage.
+        if passage.get("whatsapp") == wa:
+            release_conn(conn)
+            return "❌ Vous ne pouvez pas débloquer votre propre bouffage."
+        q(conn, """UPDATE liste_passage
+                   SET bloque_suspect=0, date_blocage=NULL
+                   WHERE id=%s AND statut='En_attente' AND bloque_suspect=1""",
           (passage_id,))
         conn.commit()
         release_conn(conn)
