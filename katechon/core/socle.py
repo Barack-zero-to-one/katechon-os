@@ -79,33 +79,48 @@ SESSION_TIMEOUT = 300
 
 
 class BouffageARegler(Exception):
-    """Un tour bloqué ou approuvé mais impayé interdit de reconstruire la liste."""
+    """Un tour bloqué ou approuvé mais impayé interdit de reconstruire la liste.
+    args[0] : les ID des passages concernés."""
 
 
-MSG_BOUFFAGE_A_REGLER = ("❌ Un bouffage bloqué ou approuvé attend son règlement : réglez-le "
-                         "(DEBLOQUER, BOUFFAGE_COMPLET, ANNULER_ACCORD ou expiration du blocage) "
-                         "avant de modifier la liste.")
+def msg_bouffage_a_regler(ids) -> str:
+    return ("❌ Un bouffage bloqué ou approuvé attend son règlement (passage "
+            + ", ".join(f"#{i}" for i in ids)
+            + ") : réglez-le (DEBLOQUER, BOUFFAGE_COMPLET, ANNULER_ACCORD ou expiration "
+              "du blocage) avant de modifier la liste.")
+
 
 _SQL_A_REGLER = """
-    SELECT lp.bloque_suspect, lp.debloque_le
+    SELECT lp.id
     FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
     WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
-      AND (%s::int IS NULL OR lp.membre_id = %s::int)"""
+      AND (%s::int IS NULL OR lp.membre_id = %s::int)
+      AND (lp.bloque_suspect = 1 OR lp.debloque_le IS NOT NULL)
+    ORDER BY lp.ordre"""
+
+_SQL_A_REGLER_VERROU = """
+    SELECT lp.id, lp.bloque_suspect, lp.debloque_le
+    FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
+    WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
+      AND (%s::int IS NULL OR lp.membre_id = %s::int)
+    ORDER BY lp.ordre
+    FOR UPDATE OF lp"""
 
 
-def bouffage_a_regler(conn, tontine_id: int, membre_id: int = None, verrouiller: bool = False) -> bool:
-    """Un tour du cycle en cours est-il bloqué (contrôle suspect) ou approuvé
-    (DEBLOQUER, BOUFFAGE_COMPLET) sans avoir encore été versé ?
+def bouffage_a_regler(conn, tontine_id: int, membre_id: int = None, verrouiller: bool = False) -> list:
+    """ID des tours du cycle en cours bloqués (contrôle suspect) ou approuvés
+    (DEBLOQUER, BOUFFAGE_COMPLET) sans avoir encore été versés.
 
-    Tant que c'est le cas, ni une cession ni une nouvelle liste ne doivent changer
-    le titulaire ou supprimer le tour : l'accord serait perdu, ou la sanction du job
-    d'expiration frapperait un autre membre. Avec `verrouiller`, les tours en attente
-    sont verrouillés (FOR UPDATE) dans la transaction de l'appelant : un blocage posé
-    par le job de bouffage pendant la modification est attendu puis vu.
+    Tant qu'il y en a, ni une cession ni une nouvelle liste ne doivent changer le
+    titulaire ou supprimer le tour : l'accord serait perdu, ou la sanction du job
+    d'expiration frapperait un autre membre. Avec `verrouiller`, tous les tours en
+    attente sont verrouillés (FOR UPDATE) dans la transaction de l'appelant : un
+    blocage posé par le job de bouffage pendant la modification est attendu puis vu.
     """
-    sql = _SQL_A_REGLER + (" FOR UPDATE OF lp" if verrouiller else "")
-    lignes = fetchall(conn, sql, (tontine_id, membre_id, membre_id))
-    return any(l["bloque_suspect"] or l["debloque_le"] for l in lignes)
+    if not verrouiller:
+        return [l["id"] for l in fetchall(conn, _SQL_A_REGLER, (tontine_id, membre_id, membre_id))]
+    lignes = fetchall(conn, _SQL_A_REGLER_VERROU, (tontine_id, membre_id, membre_id))
+    return [l["id"] for l in lignes if l["bloque_suspect"] or l["debloque_le"]]
 
 
 def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tuple:
@@ -117,10 +132,11 @@ def enregistrer_liste_passage(tontine_id: int, liste: list, wa_admin: str) -> tu
     """
     conn  = get_conn()
     verrou_ordre_tontine(conn, tontine_id)  # FORTERESSE : sérialise l'ordre de cette tontine
-    if bouffage_a_regler(conn, tontine_id, verrouiller=True):
+    a_regler = bouffage_a_regler(conn, tontine_id, verrouiller=True)
+    if a_regler:
         conn.rollback()
         release_conn(conn)
-        raise BouffageARegler()
+        raise BouffageARegler(a_regler)
     cycle = fetchone(conn,
         "SELECT cycle_actuel FROM tontines WHERE id=%s", (tontine_id,))["cycle_actuel"]
 

@@ -91,9 +91,12 @@ def traiter_bouffages_suspects_expires():
             tontine_id = p["tontine_id"]
             # Relu sous verrou : un DEBLOQUER ou BOUFFAGE_COMPLET validé depuis la lecture
             # l'emporte ; le tour n'est alors ni intercepté ni la caution saisie.
-            if not fetchone(conn, """SELECT id FROM liste_passage
-                                     WHERE id=%s AND bloque_suspect=1 AND statut='En_attente'
-                                     FOR UPDATE""", (p["id"],)):
+            if not fetchone(conn, """SELECT lp.id FROM liste_passage lp
+                                     JOIN tontines t ON t.id = lp.tontine_id
+                                     WHERE lp.id=%s AND lp.bloque_suspect=1 AND lp.statut='En_attente'
+                                       AND lp.cycle = t.cycle_actuel
+                                       AND lp.date_blocage < NOW() - INTERVAL '48 hours'
+                                     FOR UPDATE OF lp""", (p["id"],)):
                 conn.rollback()
                 continue
 
@@ -374,10 +377,6 @@ def notifier_prochain_bouffage():
                   AND lp.statut='En_attente' AND lp.bloque_suspect=0
                   AND lp.debloque_le IS NOT NULL AND lp.debloque_pour = lp.membre_id
                   AND lp.date_bouffage < %s
-                  -- l'accord ne couvre pas une suspension ou un bannissement survenu depuis
-                  AND m.statut_global NOT IN ('Suspendu_global','Banni')
-                  AND EXISTS (SELECT 1 FROM adhesions a WHERE a.membre_id = lp.membre_id
-                                AND a.tontine_id = lp.tontine_id AND a.statut = 'Actif')
                 ORDER BY lp.date_bouffage, lp.ordre
             """, (t["id"], t["cycle_actuel"], today))
             for p in a_payer:
@@ -394,6 +393,19 @@ def notifier_prochain_bouffage():
                     except Exception:
                         pass
                     log.error(f"❌ bouffage passage#{p.get('id')} tontine#{t['id']} : {e}")
+                    # Le tour n'est repris ni demain (date passée) ni par le rattrapage :
+                    # les admins et le owner sont prévenus pour qu'il ne soit pas perdu.
+                    alerte = (
+                        f"⚠️ *BOUFFAGE NON DÉCLENCHÉ — {t['nom']}*\n\n"
+                        f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
+                        f"(passage #{p.get('id')}) n'a pas pu être déclenché : erreur technique.\n"
+                        f"Le owner BADF est prévenu et reprend ce versement."
+                    )
+                    try:
+                        wa_admins_tontine(t["id"], alerte)
+                        wa_owner(alerte)
+                    except Exception:
+                        pass
     finally:
         release_conn(conn)
 
@@ -405,8 +417,34 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
     ne repasse pas le contrôle suspect ; un bouffage complet verse la cagnotte brute,
     sans caution, IRA ni cotisations manquantes (les dettes IRA restent dues).
     """
+    # Relu sous verrou (tenu jusqu'au commit 'Notifie' ou au blocage) : un ANNULER_ACCORD,
+    # une cession ou une nouvelle liste survenus depuis la lecture l'emportent.
+    actuel = fetchone(conn, """SELECT statut, bloque_suspect, membre_id, debloque_le,
+                                      debloque_pour, bouffage_complet
+                               FROM liste_passage WHERE id=%s FOR UPDATE""", (passage["id"],))
+    cles = ("statut", "bloque_suspect", "membre_id", "debloque_le", "debloque_pour", "bouffage_complet")
+    if not actuel or any(actuel[k] != passage.get(k) for k in cles):
+        conn.rollback()
+        return
+
     approuve = bool(passage.get("debloque_le")) and passage.get("debloque_pour") == passage.get("membre_id")
     complet  = approuve and bool(passage.get("bouffage_complet"))
+
+    if approuve and not fetchone(conn, """
+            SELECT 1 AS ok FROM membres m
+            JOIN adhesions a ON a.membre_id = m.id AND a.tontine_id = %s AND a.statut = 'Actif'
+            WHERE m.id = %s AND m.statut_global NOT IN ('Suspendu_global','Banni')""",
+            (t["id"], passage["membre_id"])):
+        # L'accord ne couvre pas une suspension, un bannissement ou une sortie survenus depuis.
+        conn.rollback()
+        wa_admins_tontine(t["id"],
+            f"⚠️ *BOUFFAGE APPROUVÉ NON VERSÉ — {t['nom']}*\n\n"
+            f"*{passage.get('nom_complet') or '?'}* n'est plus actif dans la tontine "
+            f"(suspendu, banni ou sorti) : son bouffage approuvé (passage #{passage['id']}) "
+            f"n'est pas versé.\n\n"
+            f"Réactivez-le (option 5), ou tapez *ANNULER_ACCORD {passage['id']}* pour "
+            f"rebloquer ce tour.")
+        return
 
     # Membre non encore enrôlé
     if not passage.get("membre_id"):

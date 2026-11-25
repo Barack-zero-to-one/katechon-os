@@ -40,7 +40,7 @@ from katechon.core.socle import (
     IRA_DAILY_PCT,
     NUMERO_BADF_MTN,
     NUMERO_BADF_ORANGE,
-    MSG_BOUFFAGE_A_REGLER,
+    msg_bouffage_a_regler,
     BouffageARegler,
     bouffage_a_regler,
     enregistrer_liste_passage,
@@ -347,7 +347,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         a_regler = bouffage_a_regler(conn_chk, tid)
         release_conn(conn_chk)
         if a_regler:
-            return MSG_BOUFFAGE_A_REGLER
+            return msg_bouffage_a_regler(a_regler)
 
         if liste_existante and liste_existante["n"] > 0:
             # Une liste existe déjà — demander confirmation avant d'écraser
@@ -379,9 +379,9 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                 return "Tapez *OUI* pour remplacer ou *NON* pour annuler."
         try:
             nb_ok, nb_non_lies = enregistrer_liste_passage(tid, lignes_parsees, wa)
-        except BouffageARegler:
+        except BouffageARegler as e:
             sess["data"].pop("liste_en_attente", None)
-            return MSG_BOUFFAGE_A_REGLER
+            return msg_bouffage_a_regler(e.args[0])
 
         # Construire le récapitulatif
         recap_lignes = [
@@ -1325,9 +1325,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     # ── Option 13 : Saisir l'ordre initial de bouffage ───────────────────
     elif texte == "13" and sess["etape"] == "menu":
         conn    = get_conn()
-        if bouffage_a_regler(conn, tid):
+        a_regler = bouffage_a_regler(conn, tid)
+        if a_regler:
             release_conn(conn)
-            return MSG_BOUFFAGE_A_REGLER
+            return msg_bouffage_a_regler(a_regler)
         membres = fetchall(conn, """
             SELECT m.id, m.nom_complet, lp.ordre
             FROM adhesions a
@@ -1374,10 +1375,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         except ValueError:
             return "❌ Format invalide. Entrez des numéros séparés par des virgules."
         conn = get_conn()
-        if bouffage_a_regler(conn, tid, verrouiller=True):
+        a_regler = bouffage_a_regler(conn, tid, verrouiller=True)
+        if a_regler:
             release_conn(conn)
             sess["etape"] = "menu"
-            return MSG_BOUFFAGE_A_REGLER
+            return msg_bouffage_a_regler(a_regler)
         cycle = fetchone(conn,
             "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))["cycle_actuel"]
         # Réinitialiser la liste de passage et recréer dans le bon ordre
@@ -1764,11 +1766,12 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             # Ligne verrouillée : deux décisions simultanées se sérialisent, et le job des
             # bouffages suspects expirés relit la ligne sous verrou avant d'intercepter.
             passage = fetchone(conn, """
-                SELECT lp.*, m.nom_complet, m.whatsapp, t.cycle_actuel, t.heure_bouffage,
-                       t.statut AS statut_tontine
+                SELECT lp.*, m.nom_complet, m.whatsapp, m.statut_global, t.cycle_actuel, t.heure_bouffage,
+                       t.statut AS statut_tontine, a.statut AS statut_adhesion
                 FROM liste_passage lp
                 JOIN tontines t ON t.id = lp.tontine_id
                 LEFT JOIN membres m ON m.id = lp.membre_id
+                LEFT JOIN adhesions a ON a.membre_id = lp.membre_id AND a.tontine_id = lp.tontine_id
                 WHERE lp.id=%s AND lp.tontine_id=%s
                 FOR UPDATE OF lp
             """, (passage_id, tid))
@@ -1791,6 +1794,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                         f"terminé : rien à débloquer.")
             if passage.get("whatsapp") == wa:
                 return "❌ Vous ne pouvez pas débloquer votre propre bouffage."
+            if passage["membre_id"] and (passage["statut_global"] in ("Suspendu_global", "Banni")
+                                         or passage["statut_adhesion"] != "Actif"):
+                # Le job ne verse pas à un membre inactif : l'accord promettrait un versement fictif.
+                return (f"❌ {passage['nom_complet']} n'est pas actif dans {tnom} (suspendu, banni ou sorti) : "
+                        f"son bouffage ne peut pas être versé pour l'instant.")
             # Accord lié au titulaire actuel : une cession ou une nouvelle liste l'annule.
             q(conn, """UPDATE liste_passage
                        SET bloque_suspect=0, date_blocage=NULL,
