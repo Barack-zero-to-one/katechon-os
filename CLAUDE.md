@@ -130,7 +130,8 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 
 | Composant | Fichier | Rôle |
 |-----------|---------|------|
-| Bot principal | `barack_corp_v9_18.py` | Python 3.11 + Flask, logique métier complète (~10 087 lignes) |
+| Point d'entrée | `barack_corp_v9_18.py` | Lancé par le watchdog ; réexporte le package (15 lignes) |
+| Package | `katechon/` | Python 3.11 + Flask : `core/`, `security/`, `finance/`, `messaging/`, `handlers/` |
 | Base de données | `barack_corp` (PostgreSQL) | Toutes les données persistantes |
 | Watchdog | `watchdog.js` | Node.js — redémarre le bot Python en cas de crash |
 | Démarrage | `DEMARRAGE.bat` | Lance PostgreSQL, ngrok, watchdog dans l'ordre |
