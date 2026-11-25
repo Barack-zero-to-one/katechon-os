@@ -708,7 +708,7 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*I. DÉCOMPTE FINANCIER*\n\n"
         f"{decompte}"
-        f"*III. INSTRUCTIONS*\n\n"
+        f"*{'II' if caution == 0 else 'III'}. INSTRUCTIONS*\n\n"   # sans retenue, pas de section II
         f"  Envoyez votre numéro Mobile Money, précédé de l'opérateur :\n\n"
         f"    *MTN +237690XXXXXX*\n"
         f"  ou\n"

@@ -382,30 +382,42 @@ def notifier_prochain_bouffage():
             for p in a_payer:
                 try:
                     _payer_passage(conn, t, p, rattrapage=p.get("date_bouffage") != today)
-                except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                    # Panne de base : remontée pour que @healed relance le job ; les tours
-                    # déjà versés sont 'Notifie' et ne sont pas repris.
-                    raise
                 except Exception as e:
-                    # Un tour en erreur n'empêche ni les autres tours ni les autres tontines.
                     try:
                         conn.rollback()
                     except Exception:
                         pass
+                    if p.get("_declenche"):
+                        # Le bouffage est déjà enregistré et le membre prévenu : seules des
+                        # notifications ont échoué. Ni relance ni annonce d'échec (double versement).
+                        log.error(f"⚠️ bouffage passage#{p.get('id')} déclenché, notifications incomplètes : {e}")
+                        continue
+                    if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+                        # Panne de base avant le versement : rien n'est commité, @healed relance
+                        # le job et le tour est repris.
+                        raise
                     log.error(f"❌ bouffage passage#{p.get('id')} tontine#{t['id']} : {e}")
-                    # Le tour n'est repris ni demain (date passée) ni par le rattrapage :
-                    # les admins et le owner sont prévenus pour qu'il ne soit pas perdu.
+                    approuve = bool(p.get("debloque_le")) and p.get("debloque_pour") == p.get("membre_id")
+                    suite = (
+                        # Un tour approuvé reste rattrapable : le job le reprend lui-même.
+                        f"Il sera réessayé automatiquement à la prochaine heure de bouffage : "
+                        f"ne virez rien à la main."
+                        if approuve else
+                        # Le tour du jour n'est repris par aucun passage suivant (date passée).
+                        f"Le owner BADF est prévenu et reprend ce versement."
+                    )
                     alerte = (
                         f"⚠️ *BOUFFAGE NON DÉCLENCHÉ — {t['nom']}*\n\n"
                         f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
                         f"(passage #{p.get('id')}) n'a pas pu être déclenché : erreur technique.\n"
-                        f"Le owner BADF est prévenu et reprend ce versement."
+                        f"{suite}"
                     )
-                    try:
-                        wa_admins_tontine(t["id"], alerte)
-                        wa_owner(alerte)
-                    except Exception:
-                        pass
+                    # Envois séparés, le owner d'abord : wa_admins_tontine passe par la base.
+                    for envoyer in (lambda: wa_owner(alerte), lambda: wa_admins_tontine(t["id"], alerte)):
+                        try:
+                            envoyer()
+                        except Exception:
+                            pass
     finally:
         release_conn(conn)
 
@@ -425,6 +437,19 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
     cles = ("statut", "bloque_suspect", "membre_id", "debloque_le", "debloque_pour", "bouffage_complet")
     if not actuel or any(actuel[k] != passage.get(k) for k in cles):
         conn.rollback()
+        if not rattrapage:
+            # Le tour du jour ne serait repris par aucun passage suivant : on prévient.
+            alerte = (
+                f"⚠️ *BOUFFAGE DU JOUR NON VERSÉ — {t['nom']}*\n\n"
+                f"Le passage #{passage['id']} a été modifié pendant son traitement "
+                f"(nouvelle liste, cession ou blocage) : il n'a pas été versé.\n"
+                f"Vérifiez la liste ; le owner BADF est prévenu."
+            )
+            for envoyer in (lambda: wa_owner(alerte), lambda: wa_admins_tontine(t["id"], alerte)):
+                try:
+                    envoyer()
+                except Exception:
+                    pass
         return
 
     approuve = bool(passage.get("debloque_le")) and passage.get("debloque_pour") == passage.get("membre_id")
@@ -453,6 +478,7 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
             f"Le bénéficiaire *{passage.get('nickname','?')}* "
             f"n'est pas encore enrôlé.\n\n"
             f"Demandez-lui de taper *menu* en DM au bot.")
+        conn.rollback()   # libère le verrou du tour
         return
 
     # ── Vérification historique cotisation avant bouffage ────────────
@@ -572,9 +598,10 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
     deductions_txt += f"  *NET À VIRER        : {montant_net:,} FCFA*"
 
     # Déclencher le bouffage manuel
+    # Pas de commit ici : 'Notifie' est commité avec la ligne bouffages_manuels par
+    # declencher_bouffage_manuel, sinon une panne entre les deux perdrait le tour.
     q(conn, "UPDATE liste_passage SET statut='Notifie' WHERE id=%s",
       (passage["id"],))
-    conn.commit()
 
     # La caution dans declencher_bouffage_manuel inclut toutes les déductions
     total_deductions = caution_mont + total_ira + dette_cotis
@@ -589,6 +616,7 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
         caution_reelle    = caution_mont,
         dettes_ira        = dettes_ira,
     )
+    passage["_declenche"] = True   # au-delà, une erreur ne doit ni relancer ni annoncer un échec
 
     # Enregistrer la caution en base (informatif)
     if caution_mont > 0:
