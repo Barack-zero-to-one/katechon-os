@@ -142,7 +142,7 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 ## Architecture clé
 
 - **Flask** port 5000 (threaded=True)
-- **APScheduler** BackgroundScheduler timezone Africa/Douala — 17 jobs cron
+- **APScheduler** BackgroundScheduler timezone Africa/Douala — 23 jobs (katechon/core/scheduler.py)
 - **ngrok** domaine fixe `lennox-unbiographical-jasmin.ngrok-free.app`
 - **Sessions mémoire** : `_sessions_kyc`, `_sessions_membre`, `_sessions_admin`, `_sessions_config` — durée 300s, perdues au redémarrage
 - **Pool psycopg2** ThreadedConnectionPool minconn=10 maxconn=80

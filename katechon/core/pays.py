@@ -5,13 +5,11 @@ helpers get_pays et format_montant.
 
 Extrait de barack_corp_v9_18.py sans changement de comportement ; module pur.
 """
-import logging
 
 
 
 __all__ = ["COUNTRY_CONFIG", "DEFAULT_COUNTRY", "get_pays", "format_montant"]
 
-log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
 
 # ── Configuration multi-pays (i18n + payments rails) ─────────────────────

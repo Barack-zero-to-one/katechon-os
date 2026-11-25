@@ -144,20 +144,6 @@ from katechon.core.schema import init_db   # Schéma PostgreSQL : tables, migrat
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# FONCTIONS MÉTIER — CRÉATION TONTINE / INSCRIPTION MEMBRES
-# ══════════════════════════════════════════════════════════════════════════
-
-
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# COUCHE D'INTERNATIONALISATION — Multi-pays / Multi-devise
-# ══════════════════════════════════════════════════════════════════════════
-
-# Cache pays en mémoire (évite de hit la DB à chaque message)
-
-
-# ══════════════════════════════════════════════════════════════════════════
 # PAIEMENT MANUEL — Screenshot + Confirmation Admin
 # ══════════════════════════════════════════════════════════════════════════
 

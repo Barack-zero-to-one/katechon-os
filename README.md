@@ -20,10 +20,10 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 
 | Layer | Technology | Detail |
 |-------|-----------|--------|
-| Runtime | Python 3.11 | 10,351 lines, single orchestrator file |
+| Runtime | Python 3.11 | `katechon/` package (core, security, finance, messaging, handlers), 15-line entry point `barack_corp_v9_18.py` |
 | HTTP server | Flask + Waitress | 70 threads, port 5000 |
 | Database | PostgreSQL 18 | ThreadedConnectionPool maxconn=80, 17 tables |
-| Scheduler | APScheduler | 20 cron/interval jobs, timezone Africa/Douala |
+| Scheduler | APScheduler | 23 cron/interval jobs, timezone Africa/Douala |
 | Messaging | Green API | WhatsApp Business session, webhook-compatible |
 | OCR | Tesseract + OpenCV | Screenshot payment verification with dark mode support |
 | Resilience | `@healed` decorator | 13 functions, auto-retry ×3 DB + network |
