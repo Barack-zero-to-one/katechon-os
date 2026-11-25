@@ -620,7 +620,8 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
                                 caution: int,
                                 deductions_detail: str = "",
                                 caution_reelle: int = None,
-                                dettes_ira: list = None) -> int:
+                                dettes_ira: list = None,
+                                apres_commit=None) -> int:
     """
     Déclenche le flux de bouffage manuel.
     DM au bénéficiaire pour son numéro MM.
@@ -657,6 +658,8 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
         q(conn, "UPDATE dettes_ira SET bouffage_id=%s WHERE id = ANY(%s) AND statut='Due'",
           (bouffage_id, [d["id"] for d in dettes_ira]))
     conn.commit()
+    if apres_commit:
+        apres_commit()   # l'appelant sait que le bouffage est enregistré, quoi qu'il arrive ensuite
 
     membre  = fetchone(conn,
         "SELECT nom_complet, whatsapp FROM membres WHERE id=%s", (membre_id,))

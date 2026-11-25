@@ -202,6 +202,7 @@ def msg_dm_admin_bienvenue(nom_tontine: str) -> str:
         f"*Commandes directes :*\n"
         f"▪ *KICK +237XXXXXXXXX* — Retirer quelqu'un du groupe\n"
         f"▪ *DEBLOQUER [ID]* — Débloquer un bouffage suspendu\n"
+        f"▪ *ANNULER_ACCORD [ID]* — Retirer un accord pas encore versé\n"
         f"▪ *BOUFFAGE_COMPLET [ID] [raison]* — Accorder bouffage complet (cas grave)\n\n"
         f"_Barack & AI Development Facilities Ltd — BADF Ltd_"
     )
@@ -362,6 +363,7 @@ MENU_ADMIN_TXT = (
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     "🚪 *KICK +237XXXXXXXXX* → retirer un membre\n"
     "🔓 *DEBLOQUER [ID]* → débloquer bouffage suspect\n"
+    "↩️ *ANNULER_ACCORD [ID]* → retirer un accord non versé\n"
     "🆘 *BOUFFAGE_COMPLET [ID]* → cas grave\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     "💡 Dans le groupe : tapez *liste* pour le bilan\n"

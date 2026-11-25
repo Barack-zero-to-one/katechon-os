@@ -356,6 +356,7 @@ def notifier_prochain_bouffage():
             "SELECT * FROM tontines WHERE statut='Active' AND heure_bouffage=%s",
             (heure_now,))
 
+        reprise_annoncee = False   # un tour de ce passage a été confié au owner
         for t in tontines:
             passage = fetchone(conn, """
                 SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
@@ -388,13 +389,26 @@ def notifier_prochain_bouffage():
                     except Exception:
                         pass
                     if p.get("_declenche") or _passage_notifie(conn, p.get("id")):
-                        # Le bouffage est déjà enregistré ('Notifie' est commité avec lui) : seules
-                        # des notifications ont échoué. Ni relance ni annonce d'échec (double versement).
+                        # Versé (bouffage enregistré avec 'Notifie') ou bloqué : seules des
+                        # notifications ont échoué. Ni relance ni annonce d'échec (double versement) ;
+                        # le owner (sans base) vérifie que l'avis est bien parti.
                         log.error(f"⚠️ bouffage passage#{p.get('id')} traité (versé ou bloqué), notifications incomplètes : {e}")
+                        try:
+                            wa_owner(
+                                f"⚠️ *AVIS INCOMPLET — {t['nom']}*\n\n"
+                                f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
+                                f"(passage #{p.get('id')}) est enregistré, mais ses messages n'ont pas "
+                                f"tous été envoyés. Vérifiez que le membre et les admins ont reçu l'avis ; "
+                                f"ne virez rien en dehors de BOUFFAGE_VIRE."
+                            )
+                        except Exception:
+                            pass
                         continue
-                    if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+                    if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)) \
+                            and not reprise_annoncee:
                         # Panne de base avant le versement : rien n'est commité, @healed relance
-                        # le job et le tour est repris.
+                        # le job et le tour est repris. Pas de relance si un tour de ce passage a
+                        # déjà été confié au owner : la relance le paierait une seconde fois.
                         raise
                     log.error(f"❌ bouffage passage#{p.get('id')} tontine#{t['id']} : {e}")
                     approuve = bool(p.get("debloque_le")) and p.get("debloque_pour") == p.get("membre_id")
@@ -406,6 +420,8 @@ def notifier_prochain_bouffage():
                         # Le tour du jour n'est repris par aucun passage suivant (date passée).
                         f"Le owner BADF est prévenu et reprend ce versement."
                     )
+                    if not approuve:
+                        reprise_annoncee = True
                     alerte = (
                         f"⚠️ *BOUFFAGE NON DÉCLENCHÉ — {t['nom']}*\n\n"
                         f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
@@ -633,8 +649,9 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
         deductions_detail = deductions_txt,
         caution_reelle    = caution_mont,
         dettes_ira        = dettes_ira,
+        # Marqué dès le commit du bouffage, avant ses propres messages.
+        apres_commit      = lambda: passage.__setitem__("_declenche", True),
     )
-    passage["_declenche"] = True   # versé ou bloqué : au-delà, ni relance ni annonce d'échec
 
     # Enregistrer la caution en base (informatif)
     if caution_mont > 0:
@@ -646,7 +663,7 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
                caution_mont, caution_pct))
             conn.commit()
         except Exception:
-            pass
+            conn.rollback()   # sinon la transaction reste avortée pour le tour suivant
 
     # ── Bordereau transparent au bénéficiaire AVANT le virement ──────
     # Le membre voit le calcul ligne par ligne. Diminue 80% des contestations.

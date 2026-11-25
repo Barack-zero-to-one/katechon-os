@@ -23,7 +23,7 @@ from katechon.messaging.messages import msg_dissuasion
 from katechon.finance.trust_graph import _update_score_confiance
 from katechon.messaging.whatsapp import OWNER_WA, wa_admin, wa_owner, wa_prive
 
-__all__ = ["FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "IRA_HOURLY_PCT",
+__all__ = ["BouffageARegler", "bouffage_a_regler", "msg_bouffage_a_regler", "FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "IRA_HOURLY_PCT",
     "IRA_CAP_PCT", "IRA_FLOOR", "IRA_GRACE_MIN", "FRAIS_REACTIV", "FRAIS_CHGNUM",
     "NUMERO_BADF_MTN", "NUMERO_BADF_ORANGE", "MAX_TENTATIVES_FRAUDE", "GREENAPI_WEBHOOK_SECRET",
     "WEBHOOK_REPLAY_TTL", "_replay_guard", "MEDIA_MAX_BYTES", "SESSION_TIMEOUT",
