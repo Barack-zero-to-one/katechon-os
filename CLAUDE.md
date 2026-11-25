@@ -130,7 +130,8 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 
 | Composant | Fichier | Rôle |
 |-----------|---------|------|
-| Bot principal | `barack_corp_v9_18.py` | Python 3.11 + Flask, logique métier complète (~10 087 lignes) |
+| Point d'entrée | `barack_corp_v9_18.py` | Lancé par le watchdog ; réexporte le package (15 lignes) |
+| Package | `katechon/` | Python 3.11 + Flask : `core/`, `security/`, `finance/`, `messaging/`, `handlers/` |
 | Base de données | `barack_corp` (PostgreSQL) | Toutes les données persistantes |
 | Watchdog | `watchdog.js` | Node.js — redémarre le bot Python en cas de crash |
 | Démarrage | `DEMARRAGE.bat` | Lance PostgreSQL, ngrok, watchdog dans l'ordre |
@@ -141,7 +142,7 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 ## Architecture clé
 
 - **Flask** port 5000 (threaded=True)
-- **APScheduler** BackgroundScheduler timezone Africa/Douala — 17 jobs cron
+- **APScheduler** BackgroundScheduler timezone Africa/Douala — 23 jobs (katechon/core/scheduler.py)
 - **ngrok** domaine fixe `lennox-unbiographical-jasmin.ngrok-free.app`
 - **Sessions mémoire** : `_sessions_kyc`, `_sessions_membre`, `_sessions_admin`, `_sessions_config` — durée 300s, perdues au redémarrage
 - **Pool psycopg2** ThreadedConnectionPool minconn=10 maxconn=80

@@ -31,7 +31,7 @@ __all__ = ["FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "I
     "valider_numero_cameroun", "calculer_ira_mise", "get_membre_by_wa", "get_tontines_admin",
     "est_owner", "est_admin", "incrementer_tentatives_fraude", "_alerter_burst_fraude",
     "_JOURS_SEMAINE", "_est_jour_collecte", "_est_jour_cotisation", "_verifier_credit_comm",
-    "PORT", "DELAI_SUSPENSION_HEURES", "DELAI_ALERTE_FUGUE", "DELAI_BLOCAGE_FUGUE", "BACKUP_ROTATION", "HEURE_BACKUP", "PG_HOST", "PG_PORT", "PG_DB", "PG_USER", "PG_PASS", "PG_BIN", "BACKUP_DIR", "NGROK_DOMAIN", "NGROK_TOKEN"]
+    "PORT", "DELAI_SUSPENSION_HEURES", "DELAI_ALERTE_FUGUE", "DELAI_BLOCAGE_FUGUE", "BACKUP_ROTATION", "HEURE_BACKUP", "PG_HOST", "PG_PORT", "PG_DB", "PG_USER", "PG_PASS", "PG_BIN", "BACKUP_DIR", "NGROK_DOMAIN", "NGROK_TOKEN", "MONTANT_IRA", "GROUPE_ADMIN", "enregistrer_admins_groupe"]
 
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
@@ -459,3 +459,34 @@ BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 # ── Webhook public (ngrok ou domaine) ────────────────────────────────────
 NGROK_DOMAIN  = os.getenv("NGROK_DOMAIN", "lennox-unbiographical-jasmin.ngrok-free.dev")
 NGROK_TOKEN   = os.getenv("NGROK_TOKEN",  "")
+
+
+# ── Divers repris du bot : ancien montant IRA, groupe admin, enregistrement des admins ──
+MONTANT_IRA      = 150     # DÉPRÉCIÉ — conservé le temps de migrer les anciens messages
+
+GROUPE_ADMIN = "Admin Barack Corp"
+
+def enregistrer_admins_groupe(tontine_id: int, admins: list) -> None:
+    """
+    Enregistre les admins WhatsApp d'un groupe en base.
+    admins = [{"whatsapp": "+237...", "nom": "Jean"}, ...]
+    Appelé automatiquement quand le bot rejoint un groupe.
+    """
+    if not admins:
+        return
+    conn = get_conn()
+    for a in admins:
+        wa  = normaliser_numero(a.get("whatsapp", ""))
+        nom = a.get("nom", "")
+        if not wa:
+            continue
+        q(conn, """
+            INSERT INTO admins_groupe (tontine_id, whatsapp, nom)
+            VALUES (%s,%s,%s)
+            ON CONFLICT (tontine_id, whatsapp) DO UPDATE SET nom=%s
+        """, (tontine_id, wa, nom, nom))
+    conn.commit()
+    release_conn(conn)
+    log.info(f"Admins enregistrés tontine {tontine_id}: {[a.get('whatsapp') for a in admins]}")
+    log_audit("ADMINS_ENREGISTRES",
+              f"Tontine {tontine_id} — {len(admins)} admin(s)")
