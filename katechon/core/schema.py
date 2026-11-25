@@ -14,6 +14,20 @@ __all__ = ["init_db"]
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
 
+# Reprises à usage unique (voir init_db).
+# Avant sanctions.levee_le, une réactivation ne marquait rien et deux jobs ne traçaient
+# pas leurs suspensions : les anciennes données ne disent pas qui a levé quoi. Plutôt
+# que de deviner, toutes les suspensions antérieures sont marquées levées une fois ;
+# un membre déjà suspendu au déploiement se réactive comme avant (admin de l'une de
+# ses tontines), et l'isolation par tontine vaut pour toute suspension postérieure.
+_REPRISES_DONNEES = [
+    ("2026-11-sanctions-levee", [
+        """UPDATE sanctions SET levee_le = NOW()
+           WHERE levee_le IS NULL
+             AND type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage')""",
+    ]),
+]
+
 def init_db():
     conn = get_conn()
     c    = conn.cursor()
@@ -338,6 +352,8 @@ def init_db():
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS soumis_par TEXT",
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS bloque_suspect INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS date_blocage TIMESTAMPTZ",
+        # Levée d'une suspension par l'admin de SA tontine (réactivation isolée par tontine).
+        "ALTER TABLE sanctions ADD COLUMN IF NOT EXISTS levee_le TIMESTAMPTZ",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_ouverture TEXT NOT NULL DEFAULT '05:00'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_rappel TEXT NOT NULL DEFAULT '14:00'",
         "ALTER TABLE admins_groupe ADD COLUMN IF NOT EXISTS numero_collecte TEXT",
@@ -406,6 +422,27 @@ def init_db():
         except Exception as e:
             c.execute("ROLLBACK TO SAVEPOINT mig")
             log.error(f"❌ Migration en échec (ignorée, SAVEPOINT isolé) : {migration[:80]} : {e}")
+
+    # ── REPRISES DE DONNÉES À USAGE UNIQUE ────────────────────────────────
+    # Contrairement aux migrations (rejouées à chaque démarrage), une reprise ne
+    # s'applique qu'une fois : rejouée, elle lèverait ou recréerait des suspensions
+    # gérées depuis par les admins. reprises_donnees garde la trace de son passage.
+    c.execute("""CREATE TABLE IF NOT EXISTS reprises_donnees (
+        nom          TEXT PRIMARY KEY,
+        appliquee_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    for nom, requetes in _REPRISES_DONNEES:
+        try:
+            c.execute("SAVEPOINT reprise")
+            c.execute("INSERT INTO reprises_donnees (nom) VALUES (%s) ON CONFLICT DO NOTHING", (nom,))
+            if c.rowcount:
+                for requete in requetes:
+                    c.execute(requete)
+                log.info(f"✅ Reprise de données appliquée : {nom}")
+            c.execute("RELEASE SAVEPOINT reprise")
+        except Exception as e:
+            c.execute("ROLLBACK TO SAVEPOINT reprise")
+            log.error(f"❌ Reprise de données en échec (ignorée, SAVEPOINT isolé) : {nom} : {e}")
 
 
     # ── INDEX PERFORMANCES ────────────────────────────────────────────────

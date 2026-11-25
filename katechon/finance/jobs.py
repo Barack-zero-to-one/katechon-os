@@ -178,9 +178,13 @@ def traiter_bouffages_suspects_expires():
                        SET statut='Intercepte', bloque_suspect=0
                        WHERE id=%s""", (p["id"],))
 
-            # Suspendre le membre
-            q(conn, """UPDATE membres SET statut_global='Suspendu_global'
-                       WHERE id=%s""", (membre_id,))
+            # Suspendre le membre, en traçant la tontine qui suspend (réactivation isolée)
+            # (un membre banni le reste : jamais rétrogradé en suspendu levable)
+            if q(conn, """UPDATE membres SET statut_global='Suspendu_global'
+                          WHERE id=%s AND statut_global <> 'Banni'""", (membre_id,)).rowcount:
+                q(conn, """INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes)
+                           VALUES (%s,%s,'Interception_bouffage','Bouffage suspect non débloqué sous 48h')""",
+                  (membre_id, tontine_id))
 
             conn.commit()
 
@@ -719,7 +723,7 @@ def verifier_suspensions_retard():
                        a.nb_avertissements_retard
                 FROM adhesions a JOIN membres m ON m.id=a.membre_id
                 WHERE a.tontine_id=%s AND a.statut='Actif'
-                  AND m.suspendu_retard=0
+                  AND m.suspendu_retard=0 AND m.statut_global NOT IN ('Suspendu_global','Banni')
                   AND m.id NOT IN (
                       SELECT DISTINCT t2.membre_id FROM transactions t2
                       WHERE t2.tontine_id=%s
@@ -737,22 +741,32 @@ def verifier_suspensions_retard():
 
             for m in en_retard:
                 try:
+                    # Sursis : la récidive ne compte qu'après un délai complet depuis
+                    # l'avertissement (même retard prolongé ou nouveau retard).
+                    if m["nb_avertissements_retard"] > 0 and fetchone(conn, """
+                            SELECT 1 AS x FROM sanctions
+                            WHERE membre_id=%s AND tontine_id=%s AND type_sanction='Retard_paiement'
+                              AND date_sanction > %s""", (m["id"], t["id"], seuil)):
+                        continue
                     if m["nb_avertissements_retard"] == 0:
                         # PREMIÈRE FOIS — sursis silencieux, aucun message
                         q(conn, "UPDATE adhesions SET nb_avertissements_retard=1 WHERE membre_id=%s AND tontine_id=%s",
                           (m["id"], t["id"]))
                         q(conn, """INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes)
-                                   VALUES (%s,%s,'Avertissement_retard','Premier retard — sursis silencieux')""",
+                                   VALUES (%s,%s,'Retard_paiement','Premier retard — sursis silencieux')""",
                           (m["id"], t["id"]))
                         conn.commit()
                         log_audit("AVERTISSEMENT_RETARD_SURSIS",
                                   f"{m['nom_complet']} — {t['nom']}", m["whatsapp"])
                     else:
                         # RÉCIDIVE — suspension complète + 1 000 FCFA
-                        q(conn, """UPDATE membres
+                        if not q(conn, """UPDATE membres
                                    SET suspendu_retard=1, date_suspension_retard=NOW(),
                                        statut_global='Suspendu_global'
-                                   WHERE id=%s""", (m["id"],))
+                                   WHERE id=%s AND statut_global NOT IN ('Suspendu_global','Banni')""",
+                                   (m["id"],)).rowcount:
+                            conn.rollback()      # banni ou suspendu entre-temps : rien à faire
+                            continue
                         _update_score_confiance(conn, m["id"], delta=-25, raison="Suspension retard — récidive")
                         q(conn, "UPDATE adhesions SET statut='Suspendu' WHERE membre_id=%s AND tontine_id=%s",
                           (m["id"], t["id"]))
@@ -848,7 +862,11 @@ def detecter_fugitifs():
                 """, (m["id"], t["id"]))
 
                 if jours >= delai_blocage and (not alerte or alerte["type_alerte"] != "Blocage"):
-                    q(conn, "UPDATE membres SET statut_global='Suspendu_global' WHERE id=%s", (m["id"],))
+                    if q(conn, "UPDATE membres SET statut_global='Suspendu_global' WHERE id=%s AND statut_global <> 'Banni'",
+                         (m["id"],)).rowcount:
+                        q(conn, """INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes)
+                                   VALUES (%s,%s,'Fugue_post_bouffage',%s)""",
+                          (m["id"], t["id"], f"Blocage après {jours} jours sans cotiser"))
                     _update_score_confiance(conn, m["id"], delta=-30, raison="Blocage fugue post-bouffage")
                     q(conn, "INSERT INTO alertes_fugue (membre_id, tontine_id, type_alerte, jours_retard, montant_du) VALUES (%s,%s,'Blocage',%s,%s)",
                       (m["id"], t["id"], jours, montant_du))
