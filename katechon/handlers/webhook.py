@@ -21,17 +21,17 @@ from katechon.core.audit import log_audit
 from katechon.core.db import fetchone, get_conn, q, release_conn
 from katechon.core.etat import _download_executor, _msg_executor, _sessions_config, rate_limit_ok
 from flask import jsonify, request
-from groupe import (
+from katechon.handlers.groupe import (
     _bot_ajoute_groupe,
     _est_nom_valide,
     _greenapi_get_group_members,
     _traiter_commande_groupe,
     traiter_config_tontine,
 )
-from menu_admin import traiter_menu_admin
-from menu_membre import traiter_menu_membre
+from katechon.handlers.menu_admin import traiter_menu_admin
+from katechon.handlers.menu_membre import traiter_menu_membre
 from katechon.finance.ocr import lire_screenshot_mobile_money
-from owner import traiter_menu_owner
+from katechon.handlers.owner import traiter_menu_owner
 from katechon.finance.paiement import (
     enregistrer_cotisation_manuelle,
     hash_screenshot,

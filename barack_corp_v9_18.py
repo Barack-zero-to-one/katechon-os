@@ -307,7 +307,7 @@ from katechon.finance.paiement import (   # extrait dans paiement.py
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from menu_admin import (   # extrait dans menu_admin.py
+from katechon.handlers.menu_admin import (   # extrait dans menu_admin.py
     kick_membre_si_bot_admin, wa_mentionner_retardataires, _passer_a_cotisation_suivante,
     traiter_menu_admin,
 )
@@ -318,7 +318,7 @@ from menu_admin import (   # extrait dans menu_admin.py
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from menu_membre import (   # extrait dans menu_membre.py
+from katechon.handlers.menu_membre import (   # extrait dans menu_membre.py
     _demarrer_collecte_nom, traiter_kyc, _finaliser_nom, traiter_menu_membre, _repondre_rang,
     _repondre_caution, _init_paiement_cotisation,
 )
@@ -330,7 +330,7 @@ from menu_membre import (   # extrait dans menu_membre.py
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from owner import (   # extrait dans owner.py
+from katechon.handlers.owner import (   # extrait dans owner.py
     traiter_menu_owner, _owner_menu_principal, _bloc_ira_membres, _owner_rapport_jour,
     _owner_rapport_semaine, _owner_rapport_mois, _owner_historique_n_jours,
     _owner_tontines_actives, _owner_reserve_badf, _owner_membres_stats, _owner_fugitifs_stats,
@@ -342,7 +342,7 @@ from owner import (   # extrait dans owner.py
 # ÉVÉNEMENTS GROUPE — bot ajouté / membre quitte
 # ══════════════════════════════════════════════════════════════════════════
 
-from groupe import (   # extrait dans groupe.py
+from katechon.handlers.groupe import (   # extrait dans groupe.py
     _est_nom_valide, _auto_inscrire_participants, _envoyer_config_dm_admins, _bot_ajoute_groupe,
     traiter_config_tontine, _groupe_liste_cotisations, _traiter_commande_groupe,
     _groupe_rappel_manuel, _greenapi_get_pushname, _greenapi_get_group_members,
@@ -355,12 +355,13 @@ from groupe import (   # extrait dans groupe.py
 # ══════════════════════════════════════════════════════════════════════════
 
 
-from webhook import (   # extrait dans webhook.py
+from katechon.handlers.webhook import (   # extrait dans webhook.py
     webhook_whatsapp_verify, _traiter_groupe_participants, webhook_whatsapp_greenapi,
     _greenapi_telecharger_media, _traiter_message_greenapi, _traiter_screenshot_cotisation_bytes,
     register_webhook,
 )
-register_webhook(app)   # GET et POST /webhook/whatsapp, endpoints inchangés
+from katechon.routes import enregistrer_routes   # webhook + dashboard : katechon/routes.py
+enregistrer_routes(app)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -394,14 +395,8 @@ from katechon.finance.trust_graph import (
 # ══════════════════════════════════════════════════════════════════════════
 # DASHBOARD LOCAL — http://localhost:5000/dashboard
 # ══════════════════════════════════════════════════════════════════════════
-# Sous-système périphérique extrait dans dashboard.py (routes /dashboard,
-# /dashboard/data). Câblage par injection — aucune logique dashboard inline ici.
-import dashboard
-dashboard.register_dashboard(
-    app,
-    get_conn=get_conn, release_conn=release_conn,
-    bot_start=_BOT_START, dash_token=_DASH_TOKEN, logger=log,
-)
+# Routes /dashboard et /dashboard/data : katechon/handlers/dashboard.py, enregistrées
+# par katechon/routes.py avec le webhook.
 
 
 # ══════════════════════════════════════════════════════════════════════════
