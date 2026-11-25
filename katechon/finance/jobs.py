@@ -419,7 +419,20 @@ def notifier_prochain_bouffage():
                         except Exception:
                             pass
                     if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)):
-                        # Panne de base : @healed relance le job, qui reprend le tour.
+                        # Panne de base : @healed relance le job, qui reprend le tour. Si la panne
+                        # dure au-delà des relances, echec_le n'a pas pu être écrit et rien ne
+                        # reprendra ce tour : le owner (prévenu sans passer par la base) vérifie.
+                        try:
+                            wa_owner(
+                                f"🛑 *PANNE DE BASE — {t['nom']}*\n\n"
+                                f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
+                                f"(passage #{p.get('id')}) a échoué : base injoignable. Relance "
+                                f"automatique en cours. Si la panne dure, vérifiez ce tour une fois la "
+                                f"base rétablie : sans bouffage enregistré, marquez-le en échec "
+                                f"(echec_le) pour que le rattrapage le reprenne. Ne virez rien à la main."
+                            )
+                        except Exception:
+                            pass
                         raise
                     log.error(f"❌ bouffage passage#{p.get('id')} tontine#{t['id']} : {e}")
                     alerte = (
@@ -488,13 +501,16 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
             (t["id"], passage["membre_id"])):
         # L'accord ne couvre pas une suspension, un bannissement ou une sortie survenus depuis.
         conn.rollback()
-        wa_admins_tontine(t["id"],
-            f"⚠️ *BOUFFAGE APPROUVÉ NON VERSÉ — {t['nom']}*\n\n"
-            f"*{passage.get('nom_complet') or '?'}* n'est plus actif dans la tontine "
-            f"(suspendu, banni ou sorti) : son bouffage approuvé (passage #{passage['id']}) "
-            f"n'est pas versé.\n\n"
-            f"Réactivez-le (option 5), ou tapez *ANNULER_ACCORD {passage['id']}* pour "
-            f"rebloquer ce tour.")
+        try:
+            wa_admins_tontine(t["id"],
+                f"⚠️ *BOUFFAGE APPROUVÉ NON VERSÉ — {t['nom']}*\n\n"
+                f"*{passage.get('nom_complet') or '?'}* n'est plus actif dans la tontine "
+                f"(suspendu, banni ou sorti) : son bouffage approuvé (passage #{passage['id']}) "
+                f"n'est pas versé.\n\n"
+                f"Réactivez-le (option 5), ou tapez *ANNULER_ACCORD {passage['id']}* pour "
+                f"rebloquer ce tour.")
+        except Exception as e:
+            log.error(f"alerte accord non versé #{passage['id']} : {e}")
         return
 
     if approuve and fetchone(conn, """

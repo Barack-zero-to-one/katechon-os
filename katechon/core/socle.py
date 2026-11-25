@@ -103,11 +103,11 @@ _SQL_A_REGLER = """
     FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
     WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
       AND (%s::int IS NULL OR lp.membre_id = %s::int)
-      AND (lp.bloque_suspect = 1 OR lp.debloque_le IS NOT NULL OR lp.echec_le IS NOT NULL)
+      AND (lp.bloque_suspect = 1 OR lp.debloque_le IS NOT NULL)
     ORDER BY lp.ordre"""
 
 _SQL_A_REGLER_VERROU = """
-    SELECT lp.id, lp.bloque_suspect, lp.debloque_le, lp.echec_le
+    SELECT lp.id, lp.bloque_suspect, lp.debloque_le
     FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
     WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
       AND (%s::int IS NULL OR lp.membre_id = %s::int)
@@ -129,7 +129,7 @@ def bouffage_a_regler(conn, tontine_id: int, membre_id: int = None, verrouiller:
         lignes = fetchall(conn, _SQL_A_REGLER, (tontine_id, membre_id, membre_id))
     else:
         lignes = [l for l in fetchall(conn, _SQL_A_REGLER_VERROU, (tontine_id, membre_id, membre_id))
-                  if l["bloque_suspect"] or l["debloque_le"] or l["echec_le"]]
+                  if l["bloque_suspect"] or l["debloque_le"]]
     return [{"id": l["id"], "approuve": not l["bloque_suspect"]} for l in lignes]
 
 

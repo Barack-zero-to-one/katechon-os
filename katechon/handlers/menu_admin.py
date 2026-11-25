@@ -1805,10 +1805,18 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                        SET bloque_suspect=0, date_blocage=NULL,
                            debloque_le=NOW(), debloque_pour=%s, bouffage_complet=%s
                        WHERE id=%s""", (passage["membre_id"], 1 if complet else 0, passage_id))
+            # Un autre tour du membre encore bloqué suspend ce versement (voir _payer_passage).
+            autre_bloque = fetchone(conn, """
+                SELECT COUNT(*) AS n FROM liste_passage
+                WHERE tontine_id=%s AND membre_id=%s AND cycle=%s AND statut='En_attente'
+                  AND bloque_suspect=1 AND id<>%s""",
+                (tid, passage["membre_id"], passage["cycle_actuel"], passage_id))["n"]
             conn.commit()
         finally:
             release_conn(conn)
         heure = passage.get("heure_bouffage") or "17:00"
+        avertissement = (f"\n⚠️ Un autre tour de {passage['nom_complet']} est encore bloqué : ce "
+                         f"versement attend que ce blocage soit levé." if autre_bloque else "")
         if complet:
             log_audit("BOUFFAGE_COMPLET_ADMIN",
                       f"Passage#{passage_id} | {passage['nom_complet']} | "
@@ -1825,7 +1833,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                 f"Raison : _{raison}_\n\n"
                 f"Il recevra la cagnotte intégrale à la prochaine heure de bouffage ({heure}).\n"
                 f"Cette décision a été notifiée au owner BADF."
-            )
+            ) + avertissement
         log_audit("BOUFFAGE_DEBLOQUE",
                   f"Passage#{passage_id} | {passage['nom_complet']} | Admin:{wa}")
         wa_owner(
@@ -1837,7 +1845,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         return (
             f"✅ Bouffage de *{passage['nom_complet']}* débloqué.\n"
             f"Il sera versé à la prochaine heure de bouffage ({heure})."
-        )
+        ) + avertissement
 
     # ── Commande NOUVEAU_CYCLE — relancer un cycle après fin de cycle ────
     if texte.upper() == "NOUVEAU_CYCLE" and sess["etape"] == "menu":
