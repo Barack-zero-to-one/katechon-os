@@ -338,9 +338,6 @@ def init_db():
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS soumis_par TEXT",
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS bloque_suspect INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS date_blocage TIMESTAMPTZ",
-        # Décision de l'admin (DEBLOQUER, BOUFFAGE_COMPLET) : le tour est payé à la
-        # prochaine heure de bouffage même si sa date est passée, sans nouveau contrôle suspect.
-        "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS debloque_le TIMESTAMPTZ",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_ouverture TEXT NOT NULL DEFAULT '05:00'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_rappel TEXT NOT NULL DEFAULT '14:00'",
         "ALTER TABLE admins_groupe ADD COLUMN IF NOT EXISTS numero_collecte TEXT",
