@@ -786,18 +786,31 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         sess["etape"] = "menu"
         conn = get_conn()
         try:
+            # Membre verrouillé d'abord : un job qui le suspend en parallèle attend, et
+            # son statut est relu dans la même transaction.
+            courant = fetchone(conn, "SELECT statut_global FROM membres WHERE id=%s FOR UPDATE", (m["id"],))
+            if not courant or courant["statut_global"] != "Suspendu_global":
+                return f"ℹ️ {m['nom_complet']} n'est pas suspendu (statut: {courant['statut_global'] if courant else '?'})."
             # Une suspension appartient à la tontine qui l'a prononcée (sanction non levée).
-            actives = fetchall(conn, """SELECT id, tontine_id FROM sanctions
-                                        WHERE membre_id=%s AND levee_le IS NULL
-                                          AND type_sanction = ANY(%s)
-                                        FOR UPDATE""", (m["id"], list(_TYPES_SUSPENSION)))
-            ici = [s["id"] for s in actives if s["tontine_id"] == tid]
-            ailleurs = [s for s in actives if s["tontine_id"] != tid]
-            if ailleurs and not ici:
+            # Elle ne bloque que si cette tontine peut encore la lever : tontine Active où le
+            # membre a une adhésion non quittée. Sinon (tontine quittée, terminée, ou sans
+            # tontine) personne d'autre ne pourrait la lever : elle est levée ici.
+            actives = fetchall(conn, """
+                SELECT s.id, s.tontine_id,
+                       (s.tontine_id IS NOT NULL AND s.tontine_id <> %s AND EXISTS (
+                            SELECT 1 FROM adhesions a JOIN tontines t ON t.id = a.tontine_id
+                            WHERE a.membre_id = s.membre_id AND a.tontine_id = s.tontine_id
+                              AND a.statut <> 'Quitte' AND t.statut = 'Active')) AS bloquante
+                FROM sanctions s
+                WHERE s.membre_id=%s AND s.levee_le IS NULL AND s.type_sanction = ANY(%s)
+                FOR UPDATE OF s""", (tid, m["id"], list(_TYPES_SUSPENSION)))
+            ailleurs = [s for s in actives if s["bloquante"]]
+            levables = [s["id"] for s in actives if not s["bloquante"]]
+            if ailleurs and not any(s["tontine_id"] == tid for s in actives):
                 return (f"❌ {m['nom_complet']} a été suspendu par une autre tontine : "
                         f"seul son admin peut lever cette suspension.")
-            if ici:
-                q(conn, "UPDATE sanctions SET levee_le=NOW() WHERE id = ANY(%s)", (ici,))
+            if levables:
+                q(conn, "UPDATE sanctions SET levee_le=NOW() WHERE id = ANY(%s)", (levables,))
             q(conn, "UPDATE adhesions SET statut='Actif' WHERE membre_id=%s AND tontine_id=%s", (m["id"], tid))
             if not ailleurs:
                 q(conn, "UPDATE membres SET statut_global='Actif', suspendu_retard=0 WHERE id=%s", (m["id"],))
@@ -805,8 +818,9 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         finally:
             release_conn(conn)
         if ailleurs:
-            return (f"✅ *{m['nom_complet']}* réactivé dans *{tnom}*. ⚠️ Il reste suspendu sur le réseau "
-                    f"par une autre tontine tant que son admin n'a pas levé sa suspension.")
+            return (f"✅ Suspension de *{m['nom_complet']}* levée dans *{tnom}*.\n"
+                    f"⚠️ Il reste bloqué sur tout le réseau (messages refusés) tant qu'une autre tontine "
+                    f"n'a pas levé sa propre suspension.")
         wa_prive(num, "✅ *Compte réactivé — Barack Corp*\nBienvenue de retour !")
         return f"✅ *{m['nom_complet']}* réactivé."
 
@@ -1186,7 +1200,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         _update_score_confiance(conn, m["id"], set_val=0, raison="Bannissement — fugue post-bouffage")
         q(conn, """INSERT INTO sanctions
                    (membre_id, tontine_id, type_sanction, montant_penalite, notes)
-                   VALUES (%s,%s,'Interception_bouffage',%s,'Saisie caution fugitif — réserve BADF')""",
+                   VALUES (%s,%s,'Blocage_permanent',%s,'Saisie caution fugitif — réserve BADF')""",
           (m["id"], tid, caution["montant"]))
         q(conn, """UPDATE alertes_fugue SET traite=1
                    WHERE membre_id=%s AND tontine_id=%s""", (m["id"], tid))

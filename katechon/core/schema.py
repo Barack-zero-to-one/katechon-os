@@ -340,6 +340,22 @@ def init_db():
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS date_blocage TIMESTAMPTZ",
         # Levée d'une suspension par l'admin de SA tontine (réactivation isolée par tontine).
         "ALTER TABLE sanctions ADD COLUMN IF NOT EXISTS levee_le TIMESTAMPTZ",
+        # Rattrapage (idempotent) : avant levee_le, une réactivation ne marquait rien.
+        # Un membre qui n'est plus suspendu n'a aucune suspension active ; un membre
+        # encore suspendu ne garde active que sa dernière suspension par tontine.
+        """UPDATE sanctions s SET levee_le = NOW()
+           FROM membres m
+           WHERE m.id = s.membre_id AND s.levee_le IS NULL
+             AND s.type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage')
+             AND m.statut_global <> 'Suspendu_global'""",
+        """UPDATE sanctions s SET levee_le = NOW()
+           WHERE s.levee_le IS NULL
+             AND s.type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage')
+             AND EXISTS (SELECT 1 FROM sanctions s2
+                         WHERE s2.membre_id = s.membre_id
+                           AND s2.tontine_id IS NOT DISTINCT FROM s.tontine_id
+                           AND s2.type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage')
+                           AND s2.levee_le IS NULL AND s2.id > s.id)""",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_ouverture TEXT NOT NULL DEFAULT '05:00'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_rappel TEXT NOT NULL DEFAULT '14:00'",
         "ALTER TABLE admins_groupe ADD COLUMN IF NOT EXISTS numero_collecte TEXT",
