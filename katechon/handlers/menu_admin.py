@@ -62,6 +62,23 @@ __all__ = ["kick_membre_si_bot_admin", "wa_mentionner_retardataires",
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
 
+def _membre_de_la_tontine(conn, numero: str, tid: int, tnom: str):
+    """Membre de la tontine de la session admin, recherché par numéro.
+
+    Retourne (membre, None) s'il a une adhésion dans cette tontine. Sinon
+    (None, refus) : refus est le message à renvoyer si le numéro appartient à
+    un membre d'une autre tontine, None s'il est inconnu (le flux garde alors
+    son propre message). Aucune action admin ne peut viser un autre groupe.
+    """
+    membre = fetchone(conn, """SELECT * FROM membres WHERE whatsapp=%s
+                               AND id IN (SELECT membre_id FROM adhesions WHERE tontine_id=%s)""",
+                      (numero, tid))
+    if membre:
+        return membre, None
+    ailleurs = fetchone(conn, "SELECT id FROM membres WHERE whatsapp=%s", (numero,))
+    return None, (f"❌ Ce numéro n'est pas membre de {tnom}." if ailleurs else None)
+
+
 def kick_membre_si_bot_admin(membre_id: int, tontine_id: int, raison: str = "") -> bool:
     """
     Exclut un membre de tous les groupes de sa tontine si le bot y est admin.
@@ -641,10 +658,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         if num == wa:
             return "❌ Vous ne pouvez pas modifier votre propre rang."
         conn = get_conn()
-        m    = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         if not m:
             release_conn(conn)
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         t       = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
         passage = fetchone(conn, """
             SELECT id, ordre FROM liste_passage
@@ -721,10 +738,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "susp_wa":
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         release_conn(conn)
         if not m:
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         sess["data"].update({"susp_id": m["id"], "susp_nom": m["nom_complet"], "susp_wa": num})
         sess["etape"] = "susp_raison"
         return f"👤 *{m['nom_complet']}*\nEntrez la raison de la suspension :"
@@ -753,10 +770,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "react_wa":
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn, "SELECT id, nom_complet, statut_global FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         release_conn(conn)
         if not m:
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         if m["statut_global"] not in ("Suspendu_global",):
             sess["etape"] = "menu"
             return f"ℹ️ {m['nom_complet']} n'est pas suspendu (statut: {m['statut_global']})."
@@ -777,10 +794,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "histo_wa":
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn, "SELECT * FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         if not m:
             release_conn(conn)
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         txs     = fetchall(conn, """
             SELECT type_transaction, montant_brut, frais_fmp, frais_ira,
                    montant_net, statut, date_heure, periodes_payees
@@ -889,10 +906,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "pause_wa":
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         release_conn(conn)
         if not m:
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         sess["data"].update({"cas_mbr_id": m["id"], "cas_mbr_nom": m["nom_complet"], "cas_wa": num})
         sess["etape"] = "pause_date"
         return f"👤 *{m['nom_complet']}*\nEntrez la *date de reprise* (format: JJ/MM/AAAA) :"
@@ -933,10 +950,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "echel_wa":
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         release_conn(conn)
         if not m:
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         sess["data"].update({"cas_mbr_id": m["id"], "cas_mbr_nom": m["nom_complet"], "cas_wa": num})
         sess["etape"] = "echel_config"
         return (
@@ -971,10 +988,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "cession_wa":
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         release_conn(conn)
         if not m:
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         sess["data"].update({"cas_mbr_id": m["id"], "cas_mbr_nom": m["nom_complet"]})
         sess["etape"] = "cession_cessionnaire"
         return f"👤 Cédant : *{m['nom_complet']}*\nEntrez le numéro du *bénéficiaire* (cessionnaire) :"
@@ -982,10 +999,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "cession_cessionnaire":
         num2 = normaliser_numero(texte)
         conn = get_conn()
-        m2   = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num2,))
+        m2, refus_m2 = _membre_de_la_tontine(conn, num2, tid, tnom)
         if not m2:
             release_conn(conn)
-            return "❌ Cessionnaire non trouvé."
+            return refus_m2 or "❌ Cessionnaire non trouvé."
         d    = sess["data"]
         t_db = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
         q(conn, """UPDATE liste_passage SET membre_id=%s
@@ -1013,10 +1030,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "exoner_wa":
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         release_conn(conn)
         if not m:
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         sess["data"].update({"cas_mbr_id": m["id"], "cas_mbr_nom": m["nom_complet"], "cas_wa": num})
         sess["etape"] = "exoner_type"
         return (
@@ -1030,10 +1047,15 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "exoner_type":
         d    = sess["data"]
         t    = texte.upper()
+        if t not in ("A", "B", "C"):
+            return "❌ Tapez A, B ou C."
         conn = get_conn()
         if t in ("A", "C"):
-            q(conn, "UPDATE dettes_ira SET statut='Prelevee', prelevee_le=NOW() WHERE membre_id=%s AND statut='Due'",
-              (d["cas_mbr_id"],))
+            # Seules les dettes IRA de CETTE tontine : celles d'un autre groupe
+            # reviennent à ses membres ponctuels et ne relèvent pas de cet admin.
+            q(conn, """UPDATE dettes_ira SET statut='Prelevee', prelevee_le=NOW()
+                       WHERE membre_id=%s AND tontine_id=%s AND statut='Due'""",
+              (d["cas_mbr_id"], tid))
         if t in ("B", "C"):
             q(conn, "UPDATE membres SET solde_dette=0 WHERE id=%s", (d["cas_mbr_id"],))
         q(conn, """INSERT INTO cas_difficiles
@@ -1052,10 +1074,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
     elif sess.get("etape") == "exclus_wa":
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn, "SELECT id, nom_complet FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         release_conn(conn)
         if not m:
-            return "❌ Numéro non trouvé."
+            return refus or "❌ Numéro non trouvé."
         sess["data"].update({"cas_mbr_id": m["id"], "cas_mbr_nom": m["nom_complet"], "cas_wa": num})
         sess["etape"] = "exclus_raison"
         return (
@@ -1106,11 +1128,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             return "❌ Annulé."
         num  = normaliser_numero(texte)
         conn = get_conn()
-        m    = fetchone(conn,
-            "SELECT id, nom_complet, whatsapp FROM membres WHERE whatsapp=%s", (num,))
+        m, refus = _membre_de_la_tontine(conn, num, tid, tnom)
         if not m:
             release_conn(conn)
-            return "❌ Numéro non trouvé en base."
+            return refus or "❌ Numéro non trouvé en base."
         caution = fetchone(conn,
             "SELECT id, montant FROM cautions_garantie "
             "WHERE membre_id=%s AND tontine_id=%s AND statut='Bloquee'",
