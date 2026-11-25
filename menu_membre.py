@@ -17,7 +17,7 @@ from katechon.core.audit import log_audit
 from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn
 from katechon.core.etat import _sessions_kyc, _sessions_lock, _sessions_membre, session_valide
 from katechon.messaging.messages import MENU_MEMBRE_TXT, MSG_BIENVENUE_DM, msg_dissuasion
-from paiement import traiter_reponse_numero_bouffage
+from katechon.finance.paiement import traiter_reponse_numero_bouffage
 from katechon.core.socle import (
     FRAIS_CHGNUM,
     FRAIS_FMP,

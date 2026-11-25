@@ -13,7 +13,7 @@ import hashlib
 import re
 from datetime import datetime, time, timedelta
 
-import ira_engine
+from katechon.finance import ira_engine
 import psycopg2.extras
 from katechon.security import screenshot_integrity as si
 from katechon.core.audit import log_audit

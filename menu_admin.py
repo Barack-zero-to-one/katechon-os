@@ -20,7 +20,7 @@ from katechon.core.audit import log_audit
 from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
 from katechon.core.etat import _sessions_admin, session_valide
 from katechon.messaging.messages import MENU_ADMIN_TXT, MENU_CAS_DIFFICILES, msg_dissuasion, parser_liste_passage
-from paiement import (
+from katechon.finance.paiement import (
     _get_retardataires,
     _solder_versement,
     _verifier_fin_cycle,
@@ -47,7 +47,7 @@ from katechon.core.socle import (
     normaliser_numero,
     valider_numero_cameroun,
 )
-from trust_graph import (
+from katechon.finance.trust_graph import (
     _update_score_confiance,
     commande_admin_cas_difficile,
     commande_admin_cas_resolu,
