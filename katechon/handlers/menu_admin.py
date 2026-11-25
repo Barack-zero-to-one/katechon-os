@@ -748,6 +748,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         release_conn(conn)
         if not m:
             return refus
+        if m["statut_global"] == "Banni":
+            # Suspendre un banni le rendrait réactivable (option 5 B) : le bannissement serait perdu.
+            sess["etape"] = "menu"
+            return f"❌ {m['nom_complet']} est banni : il ne peut être ni suspendu ni réactivé."
         sess["data"].update({"susp_id": m["id"], "susp_nom": m["nom_complet"], "susp_wa": num})
         sess["etape"] = "susp_raison"
         return f"👤 *{m['nom_complet']}*\nEntrez la raison de la suspension :"
@@ -756,7 +760,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         d      = sess["data"]
         raison = texte
         conn   = get_conn()
-        q(conn, "UPDATE membres SET statut_global='Suspendu_global' WHERE id=%s", (d["susp_id"],))
+        q(conn, "UPDATE membres SET statut_global='Suspendu_global' WHERE id=%s AND statut_global <> 'Banni'", (d["susp_id"],))
         _update_score_confiance(conn, d["susp_id"], delta=-20, raison="Suspension globale par admin")
         q(conn, "UPDATE adhesions SET statut='Suspendu' WHERE membre_id=%s AND tontine_id=%s", (d["susp_id"], tid))
         q(conn, "INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes) VALUES (%s,%s,'Suspension_72h',%s)",
