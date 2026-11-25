@@ -14,53 +14,19 @@ __all__ = ["init_db"]
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
 
-# Reprises à usage unique (voir init_db) : suspensions antérieures à sanctions.levee_le.
+# Reprises à usage unique (voir init_db).
+# Avant sanctions.levee_le, une réactivation ne marquait rien et deux jobs ne traçaient
+# pas leurs suspensions : les anciennes données ne disent pas qui a levé quoi. Plutôt
+# que de deviner, toutes les suspensions antérieures sont marquées levées une fois ;
+# un membre déjà suspendu au déploiement se réactive comme avant (admin de l'une de
+# ses tontines), et l'isolation par tontine vaut pour toute suspension postérieure.
 _REPRISES_DONNEES = [
     ("2026-11-sanctions-levee", [
-            # Avant levee_le, une réactivation ne marquait rien.
-            # Un membre qui n'est plus suspendu n'a aucune suspension active ; un membre
-            # encore suspendu ne garde active que sa dernière suspension par tontine.
-            """UPDATE sanctions s SET levee_le = NOW()
-               FROM membres m
-               WHERE m.id = s.membre_id AND s.levee_le IS NULL
-                 AND s.type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage')
-                 AND m.statut_global <> 'Suspendu_global'""",
-            """UPDATE sanctions s SET levee_le = NOW()
-               WHERE s.levee_le IS NULL
-                 AND s.type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage')
-                 AND EXISTS (SELECT 1 FROM sanctions s2
-                             WHERE s2.membre_id = s.membre_id
-                               AND s2.tontine_id IS NOT DISTINCT FROM s.tontine_id
-                               AND s2.type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage')
-                               AND s2.levee_le IS NULL AND s2.id > s.id)""",
-            # Une ancienne Suspension_72h mettait l'adhésion en Suspendu : si l'adhésion ne
-            # l'est plus, l'admin de cette tontine l'avait levée sous l'ancien code.
-            """UPDATE sanctions s SET levee_le = NOW()
-               WHERE s.levee_le IS NULL AND s.type_sanction = 'Suspension_72h'
-                 AND NOT EXISTS (SELECT 1 FROM adhesions a
-                                 WHERE a.membre_id = s.membre_id AND a.tontine_id = s.tontine_id
-                                   AND a.statut = 'Suspendu')""",
-            # Les deux jobs ne traçaient pas leurs suspensions : les recréer depuis leurs
-            # traces pour les membres encore suspendus (blocage fugitif non traité, tour intercepté).
-            """INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes)
-               SELECT DISTINCT af.membre_id, af.tontine_id, 'Fugue_post_bouffage', 'Reprise : blocage antérieur'
-               FROM alertes_fugue af JOIN membres m ON m.id = af.membre_id
-               WHERE af.type_alerte = 'Blocage' AND af.traite = 0 AND m.statut_global = 'Suspendu_global'
-                 AND NOT EXISTS (SELECT 1 FROM sanctions s WHERE s.membre_id = af.membre_id
-                                 AND s.tontine_id = af.tontine_id AND s.levee_le IS NULL
-                                 AND s.type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage'))""",
-            """INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes)
-               SELECT DISTINCT lp.membre_id, lp.tontine_id, 'Interception_bouffage', 'Reprise : interception antérieure'
-               FROM liste_passage lp
-               JOIN membres m ON m.id = lp.membre_id
-               JOIN tontines t ON t.id = lp.tontine_id AND t.cycle_actuel = lp.cycle
-               WHERE lp.statut = 'Intercepte' AND m.statut_global = 'Suspendu_global'
-                 AND NOT EXISTS (SELECT 1 FROM sanctions s WHERE s.membre_id = lp.membre_id
-                                 AND s.tontine_id = lp.tontine_id AND s.levee_le IS NULL
-                                 AND s.type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage'))""",
+        """UPDATE sanctions SET levee_le = NOW()
+           WHERE levee_le IS NULL
+             AND type_sanction IN ('Suspension_72h','Interception_bouffage','Fugue_post_bouffage')""",
     ]),
 ]
-
 
 def init_db():
     conn = get_conn()

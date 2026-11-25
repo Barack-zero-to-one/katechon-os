@@ -723,7 +723,7 @@ def verifier_suspensions_retard():
                        a.nb_avertissements_retard
                 FROM adhesions a JOIN membres m ON m.id=a.membre_id
                 WHERE a.tontine_id=%s AND a.statut='Actif'
-                  AND m.suspendu_retard=0 AND m.statut_global = 'Actif'
+                  AND m.suspendu_retard=0 AND m.statut_global NOT IN ('Suspendu_global','Banni')
                   AND m.id NOT IN (
                       SELECT DISTINCT t2.membre_id FROM transactions t2
                       WHERE t2.tontine_id=%s
@@ -763,7 +763,8 @@ def verifier_suspensions_retard():
                         if not q(conn, """UPDATE membres
                                    SET suspendu_retard=1, date_suspension_retard=NOW(),
                                        statut_global='Suspendu_global'
-                                   WHERE id=%s AND statut_global='Actif'""", (m["id"],)).rowcount:
+                                   WHERE id=%s AND statut_global NOT IN ('Suspendu_global','Banni')""",
+                                   (m["id"],)).rowcount:
                             conn.rollback()      # banni ou suspendu entre-temps : rien à faire
                             continue
                         _update_score_confiance(conn, m["id"], delta=-25, raison="Suspension retard — récidive")

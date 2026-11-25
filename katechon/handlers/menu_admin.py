@@ -760,7 +760,12 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         d      = sess["data"]
         raison = texte
         conn   = get_conn()
-        q(conn, "UPDATE membres SET statut_global='Suspendu_global' WHERE id=%s AND statut_global <> 'Banni'", (d["susp_id"],))
+        if not q(conn, "UPDATE membres SET statut_global='Suspendu_global' WHERE id=%s AND statut_global <> 'Banni'",
+                 (d["susp_id"],)).rowcount:
+            conn.rollback()
+            release_conn(conn)
+            sess["etape"] = "menu"
+            return f"❌ {d['susp_nom']} est banni : il ne peut être ni suspendu ni réactivé."
         _update_score_confiance(conn, d["susp_id"], delta=-20, raison="Suspension globale par admin")
         q(conn, "UPDATE adhesions SET statut='Suspendu' WHERE membre_id=%s AND tontine_id=%s", (d["susp_id"], tid))
         q(conn, "INSERT INTO sanctions (membre_id, tontine_id, type_sanction, notes) VALUES (%s,%s,'Suspension_72h',%s)",
@@ -815,6 +820,12 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                         f"seul son admin peut lever cette suspension.")
             if levables:
                 q(conn, "UPDATE sanctions SET levee_le=NOW() WHERE id = ANY(%s)", (levables,))
+                # Un blocage fugitif levé est clos : s'il ne paie toujours pas,
+                # detecter_fugitifs pourra le détecter à nouveau.
+                q(conn, """UPDATE alertes_fugue SET traite=1
+                           WHERE membre_id=%s AND type_alerte='Blocage' AND traite=0
+                             AND tontine_id IN (SELECT tontine_id FROM sanctions WHERE id = ANY(%s))""",
+                  (m["id"], levables))
             # Adhésion suspendue remise Actif (une pause ou une exonération reste telle quelle),
             # et nouveau sursis : sans cela le job 72 h la resuspendrait dans l'heure.
             q(conn, """UPDATE adhesions SET statut='Actif' WHERE membre_id=%s AND tontine_id=%s
@@ -823,6 +834,9 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
               (m["id"], tid))
             if not ailleurs:
                 q(conn, "UPDATE membres SET statut_global='Actif', suspendu_retard=0 WHERE id=%s", (m["id"],))
+                # Réactivé sur tout le réseau : nouveau sursis dans chacune de ses tontines,
+                # où les retards ont couru pendant qu'il ne pouvait pas payer.
+                q(conn, "UPDATE adhesions SET nb_avertissements_retard=0 WHERE membre_id=%s", (m["id"],))
             conn.commit()
         finally:
             release_conn(conn)
