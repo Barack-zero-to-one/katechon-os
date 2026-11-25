@@ -871,7 +871,7 @@ def commande_admin_cas_resolu(wa_admin: str, args_texte: str) -> str:
             a_regler = bouffage_a_regler(conn, c["tontine_id"], c["membre_id"], verrouiller=True)
             if a_regler:
                 conn.rollback()
-                return msg_bouffage_a_regler(a_regler)
+                return msg_bouffage_a_regler(a_regler, "retirer ce membre")
             q(conn, "UPDATE adhesions SET statut='Quitte' WHERE membre_id=%s AND tontine_id=%s",
               (c["membre_id"], c["tontine_id"]))
             # Comme une cession (menu 9 C) : ses tours non servis ne seront pas payés.

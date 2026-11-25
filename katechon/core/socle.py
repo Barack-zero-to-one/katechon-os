@@ -83,7 +83,7 @@ class BouffageARegler(Exception):
     args[0] : les tours concernés, tels que renvoyés par bouffage_a_regler."""
 
 
-def msg_bouffage_a_regler(tours) -> str:
+def msg_bouffage_a_regler(tours, action: str = "modifier la liste") -> str:
     """Refus nommant chaque tour et l'issue qui lui correspond (bloqué ou approuvé)."""
     bloques   = [f"#{x['id']}" for x in tours if not x["approuve"]]
     approuves = [f"#{x['id']} approuvé" for x in tours if x["approuve"]]
@@ -95,7 +95,7 @@ def msg_bouffage_a_regler(tours) -> str:
         parties.append("passage " + ", ".join(approuves) + " : versé à la prochaine heure de "
                        "bouffage, ou ANNULER_ACCORD")
     return ("❌ Un bouffage bloqué ou approuvé attend son règlement (" + " ; ".join(parties)
-            + ") : la liste ne peut pas être modifiée avant.")
+            + f") : impossible de {action} avant.")
 
 
 _SQL_A_REGLER = """
@@ -103,11 +103,11 @@ _SQL_A_REGLER = """
     FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
     WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
       AND (%s::int IS NULL OR lp.membre_id = %s::int)
-      AND (lp.bloque_suspect = 1 OR lp.debloque_le IS NOT NULL)
+      AND (lp.bloque_suspect = 1 OR lp.debloque_le IS NOT NULL OR lp.echec_le IS NOT NULL)
     ORDER BY lp.ordre"""
 
 _SQL_A_REGLER_VERROU = """
-    SELECT lp.id, lp.bloque_suspect, lp.debloque_le
+    SELECT lp.id, lp.bloque_suspect, lp.debloque_le, lp.echec_le
     FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
     WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
       AND (%s::int IS NULL OR lp.membre_id = %s::int)
@@ -129,7 +129,7 @@ def bouffage_a_regler(conn, tontine_id: int, membre_id: int = None, verrouiller:
         lignes = fetchall(conn, _SQL_A_REGLER, (tontine_id, membre_id, membre_id))
     else:
         lignes = [l for l in fetchall(conn, _SQL_A_REGLER_VERROU, (tontine_id, membre_id, membre_id))
-                  if l["bloque_suspect"] or l["debloque_le"]]
+                  if l["bloque_suspect"] or l["debloque_le"] or l["echec_le"]]
     return [{"id": l["id"], "approuve": not l["bloque_suspect"]} for l in lignes]
 
 

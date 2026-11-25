@@ -356,7 +356,6 @@ def notifier_prochain_bouffage():
             "SELECT * FROM tontines WHERE statut='Active' AND heure_bouffage=%s",
             (heure_now,))
 
-        reprise_annoncee = False   # un tour de ce passage a été confié au owner
         for t in tontines:
             passage = fetchone(conn, """
                 SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
@@ -368,15 +367,17 @@ def notifier_prochain_bouffage():
             """, (t["id"], t["cycle_actuel"], today))
 
             a_payer = [passage] if passage else []
-            # Rattrapage : tours débloqués par l'admin pour ce même titulaire, dont la date est
-            # passée ; payés APRÈS le tour du jour, qui n'est donc jamais remplacé.
+            # Rattrapage : tours débloqués par l'admin pour ce même titulaire, ou en échec
+            # technique, dont la date est passée ; payés APRÈS le tour du jour, qui n'est donc
+            # jamais remplacé.
             a_payer += fetchall(conn, """
                 SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
                 FROM liste_passage lp
                 LEFT JOIN membres m ON m.id = lp.membre_id
                 WHERE lp.tontine_id=%s AND lp.cycle=%s
                   AND lp.statut='En_attente' AND lp.bloque_suspect=0
-                  AND lp.debloque_le IS NOT NULL AND lp.debloque_pour = lp.membre_id
+                  AND ((lp.debloque_le IS NOT NULL AND lp.debloque_pour = lp.membre_id)
+                       OR lp.echec_le IS NOT NULL)     -- tour en échec technique : repris ici
                   AND lp.date_bouffage < %s
                 ORDER BY lp.date_bouffage, lp.ordre
             """, (t["id"], t["cycle_actuel"], today))
@@ -404,29 +405,29 @@ def notifier_prochain_bouffage():
                         except Exception:
                             pass
                         continue
-                    if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)) \
-                            and not reprise_annoncee:
-                        # Panne de base avant le versement : rien n'est commité, @healed relance
-                        # le job et le tour est repris. Pas de relance si un tour de ce passage a
-                        # déjà été confié au owner : la relance le paierait une seconde fois.
+                    # Échec avant le versement : rien n'est commité. Le tour est marqué en échec
+                    # (echec_le) : la requête de rattrapage le reprend à la prochaine heure de
+                    # bouffage. Personne n'est jamais invité à virer à la main, donc une relance
+                    # (@healed, ou le rattrapage) ne peut pas doubler un versement manuel.
+                    try:
+                        q(conn, """UPDATE liste_passage SET echec_le=NOW()
+                                   WHERE id=%s AND statut='En_attente'""", (p.get("id"),))
+                        conn.commit()
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                    if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+                        # Panne de base : @healed relance le job, qui reprend le tour.
                         raise
                     log.error(f"❌ bouffage passage#{p.get('id')} tontine#{t['id']} : {e}")
-                    approuve = bool(p.get("debloque_le")) and p.get("debloque_pour") == p.get("membre_id")
-                    suite = (
-                        # Un tour approuvé reste rattrapable : le job le reprend lui-même.
-                        f"Il sera réessayé automatiquement à la prochaine heure de bouffage : "
-                        f"ne virez rien à la main."
-                        if approuve else
-                        # Le tour du jour n'est repris par aucun passage suivant (date passée).
-                        f"Le owner BADF est prévenu et reprend ce versement."
-                    )
-                    if not approuve:
-                        reprise_annoncee = True
                     alerte = (
                         f"⚠️ *BOUFFAGE NON DÉCLENCHÉ — {t['nom']}*\n\n"
                         f"Le bouffage de *{p.get('nom_complet') or p.get('nickname') or '?'}* "
                         f"(passage #{p.get('id')}) n'a pas pu être déclenché : erreur technique.\n"
-                        f"{suite}"
+                        f"Il sera réessayé automatiquement à la prochaine heure de bouffage : "
+                        f"ne virez rien à la main. Le owner BADF suit ce tour."
                     )
                     # Envois séparés, le owner d'abord : wa_admins_tontine passe par la base.
                     for envoyer in (lambda: wa_owner(alerte), lambda: wa_admins_tontine(t["id"], alerte)):
@@ -496,14 +497,37 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
             f"rebloquer ce tour.")
         return
 
+    if approuve and fetchone(conn, """
+            SELECT 1 AS x FROM liste_passage lp JOIN tontines tt ON tt.id = lp.tontine_id
+            WHERE lp.tontine_id=%s AND lp.membre_id=%s AND lp.cycle = tt.cycle_actuel
+              AND lp.statut='En_attente' AND lp.bloque_suspect=1""",
+            (t["id"], passage["membre_id"])):
+        # Un signal suspect plus récent sur un autre tour du membre (bloqué à l'instant,
+        # ou encore en attente de décision) suspend l'accord : rien n'est versé tant
+        # que ce blocage n'est pas levé.
+        conn.rollback()
+        try:
+            wa_admins_tontine(t["id"],
+                f"⏸️ *BOUFFAGE APPROUVÉ SUSPENDU — {t['nom']}*\n\n"
+                f"Un autre tour de *{passage.get('nom_complet') or '?'}* vient d'être bloqué "
+                f"par le contrôle suspect : son bouffage approuvé (passage #{passage['id']}) "
+                f"n'est pas versé tant que ce blocage n'est pas levé (DEBLOQUER), "
+                f"ou tapez *ANNULER_ACCORD {passage['id']}*.")
+        except Exception as e:
+            log.error(f"alerte accord suspendu #{passage['id']} : {e}")
+        return
+
     # Membre non encore enrôlé
     if not passage.get("membre_id"):
-        wa_admins_tontine(t["id"],
-            f"⚠️ *BOUFFAGE BLOQUÉ — {t['nom']}*\n\n"
-            f"Le bénéficiaire *{passage.get('nickname','?')}* "
-            f"n'est pas encore enrôlé.\n\n"
-            f"Demandez-lui de taper *menu* en DM au bot.")
-        conn.rollback()   # libère le verrou du tour
+        conn.rollback()   # libère le verrou du tour avant l'envoi
+        try:
+            wa_admins_tontine(t["id"],
+                f"⚠️ *BOUFFAGE BLOQUÉ — {t['nom']}*\n\n"
+                f"Le bénéficiaire *{passage.get('nickname','?')}* "
+                f"n'est pas encore enrôlé.\n\n"
+                f"Demandez-lui de taper *menu* en DM au bot.")
+        except Exception as e:
+            log.error(f"alerte non enrôlé #{passage['id']} : {e}")
         return
 
     # ── Vérification historique cotisation avant bouffage ────────────
@@ -564,7 +588,7 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
         )
         log_audit("TRUST_GRAPH_ERREUR",
                   f"{passage['nom_complet']} | {t['nom']}", passage.get("whatsapp", ""))
-    elif score_trust["niveau"] in ("orange", "rouge"):
+    elif score_trust["niveau"] in ("orange", "rouge") and not approuve:   # déjà décidé par l'admin
         emoji_tg = "🔴" if score_trust["niveau"] == "rouge" else "🟠"
         signaux_txt = "\n".join(f"  • {s}" for s in score_trust["signaux"])
         wa_admins_tontine(t["id"],
