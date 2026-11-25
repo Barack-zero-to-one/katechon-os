@@ -1798,7 +1798,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                                          or passage["statut_adhesion"] != "Actif"):
                 # Le job ne verse pas à un membre inactif : l'accord promettrait un versement fictif.
                 return (f"❌ {passage['nom_complet']} n'est pas actif dans {tnom} (suspendu, banni ou sorti) : "
-                        f"son bouffage ne peut pas être versé pour l'instant.")
+                        f"son bouffage ne peut pas être versé. Réactivez-le d'abord (option 5), puis "
+                        f"débloquez ; sinon ce tour sera intercepté à l'expiration de son blocage de 48 h.")
             # Accord lié au titulaire actuel : une cession ou une nouvelle liste l'annule.
             q(conn, """UPDATE liste_passage
                        SET bloque_suspect=0, date_blocage=NULL,

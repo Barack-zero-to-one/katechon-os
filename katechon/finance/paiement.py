@@ -799,7 +799,8 @@ def traiter_reponse_numero_bouffage(wa: str, texte: str, membre: dict):
             cur.execute("""UPDATE bouffages_manuels
                            SET statut='Vire', numero_mm=%s, operateur_cashout=%s
                            WHERE membre_id=%s AND tontine_id=%s AND statut='En_attente'
-                             AND (id=%s OR expiration IS NOT NULL)
+                             AND (id=%s OR (expiration IS NOT NULL
+                                            AND expiration > NOW() - INTERVAL '1 day'))
                            RETURNING id, montant_net""",
                         (numero, operateur, bouffage["membre_id"], bouffage["tontine_id"], bouffage["id"]))
             regles = sorted(cur.fetchall(), key=lambda r: r["id"])

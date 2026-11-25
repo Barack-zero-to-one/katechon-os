@@ -387,9 +387,9 @@ def notifier_prochain_bouffage():
                         conn.rollback()
                     except Exception:
                         pass
-                    if p.get("_declenche"):
-                        # Le bouffage est déjà enregistré et le membre prévenu : seules des
-                        # notifications ont échoué. Ni relance ni annonce d'échec (double versement).
+                    if p.get("_declenche") or _passage_notifie(conn, p.get("id")):
+                        # Le bouffage est déjà enregistré ('Notifie' est commité avec lui) : seules
+                        # des notifications ont échoué. Ni relance ni annonce d'échec (double versement).
                         log.error(f"⚠️ bouffage passage#{p.get('id')} déclenché, notifications incomplètes : {e}")
                         continue
                     if isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)):
@@ -420,6 +420,15 @@ def notifier_prochain_bouffage():
                             pass
     finally:
         release_conn(conn)
+
+
+def _passage_notifie(conn, passage_id) -> bool:
+    """Le tour a-t-il été commité 'Notifie' (bouffage enregistré) ? Faux si on ne peut pas le lire."""
+    try:
+        etat = fetchone(conn, "SELECT statut FROM liste_passage WHERE id=%s", (passage_id,))
+        return bool(etat) and etat["statut"] == "Notifie"
+    except Exception:
+        return False
 
 
 def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> None:
