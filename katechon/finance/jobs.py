@@ -13,6 +13,8 @@ import os
 import shutil
 import subprocess
 import time as time_module
+
+import psycopg2
 from datetime import datetime, timedelta
 
 from katechon.core.audit import log_audit
@@ -164,6 +166,7 @@ def traiter_bouffages_suspects_expires():
                    "Dette résiduelle — bouffage suspect non débloqué"))
 
             # Virer le reliquat au membre si positif
+            a_virer = None
             if solde_membre > 0:
                 # montant_ira = 0 : les dettes IRA sont déjà soldées par la
                 # caution ci-dessus, ce reliquat n'en déduit aucune.
@@ -173,7 +176,8 @@ def traiter_bouffages_suspects_expires():
                            VALUES (%s,%s,%s,%s,0,%s,'En_attente',0)""",
                   (membre_id, tontine_id, p["id"], solde_membre, solde_membre))
                 # Pas de commit ici : il libérerait le verrou du tour avant l'interception.
-                wa_admins_tontine(tontine_id,
+                # L'ordre de virement part après le commit (rien d'annoncé s'il échoue).
+                a_virer = (tontine_id,
                     f"💳 *À VIRER AU MEMBRE — {p['tontine_nom']}*\n\n"
                     f"Membre : *{p['nom_complet']}*\n"
                     f"Montant net après déduction dettes : *{solde_membre:,} FCFA*\n\n"
@@ -195,6 +199,8 @@ def traiter_bouffages_suspects_expires():
                   (membre_id, tontine_id))
 
             conn.commit()
+            if a_virer:
+                wa_admins_tontine(*a_virer)
 
             # Notifier l'admin
             wa_admins_tontine(tontine_id,
@@ -353,7 +359,7 @@ def notifier_prochain_bouffage():
                 FROM liste_passage lp
                 LEFT JOIN membres m ON m.id = lp.membre_id
                 WHERE lp.tontine_id=%s AND lp.cycle=%s
-                  AND lp.statut='En_attente' AND lp.date_bouffage=%s
+                  AND lp.statut='En_attente' AND lp.bloque_suspect=0 AND lp.date_bouffage=%s
                 ORDER BY lp.ordre LIMIT 1
             """, (t["id"], t["cycle_actuel"], today))
 
@@ -368,11 +374,19 @@ def notifier_prochain_bouffage():
                   AND lp.statut='En_attente' AND lp.bloque_suspect=0
                   AND lp.debloque_le IS NOT NULL AND lp.debloque_pour = lp.membre_id
                   AND lp.date_bouffage < %s
+                  -- l'accord ne couvre pas une suspension ou un bannissement survenu depuis
+                  AND m.statut_global NOT IN ('Suspendu_global','Banni')
+                  AND EXISTS (SELECT 1 FROM adhesions a WHERE a.membre_id = lp.membre_id
+                                AND a.tontine_id = lp.tontine_id AND a.statut = 'Actif')
                 ORDER BY lp.date_bouffage, lp.ordre
             """, (t["id"], t["cycle_actuel"], today))
             for p in a_payer:
                 try:
                     _payer_passage(conn, t, p, rattrapage=p.get("date_bouffage") != today)
+                except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                    # Panne de base : remontée pour que @healed relance le job ; les tours
+                    # déjà versés sont 'Notifie' et ne sont pas repris.
+                    raise
                 except Exception as e:
                     # Un tour en erreur n'empêche ni les autres tours ni les autres tontines.
                     try:
