@@ -338,6 +338,8 @@ def init_db():
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS soumis_par TEXT",
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS bloque_suspect INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS date_blocage TIMESTAMPTZ",
+        # Levée d'une suspension par l'admin de SA tontine (réactivation isolée par tontine).
+        "ALTER TABLE sanctions ADD COLUMN IF NOT EXISTS levee_le TIMESTAMPTZ",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_ouverture TEXT NOT NULL DEFAULT '05:00'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_rappel TEXT NOT NULL DEFAULT '14:00'",
         "ALTER TABLE admins_groupe ADD COLUMN IF NOT EXISTS numero_collecte TEXT",

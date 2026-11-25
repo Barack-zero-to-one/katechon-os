@@ -62,6 +62,11 @@ __all__ = ["kick_membre_si_bot_admin", "wa_mentionner_retardataires",
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
 
+# Sanctions qui mettent le membre en Suspendu_global ; chacune porte la tontine
+# qui l'a prononcée (tontine_id) et sa levée éventuelle (levee_le).
+_TYPES_SUSPENSION = ("Suspension_72h", "Interception_bouffage", "Fugue_post_bouffage")
+
+
 def _membre_de_la_tontine(conn, numero: str, tid: int, tnom: str, inclure_partis: bool = False):
     """Membre de la tontine de la session admin, recherché par numéro.
 
@@ -778,13 +783,31 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         if m["statut_global"] not in ("Suspendu_global",):
             sess["etape"] = "menu"
             return f"ℹ️ {m['nom_complet']} n'est pas suspendu (statut: {m['statut_global']})."
-        conn = get_conn()
-        q(conn, "UPDATE membres SET statut_global='Actif' WHERE id=%s", (m["id"],))
-        q(conn, "UPDATE adhesions SET statut='Actif' WHERE membre_id=%s AND tontine_id=%s", (m["id"], tid))
-        conn.commit()
-        release_conn(conn)
-        wa_prive(num, "✅ *Compte réactivé — Barack Corp*\nBienvenue de retour !")
         sess["etape"] = "menu"
+        conn = get_conn()
+        try:
+            # Une suspension appartient à la tontine qui l'a prononcée (sanction non levée).
+            actives = fetchall(conn, """SELECT id, tontine_id FROM sanctions
+                                        WHERE membre_id=%s AND levee_le IS NULL
+                                          AND type_sanction = ANY(%s)
+                                        FOR UPDATE""", (m["id"], list(_TYPES_SUSPENSION)))
+            ici = [s["id"] for s in actives if s["tontine_id"] == tid]
+            ailleurs = [s for s in actives if s["tontine_id"] != tid]
+            if ailleurs and not ici:
+                return (f"❌ {m['nom_complet']} a été suspendu par une autre tontine : "
+                        f"seul son admin peut lever cette suspension.")
+            if ici:
+                q(conn, "UPDATE sanctions SET levee_le=NOW() WHERE id = ANY(%s)", (ici,))
+            q(conn, "UPDATE adhesions SET statut='Actif' WHERE membre_id=%s AND tontine_id=%s", (m["id"], tid))
+            if not ailleurs:
+                q(conn, "UPDATE membres SET statut_global='Actif', suspendu_retard=0 WHERE id=%s", (m["id"],))
+            conn.commit()
+        finally:
+            release_conn(conn)
+        if ailleurs:
+            return (f"✅ *{m['nom_complet']}* réactivé dans *{tnom}*. ⚠️ Il reste suspendu sur le réseau "
+                    f"par une autre tontine tant que son admin n'a pas levé sa suspension.")
+        wa_prive(num, "✅ *Compte réactivé — Barack Corp*\nBienvenue de retour !")
         return f"✅ *{m['nom_complet']}* réactivé."
 
     # ── Option 6 : Historique complet membre ──────────────────────────────
