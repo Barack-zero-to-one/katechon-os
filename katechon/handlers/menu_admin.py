@@ -67,6 +67,26 @@ log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie incha
 _TYPES_SUSPENSION = ("Suspension_72h", "Interception_bouffage", "Fugue_post_bouffage")
 
 
+def _bouffage_a_regler(conn, tid: int, membre_id: int = None) -> bool:
+    """Un tour du cycle en cours est-il bloqué (contrôle suspect) ou approuvé
+    (DEBLOQUER, BOUFFAGE_COMPLET) sans avoir encore été versé ?
+
+    Tant que c'est le cas, ni une cession ni une nouvelle liste ne doivent changer
+    le titulaire ou supprimer le tour : l'accord serait perdu, ou la sanction du
+    job d'expiration frapperait un autre membre.
+    """
+    return bool(fetchone(conn, """
+        SELECT 1 AS x FROM liste_passage lp JOIN tontines t ON t.id = lp.tontine_id
+        WHERE lp.tontine_id=%s AND lp.cycle = t.cycle_actuel AND lp.statut='En_attente'
+          AND (lp.bloque_suspect=1 OR lp.debloque_le IS NOT NULL)
+          AND (%s::int IS NULL OR lp.membre_id = %s::int)
+        LIMIT 1""", (tid, membre_id, membre_id)))
+
+
+MSG_BOUFFAGE_A_REGLER = ("❌ Un bouffage bloqué ou approuvé attend son règlement : réglez-le "
+                         "(DEBLOQUER, BOUFFAGE_COMPLET ou expiration) avant de modifier la liste.")
+
+
 def _membre_de_la_tontine(conn, numero: str, tid: int, tnom: str, inclure_partis: bool = False):
     """Membre de la tontine de la session admin, recherché par numéro.
 
@@ -369,6 +389,13 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
                 sess["data"].pop("confirme_remplacement", None)
             else:
                 return "Tapez *OUI* pour remplacer ou *NON* pour annuler."
+        _conn_chk = get_conn()
+        try:
+            _a_regler = _bouffage_a_regler(_conn_chk, tid)
+        finally:
+            release_conn(_conn_chk)
+        if _a_regler:
+            return MSG_BOUFFAGE_A_REGLER
         nb_ok, nb_non_lies = enregistrer_liste_passage(tid, lignes_parsees, wa)
 
         # Construire le récapitulatif
@@ -510,7 +537,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             FROM bouffages_manuels bm
             JOIN membres m ON m.id = bm.membre_id
             WHERE bm.tontine_id=%s AND bm.statut='En_attente'
-            ORDER BY bm.id DESC LIMIT 1
+            ORDER BY bm.id LIMIT 1
         """, (tid,))
         release_conn(conn_chk)
 
@@ -1066,6 +1093,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             release_conn(conn)
             return f"❌ Le bénéficiaire doit d'abord être membre de {tnom} (option 11 pour l'ajouter)."
         d    = sess["data"]
+        if _bouffage_a_regler(conn, tid, d["cas_mbr_id"]):
+            release_conn(conn)
+            sess["etape"] = "menu"
+            return (f"❌ Un bouffage bloqué ou approuvé de {d['cas_mbr_nom']} attend son règlement : "
+                    f"réglez-le avant la cession.")
         t_db = fetchone(conn, "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))
         q(conn, """UPDATE liste_passage SET membre_id=%s
                    WHERE tontine_id=%s AND membre_id=%s AND cycle=%s AND statut='En_attente'""",
@@ -1354,6 +1386,10 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         except ValueError:
             return "❌ Format invalide. Entrez des numéros séparés par des virgules."
         conn = get_conn()
+        if _bouffage_a_regler(conn, tid):
+            release_conn(conn)
+            sess["etape"] = "menu"
+            return MSG_BOUFFAGE_A_REGLER
         cycle = fetchone(conn,
             "SELECT cycle_actuel FROM tontines WHERE id=%s", (tid,))["cycle_actuel"]
         # Réinitialiser la liste de passage et recréer dans le bon ordre
@@ -1703,7 +1739,8 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             # Ligne verrouillée : deux décisions simultanées se sérialisent, et le job des
             # bouffages suspects expirés relit la ligne sous verrou avant d'intercepter.
             passage = fetchone(conn, """
-                SELECT lp.*, m.nom_complet, m.whatsapp, t.cycle_actuel, t.heure_bouffage
+                SELECT lp.*, m.nom_complet, m.whatsapp, t.cycle_actuel, t.heure_bouffage,
+                       t.statut AS statut_tontine
                 FROM liste_passage lp
                 JOIN tontines t ON t.id = lp.tontine_id
                 LEFT JOIN membres m ON m.id = lp.membre_id
@@ -1712,6 +1749,11 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
             """, (passage_id, tid))
             if not passage:
                 return f"❌ Passage #{passage_id} introuvable pour cette tontine."
+            if passage["statut_tontine"] != "Active":
+                # Le job de bouffage ne sert que les tontines actives : un accord ici
+                # promettrait un versement qui ne viendrait pas.
+                return (f"❌ {tnom} n'est pas active (statut : {passage['statut_tontine']}) : "
+                        f"aucun bouffage ne peut être versé pour l'instant.")
             # Seul un bouffage retenu par le contrôle suspect et encore en attente se
             # débloque : remettre en attente un tour payé, cédé ou intercepté le ferait repayer.
             if passage["statut"] != "En_attente":
@@ -1760,8 +1802,7 @@ def traiter_menu_admin(wa: str, texte: str) -> str:
         )
         return (
             f"✅ Bouffage de *{passage['nom_complet']}* débloqué.\n"
-            f"Il sera versé à la prochaine heure de bouffage ({heure}), "
-            f"en plus du bouffage prévu ce jour-là."
+            f"Il sera versé à la prochaine heure de bouffage ({heure})."
         )
 
     # ── Commande NOUVEAU_CYCLE — relancer un cycle après fin de cycle ────

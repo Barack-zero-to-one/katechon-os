@@ -172,7 +172,7 @@ def traiter_bouffages_suspects_expires():
                             caution, montant_net, statut, montant_ira)
                            VALUES (%s,%s,%s,%s,0,%s,'En_attente',0)""",
                   (membre_id, tontine_id, p["id"], solde_membre, solde_membre))
-                conn.commit()
+                # Pas de commit ici : il libérerait le verrou du tour avant l'interception.
                 wa_admins_tontine(tontine_id,
                     f"💳 *À VIRER AU MEMBRE — {p['tontine_nom']}*\n\n"
                     f"Membre : *{p['nom_complet']}*\n"
@@ -184,7 +184,7 @@ def traiter_bouffages_suspects_expires():
             # Marquer le passage comme intercepté
             q(conn, """UPDATE liste_passage
                        SET statut='Intercepte', bloque_suspect=0
-                       WHERE id=%s""", (p["id"],))
+                       WHERE id=%s AND bloque_suspect=1 AND statut='En_attente'""", (p["id"],))
 
             # Suspendre le membre, en traçant la tontine qui suspend (réactivation isolée)
             # (un membre banni le reste : jamais rétrogradé en suspendu levable)
@@ -342,40 +342,49 @@ def notifier_prochain_bouffage():
     heure_now = datetime.now().strftime("%H:00")
     today     = datetime.now().date()
     conn      = get_conn()
-    tontines  = fetchall(conn,
-        "SELECT * FROM tontines WHERE statut='Active' AND heure_bouffage=%s",
-        (heure_now,))
+    try:
+        tontines  = fetchall(conn,
+            "SELECT * FROM tontines WHERE statut='Active' AND heure_bouffage=%s",
+            (heure_now,))
 
-    for t in tontines:
-        passage = fetchone(conn, """
-            SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
-            FROM liste_passage lp
-            LEFT JOIN membres m ON m.id = lp.membre_id
-            WHERE lp.tontine_id=%s AND lp.cycle=%s
-              AND lp.statut='En_attente' AND lp.date_bouffage=%s
-            ORDER BY lp.ordre LIMIT 1
-        """, (t["id"], t["cycle_actuel"], today))
+        for t in tontines:
+            passage = fetchone(conn, """
+                SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
+                FROM liste_passage lp
+                LEFT JOIN membres m ON m.id = lp.membre_id
+                WHERE lp.tontine_id=%s AND lp.cycle=%s
+                  AND lp.statut='En_attente' AND lp.date_bouffage=%s
+                ORDER BY lp.ordre LIMIT 1
+            """, (t["id"], t["cycle_actuel"], today))
 
-        a_payer = [passage] if passage else []
-        # Rattrapage : tours débloqués par l'admin pour ce même titulaire, dont la date est
-        # passée ; payés APRÈS le tour du jour, qui n'est donc jamais remplacé.
-        a_payer += fetchall(conn, """
-            SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
-            FROM liste_passage lp
-            LEFT JOIN membres m ON m.id = lp.membre_id
-            WHERE lp.tontine_id=%s AND lp.cycle=%s
-              AND lp.statut='En_attente' AND lp.bloque_suspect=0
-              AND lp.debloque_le IS NOT NULL AND lp.debloque_pour = lp.membre_id
-              AND lp.date_bouffage < %s
-            ORDER BY lp.date_bouffage, lp.ordre
-        """, (t["id"], t["cycle_actuel"], today))
-        for p in a_payer:
-            _payer_passage(conn, t, p)
+            a_payer = [passage] if passage else []
+            # Rattrapage : tours débloqués par l'admin pour ce même titulaire, dont la date est
+            # passée ; payés APRÈS le tour du jour, qui n'est donc jamais remplacé.
+            a_payer += fetchall(conn, """
+                SELECT lp.*, m.nom_complet, m.whatsapp, m.id AS mbr_id
+                FROM liste_passage lp
+                LEFT JOIN membres m ON m.id = lp.membre_id
+                WHERE lp.tontine_id=%s AND lp.cycle=%s
+                  AND lp.statut='En_attente' AND lp.bloque_suspect=0
+                  AND lp.debloque_le IS NOT NULL AND lp.debloque_pour = lp.membre_id
+                  AND lp.date_bouffage < %s
+                ORDER BY lp.date_bouffage, lp.ordre
+            """, (t["id"], t["cycle_actuel"], today))
+            for p in a_payer:
+                try:
+                    _payer_passage(conn, t, p, rattrapage=p.get("date_bouffage") != today)
+                except Exception as e:
+                    # Un tour en erreur n'empêche ni les autres tours ni les autres tontines.
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    log.error(f"❌ bouffage passage#{p.get('id')} tontine#{t['id']} : {e}")
+    finally:
+        release_conn(conn)
 
-    release_conn(conn)
 
-
-def _payer_passage(conn, t: dict, passage: dict) -> None:
+def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> None:
     """Calcule et déclenche le bouffage d'un tour (DM bénéficiaire, admin, groupe).
 
     Un tour approuvé par l'admin (DEBLOQUER, BOUFFAGE_COMPLET) pour ce même membre
@@ -581,7 +590,7 @@ def _payer_passage(conn, t: dict, passage: dict) -> None:
     wa_prive(passage["whatsapp"], bordereau)
 
     # Annonce dans le groupe (sans montant — discrétion)
-    if t.get("whatsapp_groupe"):
+    if t.get("whatsapp_groupe") and not rattrapage:   # un rattrapage n'est pas le bouffage du jour
         wa_groupe(t["whatsapp_groupe"],
             f"🏆 *{t['nom']} — BOUFFAGE DU JOUR*\n\n"
             f"Le bénéficiaire du jour a été notifié en message privé.\n"

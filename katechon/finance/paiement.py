@@ -684,6 +684,13 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
               f"cette cagnotte, ne sont *pas* restituées (IRA de retard et/ou "
               f"cotisations manquantes).\n\n"
         )
+    elif caution == 0:
+        # Rien de retenu (bouffage complet, caution désactivée) : pas de section caution.
+        decompte = (
+            f"  Cagnotte brute    : {montant_brut:>10,} FCFA\n"
+            f"  ─────────────────────────────────\n"
+            f"  *MONTANT NET      : {montant_net:>10,} FCFA*\n\n"
+        )
     else:
         decompte = (
             f"  Cagnotte brute    : {montant_brut:>10,} FCFA\n"
@@ -786,9 +793,12 @@ def traiter_reponse_numero_bouffage(wa: str, texte: str, membre: dict):
             if not b2 or b2["statut"] != "En_attente":
                 conn.rollback()
                 return "ℹ️ Ce bouffage a déjà été traité."
+            # Un membre peut avoir deux bouffages en attente (tour du jour + rattrapage, ou
+            # plusieurs places) : son numéro vaut pour tous ceux de la même tontine.
             cur.execute("""UPDATE bouffages_manuels
                            SET statut='Vire', numero_mm=%s, operateur_cashout=%s
-                           WHERE id=%s""", (numero, operateur, bouffage["id"]))
+                           WHERE membre_id=%s AND tontine_id=%s AND statut='En_attente'""",
+                        (numero, operateur, bouffage["membre_id"], bouffage["tontine_id"]))
             conn.commit()
         except Exception as e:
             conn.rollback()
