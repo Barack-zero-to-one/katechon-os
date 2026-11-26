@@ -6,7 +6,7 @@
  *
  * Responsabilités :
  *   1. Démarrage du processus Python (barack_corp_v9_18.py)
- *   2. Health check toutes les 15s sur http://localhost:5000/health
+ *   2. Health check toutes les 15s sur http://127.0.0.1:5000/health
  *   3. Redémarrage automatique avec backoff exponentiel si crash
  *   4. Rejeu de la queue de messages persistante en cas de panne
  *   5. Logs structurés dans logs/watchdog.log
@@ -38,8 +38,9 @@ if (!HEALTH_TOKEN) {
     console.error("[FATAL] HEALTH_TOKEN absent de l'environnement — voir fichier ENV. Arrêt.");
     process.exit(1);
 }
-const HEALTH_URL        = `http://localhost:5000/health?token=${HEALTH_TOKEN}`;
-const WEBHOOK_URL       = "http://localhost:5000/webhook/whatsapp";
+// 127.0.0.1 et non localhost : le bot n'écoute qu'en IPv4 sur la boucle locale.
+const HEALTH_URL        = `http://127.0.0.1:5000/health?token=${HEALTH_TOKEN}`;
+const WEBHOOK_URL       = "http://127.0.0.1:5000/webhook/whatsapp";
 const QUEUE_FILE        = "logs/message_queue.json";
 const WATCHDOG_LOG      = "logs/watchdog.log";
 const HEALTH_INTERVAL   = 15000;    // 15s

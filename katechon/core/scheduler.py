@@ -269,10 +269,11 @@ def _shutdown_bot():
     log.info("Bot arrêté proprement — pool DB fermé.")
 
 
-def demarrer(servir: bool = True, hote: str = "0.0.0.0", port: Optional[int] = None):
+def demarrer(servir: bool = True, hote: str = "127.0.0.1", port: Optional[int] = None):
     """Démarre le bot : secrets, PostgreSQL, pool, tables, sessions, URL
     publique, scheduler, arrêt propre, puis Waitress sur hote:port (PORT par
-    défaut). Retourne le scheduler ; servir=False s'arrête avant Waitress.
+    défaut). Écoute sur la boucle locale par défaut : ngrok et le watchdog s'y
+    connectent, rien d'autre n'a à joindre le bot depuis le réseau local. Retourne le scheduler ; servir=False s'arrête avant Waitress.
     L'initialisation ne s'exécute qu'une fois par processus, même sous appels
     simultanés ; un appel ultérieur avec servir=True sert quand même HTTP."""
     port = PORT if port is None else port

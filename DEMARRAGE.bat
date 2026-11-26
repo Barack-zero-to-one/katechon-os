@@ -57,7 +57,7 @@ REM ── 3. Lancer ngrok en arrière-plan ────────────
 echo [3/4] Lancement ngrok...
 tasklist | findstr /I "ngrok.exe" >nul
 if errorlevel 1 (
-    start "ngrok" /MIN cmd /c "ngrok http --domain=lennox-unbiographical-jasmin.ngrok-free.dev 5000 >> logs\ngrok.log 2>&1"
+    start "ngrok" /MIN cmd /c "ngrok http --domain=lennox-unbiographical-jasmin.ngrok-free.dev 127.0.0.1:5000 >> logs\ngrok.log 2>&1"
     timeout /t 3 /nobreak >nul
     echo    ngrok lance.
 ) else (
