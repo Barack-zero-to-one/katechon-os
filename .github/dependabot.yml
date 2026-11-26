@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Bot dependencies (requirements.txt) and CI tools (requirements-ci.txt).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Africa/Douala
+    open-pull-requests-limit: 5
+    groups:
+      securite:
+        applies-to: security-updates
+        patterns: ["*"]
+  # Actions used by the workflows: keeps the pinned commit SHAs up to date.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Africa/Douala
+    groups:
+      actions:
+        patterns: ["*"]
