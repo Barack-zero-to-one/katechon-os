@@ -6,6 +6,6 @@ requests==2.34.2
 Pillow==13.0.0
 pytesseract==0.3.13
 opencv-python==4.10.0.84
-numpy==2.2.5
+numpy==2.5.5
 pdfplumber==0.11.11
 pytest==9.1.1
