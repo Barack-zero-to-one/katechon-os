@@ -1,0 +1,8 @@
+# Findings acknowledged in the history; gitleaks still scans every commit.
+#
+# An ngrok authtoken was hardcoded as the default of NGROK_TOKEN in the v9.18
+# release commit (2026-06-22). The default was removed later and the value is
+# now read only from the environment. A token published in a public history
+# must be treated as compromised: it is revoked in the ngrok dashboard, never
+# reused. Rewriting the history would not unpublish it.
+90915bea5ad98dfd637cb03a6a3d8e48e2e5eae9:barack_corp_v9_18.py:generic-api-key:229

@@ -15,14 +15,18 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Every third-party action is pinned to a full commit SHA (a tag can be moved);
+# Dependabot (.github/dependabot.yml) proposes the updates.
 jobs:
   syntax:
     name: Python Syntax Check
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
       - name: Syntax check
@@ -37,33 +41,52 @@ jobs:
   secrets-audit:
     name: No Hardcoded Secrets
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0   # gitleaks scans the whole history, not only the last commit
       - name: Scan tracked files for hardcoded credentials
         run: |
           # Fail if any real secret is assigned a literal value in tracked code.
           # Covers Meta Cloud API, Green API, PostgreSQL and the webhook secret.
           # POSIX ERE (grep -E): [[:space:]] instead of \s, ['\"] matches either quote.
-          PATTERN="(META_PHONE_ID|META_TOKEN|META_BUSINESS_ID|META_APP_SECRET|GREENAPI_TOKEN|GREENAPI_ID_INSTANCE|GREENAPI_WEBHOOK_SECRET|PG_PASS|PG_PASSWORD|DB_PASSWORD|DASHBOARD_TOKEN)[[:space:]]*=[[:space:]]*['\"][A-Za-z0-9_-]{6,}"
+          PATTERN="(META_PHONE_ID|META_TOKEN|META_BUSINESS_ID|META_APP_SECRET|GREENAPI_TOKEN|GREENAPI_ID_INSTANCE|GREENAPI_WEBHOOK_SECRET|NGROK_TOKEN|PG_PASS|PG_PASSWORD|DB_PASSWORD|DASHBOARD_TOKEN)[[:space:]]*=[[:space:]]*['\"][A-Za-z0-9_-]{6,}"
+          # os.getenv("NAME", "literal") defaults count too: the NGROK_TOKEN leak was one.
+          PATTERN_DEFAUT="getenv\([[:space:]]*['\"](META_TOKEN|META_APP_SECRET|GREENAPI_TOKEN|GREENAPI_WEBHOOK_SECRET|NGROK_TOKEN|PG_PASS|DASHBOARD_TOKEN|HEALTH_TOKEN)['\"][[:space:]]*,[[:space:]]*['\"][A-Za-z0-9_-]{6,}"
           # Scan every tracked file except this workflow (which names the vars on purpose).
           MATCHES=$(git ls-files -z \
             | grep -zv '^\.github/workflows/' \
-            | xargs -0 grep -nEH "$PATTERN" 2>/dev/null || true)
+            | xargs -0 grep -nEH -e "$PATTERN" -e "$PATTERN_DEFAUT" 2>/dev/null || true)
           if [ -n "$MATCHES" ]; then
             echo "FAIL: hardcoded secret detected"
             echo "$MATCHES"
             exit 1
           fi
           echo "OK: no hardcoded secrets"
+      - name: gitleaks over the full history
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$archive"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          # .gitleaksignore lists the findings already acknowledged, with their reason.
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 1 .
 
   dependencies:
     name: Dependency Install
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -90,19 +113,106 @@ jobs:
         # name and local module still resolves.
         run: python -c "import barack_corp_v9_18; print('barack_corp_v9_18 imported')"
 
+  schema:
+    name: Schema on PostgreSQL 16
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # postgres:16, pinned by digest (a tag can be moved).
+        image: postgres@sha256:07abc3f43c9395b0bdbbab36bc25ddb0e8d83cd4fcafb5fb7d6abe14ff156dd8
+        env:
+          POSTGRES_DB: barack_corp_ci
+          POSTGRES_HOST_AUTH_METHOD: trust   # disposable service container, reachable only from this job
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PG_HOST: localhost
+      PG_PORT: "5432"
+      PG_DB: barack_corp_ci
+      PG_USER: postgres
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: pip install
+        run: pip install --upgrade pip && pip install -r requirements.txt
+      - name: init_db() twice on a fresh database
+        # Schema, migrations and one-time data repairs must pass on an empty
+        # database and replay cleanly at every start (tests stay local, #61).
+        run: python .github/scripts/verifier_schema.py
+
+  security:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install the CI tools
+        run: pip install --upgrade pip && pip install -r requirements-ci.txt
+      - name: bandit (static security analysis)
+        # Medium severity and confidence or higher. A false positive is excluded
+        # on its own line with "# nosec <ID>" and its reason, never by lowering the bar.
+        run: bandit -r katechon barack_corp_v9_18.py -ll -ii
+      - name: pip-audit (known vulnerabilities in dependencies)
+        run: pip-audit -r requirements.txt -r requirements-ci.txt --progress-spinner off
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: ruff (bugs only, not style)
+        # Syntax errors, undefined names, invalid comparisons and statements.
+        run: |
+          pip install -r requirements-ci.txt
+          git ls-files -z '*.py' | xargs -0 ruff check --select E9,F63,F7,F82
+      - name: actionlint (workflow files)
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$archive"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
   # Single required status check for branch protection. Green only if every
   # upstream job succeeded — protects main behind one stable context name.
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    needs: [syntax, secrets-audit, dependencies]
+    needs: [syntax, secrets-audit, dependencies, schema, security, lint]
     if: always()
     steps:
       - name: Verify all checks passed
         run: |
-          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
-            echo "One or more CI jobs failed or were cancelled."
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "true" ]; then
+            echo "One or more CI jobs failed, were cancelled or skipped."
             exit 1
           fi
           echo "All CI jobs passed."
