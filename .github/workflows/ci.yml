@@ -55,9 +55,10 @@ jobs:
           # Fail if any real secret is assigned a literal value in tracked code.
           # Covers Meta Cloud API, Green API, PostgreSQL and the webhook secret.
           # POSIX ERE (grep -E): [[:space:]] instead of \s, ['\"] matches either quote.
-          PATTERN="(META_PHONE_ID|META_TOKEN|META_BUSINESS_ID|META_APP_SECRET|GREENAPI_TOKEN|GREENAPI_ID_INSTANCE|GREENAPI_WEBHOOK_SECRET|NGROK_TOKEN|PG_PASS|PG_PASSWORD|DB_PASSWORD|DASHBOARD_TOKEN)[[:space:]]*=[[:space:]]*['\"][A-Za-z0-9_-]{6,}"
-          # os.getenv("NAME", "literal") defaults count too: the NGROK_TOKEN leak was one.
-          PATTERN_DEFAUT="getenv\([[:space:]]*['\"](META_TOKEN|META_APP_SECRET|GREENAPI_TOKEN|GREENAPI_WEBHOOK_SECRET|NGROK_TOKEN|PG_PASS|DASHBOARD_TOKEN|HEALTH_TOKEN)['\"][[:space:]]*,[[:space:]]*['\"][A-Za-z0-9_-]{6,}"
+          PATTERN="(META_PHONE_ID|META_TOKEN|META_BUSINESS_ID|META_APP_SECRET|GREENAPI_TOKEN|GREENAPI_INSTANCE_ID|GREENAPI_ID_INSTANCE|GREENAPI_WEBHOOK_SECRET|NGROK_TOKEN|FLASK_SECRET_KEY|META_VERIFY_TOKEN|HEALTH_TOKEN|PG_PASS|PG_PASSWORD|DB_PASSWORD|DASHBOARD_TOKEN)[[:space:]]*=[[:space:]]*['\"][A-Za-z0-9_-]{6,}"
+          # Literal defaults in os.getenv / os.environ.get count too: the NGROK_TOKEN, PG_PASS,
+          # FLASK_SECRET_KEY and dashboard token leaks in the history all had this shape.
+          PATTERN_DEFAUT="(getenv|environ\.get)\([[:space:]]*['\"](META_TOKEN|META_APP_SECRET|META_VERIFY_TOKEN|GREENAPI_TOKEN|GREENAPI_INSTANCE_ID|GREENAPI_WEBHOOK_SECRET|NGROK_TOKEN|FLASK_SECRET_KEY|PG_PASS|PG_PASSWORD|DASHBOARD_TOKEN|HEALTH_TOKEN)['\"][[:space:]]*,[[:space:]]*['\"][A-Za-z0-9_-]{6,}"
           # Scan every tracked file except this workflow (which names the vars on purpose).
           MATCHES=$(git ls-files -z \
             | grep -zv '^\.github/workflows/' \

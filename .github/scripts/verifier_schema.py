@@ -33,8 +33,7 @@ def main() -> int:
     from katechon.core.schema import _REPRISES_DONNEES
 
     collecteur = _Collecteur()
-    logging.getLogger().addHandler(collecteur)
-    logging.getLogger("BarackCorp").addHandler(collecteur)
+    logging.getLogger().addHandler(collecteur)   # racine : les loggers du bot y remontent, une fois chacun
 
     bc.init_pool()
     try:
