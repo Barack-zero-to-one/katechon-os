@@ -330,6 +330,21 @@ def init_db():
         date_heure TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
 
+    # ── DEAD LETTER QUEUE ─────────────────────────────────────────────────
+    # Opérations financières en échec, à reprendre à la main. Alimentée par
+    # katechon/core/signalement.py ; cle rend le rejeu du fichier local idempotent.
+    c.execute("""CREATE TABLE IF NOT EXISTS dead_letter_queue (
+        id        SERIAL PRIMARY KEY,
+        cle       TEXT NOT NULL UNIQUE,
+        cree_le   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        fonction  TEXT NOT NULL,
+        empreinte TEXT,
+        contexte  JSONB NOT NULL DEFAULT '{}'::jsonb,
+        erreur    TEXT,
+        traite    BOOLEAN NOT NULL DEFAULT FALSE,
+        CONSTRAINT dead_letter_queue_contexte_taille CHECK (pg_column_size(contexte) <= 65536)
+    )""")
+
     # ── COMMIT intermédiaire — sécurise les CREATE TABLE avant les migrations ──
     # En PostgreSQL, une migration échouée met la transaction en état ERROR.
     # Sans ce commit, un RENAME de colonne manquante annulerait TOUTES les tables.
