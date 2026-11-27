@@ -31,6 +31,7 @@ from katechon.core.etat import (
 )
 from katechon.core.health import _check_greenapi, _self_heal_check, _self_heal_outbox
 from katechon.core.schema import init_db
+from katechon.core.surveillance import signaler_arret
 from katechon.core.socle import (
     HEURE_BACKUP,
     NGROK_DOMAIN,
@@ -257,6 +258,7 @@ def _arreter_scheduler(scheduler):
 def _shutdown_bot():
     """Appelé par atexit à chaque arrêt — stoppe le scheduler (jobs en cours
     attendus, délai borné), puis ferme le pool DB."""
+    signaler_arret()   # le moniteur externe alerte sans attendre son délai de grâce
     scheduler = _demarrage["scheduler"]
     if scheduler is not None:
         _arreter_scheduler(scheduler)

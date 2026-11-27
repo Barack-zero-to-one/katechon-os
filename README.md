@@ -120,6 +120,17 @@ WhatsApp is strictly our Trojan horse for hyper-viral, friction-free distributio
 
 ---
 
+## Operations — Configuration and Monitoring
+
+All configuration lives in one file, `ENV`, at the repo root. It is gitignored and never committed; `DEMARRAGE.bat` loads it before starting the watchdog. Every feature below is off until its flag is set to `1`, so an `ENV` without these lines runs the bot exactly as before.
+
+| Variable | Purpose |
+|----------|---------|
+| `KATECHON_HEALTHCHECK` | `1` turns on the dead man's switch |
+| `HEALTHCHECK_PING_URL` | Healthchecks.io ping URL, pinged after every healthy 60 s cycle and with `/fail` on a clean shutdown; set the check to a 1 min period and a 5 min grace |
+
+---
+
 ## Trust Graph — Behavioral Credit Model
 
 Risk score 0–100 for post-cashout default prediction. Detection **7 days before the event**.
