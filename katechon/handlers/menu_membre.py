@@ -23,6 +23,7 @@ from katechon.core.socle import (
     FRAIS_FMP,
     NUMERO_BADF_MTN,
     NUMERO_BADF_ORANGE,
+    est_telegram,
     get_membre_by_wa,
     normaliser_numero,
     valider_numero_cameroun,
@@ -367,6 +368,10 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
         return "✅ Transmis aux admins. Réponse sous 24h.\n_Tapez *menu*_"
 
     # ── 9 : Changer numéro Mobile Money ──────────────────────────────────
+    elif texte == "9" and sess["etape"] == "menu" and est_telegram(wa):
+        return ("📱 Votre compte est lié à Telegram, pas à un numéro de téléphone : "
+                "il n'y a pas de numéro à changer.\n_Tapez *menu*_")
+
     elif texte == "9" and sess["etape"] == "menu":
         _sessions_membre[wa]["etape"] = "chgnum_nouveau"
         return (
