@@ -404,7 +404,7 @@ def traiter_config_tontine(wa: str, texte: str) -> Optional[str]:
 
     if etape == "collecte":
         num = normaliser_numero(texte)
-        if not num or len(num) < 12:
+        if not num or len(num) < 12 or num.startswith("tg:"):   # un id Telegram n'est pas un numéro MoMo
             return "Numero invalide. Format : *+237690123456*"
 
         with _sessions_lock:
