@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from katechon.core.audit import log_audit
 from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn
 from katechon.core.health import healed
+from katechon.core.signalement import signaler_erreur
 from katechon.core.socle import (
     BACKUP_DIR,
     BACKUP_ROTATION,
@@ -59,7 +60,7 @@ __all__ = ["traiter_bouffages_suspects_expires", "_verifier_historique_avant_bou
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
 
-@healed()
+@healed(financier=True)
 def traiter_bouffages_suspects_expires():
     """
     Lancé tous les jours à 11h.
@@ -221,6 +222,7 @@ def traiter_bouffages_suspects_expires():
 
     except Exception as e:
         log.error(f"traiter_bouffages_suspects_expires : {e}")
+        signaler_erreur(e, "traiter_bouffages_suspects_expires", financier=True)
     finally:
         release_conn(conn)
 
@@ -321,7 +323,7 @@ def _verifier_historique_avant_bouffage(conn, membre_id: int,
     return "\n".join(f"▪ {a}" for a in alertes)
 
 
-@healed()
+@healed(financier=True)
 def notifier_prochain_bouffage():
     """
     Lancé toutes les heures par le scheduler.
@@ -499,8 +501,11 @@ def notifier_prochain_bouffage():
                   (passage["mbr_id"], t["id"], passage["id"],
                    caution_mont, caution_pct))
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as e_caution:   # 10 % retenus sans caution enregistrée
+                signaler_erreur(e_caution, "notifier_prochain_bouffage", financier=True,
+                                contexte={"membre_id": passage["mbr_id"], "tontine_id": t["id"],
+                                          "passage_id": passage["id"], "caution": caution_mont,
+                                          "pourcent": caution_pct})
 
         # ── Bordereau transparent au bénéficiaire AVANT le virement ──────
         # Le membre voit le calcul ligne par ligne. Diminue 80% des contestations.
@@ -702,7 +707,7 @@ def rappel_non_cotisants():
     release_conn(conn)
 
 
-@healed()
+@healed(financier=True)
 def verifier_suspensions_retard():
     """
     Suspend automatiquement les membres en retard depuis 72h.
@@ -805,7 +810,7 @@ def verifier_suspensions_retard():
             release_conn(conn)
 
 
-@healed()
+@healed(financier=True)
 def detecter_fugitifs():
     """
     Détection quotidienne des membres qui ont bouffé et n'ont plus cotisé.
@@ -1020,7 +1025,7 @@ def texte_codes_ussd_pour_admin(montant: int) -> str:
     )
 
 
-@healed()
+@healed(financier=True)
 def verifier_dettes_badf_impayees():
     """
     Lancé tous les jours à 10h00.

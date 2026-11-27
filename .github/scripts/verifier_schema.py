@@ -50,7 +50,7 @@ def main() -> int:
         try:
             critiques = ["membres", "tontines", "adhesions", "admins_groupe", "cotisations_manuelles",
                          "screenshots_hash", "bouffages_manuels", "dettes_badf", "liste_passage",
-                         "sanctions", "reprises_donnees"]
+                         "sanctions", "reprises_donnees", "dead_letter_queue"]
             manquantes = [t for t in critiques
                           if not fetchone(conn, "SELECT to_regclass(%s) AS t", (f"public.{t}",))["t"]]
             if manquantes:

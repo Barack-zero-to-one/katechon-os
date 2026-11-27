@@ -128,6 +128,10 @@ All configuration lives in one file, `ENV`, at the repo root. It is gitignored a
 |----------|---------|
 | `KATECHON_HEALTHCHECK` | `1` turns on the dead man's switch |
 | `HEALTHCHECK_PING_URL` | Healthchecks.io ping URL, pinged after every healthy 60 s cycle and with `/fail` on a clean shutdown; set the check to a 1 min period and a 5 min grace |
+| `KATECHON_GITHUB_ISSUES` | `1` turns errors that `@healed` and the money paths give up on into GitHub issues: one per fingerprint (type, file, line), then `+N occurrence(s)` comments; secrets, phone numbers and amounts are masked |
+| `GITHUB_TOKEN` | Fine-grained token limited to this repository, Issues read and write only |
+| `GITHUB_REPO` | `owner/name` of the repository that receives the issues |
+| `KATECHON_DLQ` | `1` records failed money operations in `logs/dead_letter.jsonl`, moved into the `dead_letter_queue` table on the next healthy cycle |
 
 ---
 

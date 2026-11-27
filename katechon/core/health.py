@@ -16,6 +16,7 @@ import psycopg2
 import requests
 
 from katechon.core.db import get_conn, fetchone, release_conn, reinitialiser_pool
+from katechon.core.signalement import rejouer_dead_letters, signaler_erreur
 from katechon.core.surveillance import ping_healthcheck
 from katechon.messaging.whatsapp import (GREENAPI_BASE, GREENAPI_INSTANCE_ID, GREENAPI_TOKEN, OWNER_WA,
                       _outbox_drain, _outbox_enqueue, _wa_send)
@@ -26,7 +27,7 @@ __all__ = ["healed", "_health_state", "_health_lock", "_self_heal_db", "_self_he
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
 
 
-def healed(critical: bool = False, fallback=None):
+def healed(critical: bool = False, fallback=None, financier: bool = False):
     """
     Décorateur auto-healing : si la fonction échoue, log silencieux + retry +
     fallback. Aucune alerte au owner si la fonction se rétablit seule.
@@ -37,6 +38,7 @@ def healed(critical: bool = False, fallback=None):
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
+            derniere = None
             for attempt in range(3):
                 try:
                     result = fn(*args, **kwargs)
@@ -44,6 +46,7 @@ def healed(critical: bool = False, fallback=None):
                         log.info(f"✅ Auto-heal OK : {fn.__name__} après {attempt+1} tentative(s)")
                     return result
                 except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                    derniere = e
                     log.warning(f"⚠️ DB error dans {fn.__name__} (tentative {attempt+1}) : {str(e)[:80]}")
                     with _health_lock:
                         _health_state["consecutive_db_failures"] += 1
@@ -52,19 +55,25 @@ def healed(critical: bool = False, fallback=None):
                         _self_heal_db()
                         time_module.sleep(1 + attempt)
                     elif critical:
+                        signaler_erreur(e, fn.__qualname__, financier=financier)
                         raise
                 except (requests.ConnectionError, requests.Timeout) as e:
+                    derniere = e
                     log.warning(f"⚠️ Network error dans {fn.__name__} : {str(e)[:80]}")
                     if attempt < 2:
                         time_module.sleep(2 + attempt * 2)
                 except Exception as e:
+                    derniere = e
                     log.error(f"❌ Exception dans {fn.__name__} (tentative {attempt+1}/3) : {e}")
                     if attempt < 2 and not critical:
                         time_module.sleep(1)
                     elif critical:
+                        signaler_erreur(e, fn.__qualname__, financier=financier)
                         raise
                     else:
                         break
+            if derniere is not None:   # abandon : l'erreur n'est plus oubliée
+                signaler_erreur(derniere, fn.__qualname__, financier=financier)
             return fallback
         return wrapper
     return deco
@@ -116,6 +125,7 @@ def _self_heal_check():
             _health_state["db_ok"] = True
             _health_state["consecutive_db_failures"] = 0
         ping_healthcheck()   # dead man's switch : ne bloque ni ne lève jamais
+        rejouer_dead_letters()   # base revenue : la DLQ locale passe en table
         # Recovery : notifier le owner si on était en état d'alerte
         if prev_failures >= 5:
             try:

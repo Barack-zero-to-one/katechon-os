@@ -19,6 +19,7 @@ from katechon.security import screenshot_integrity as si
 from katechon.security import webhook_security as ws
 from katechon.core.audit import log_audit
 from katechon.core.db import fetchone, get_conn, q, release_conn
+from katechon.core.signalement import signaler_erreur
 from katechon.core.etat import _download_executor, _msg_executor, _sessions_config, rate_limit_ok
 from flask import jsonify, request
 from katechon.handlers.groupe import (
@@ -590,6 +591,10 @@ def _traiter_screenshot_cotisation_bytes(wa: str, image_bytes: bytes,
             )
         except Exception as e:
             log.error(f"❌ enregistrer_cotisation_manuelle échec pour {wa}: {e}")
+            signaler_erreur(e, "enregistrer_cotisation_manuelle", financier=True,
+                            contexte={"membre_id": membre["id"], "tontine_id": adhesion["tontine_id"],
+                                      "montant": montant_attendu, "screenshot_hash": img_hash,
+                                      "ref_norm": ref_norm})
             wa_prive(wa,
                 f"⚠️ *Erreur technique — {adhesion['nom']}*\n\n"
                 f"Votre reçu a été reçu mais n'a pas pu être enregistré.\n"

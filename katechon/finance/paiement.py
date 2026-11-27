@@ -19,6 +19,7 @@ from katechon.security import screenshot_integrity as si
 from katechon.core.audit import log_audit
 from katechon.core.db import fetchall, fetchone, get_conn, q, release_conn, verrou_ordre_tontine
 from katechon.core.health import healed
+from katechon.core.signalement import signaler_erreur
 from katechon.core.socle import (
     FRAIS_FMP,
     HEURE_LIMITE_DEF,
@@ -545,6 +546,9 @@ def confirmer_cotisation(conn, cotis_id: int, admin_wa: str) -> dict:
                       f"Tontine#{cotis['tontine_id']} | Soumis:{soumis_local.strftime('%H:%M')} > {h_lim}+5min")
     except Exception as _re:
         log.warning(f"⚠️ Reclassement retard non bloquant : {_re}")
+        signaler_erreur(_re, "confirmer_cotisation", financier=True,   # IRA ou retard non enregistré
+                        contexte={"cotis_id": cotis_id, "membre_id": cotis["membre_id"],
+                                  "tontine_id": cotis["tontine_id"]})
 
     _verifier_credit_comm(conn, cotis["tontine_id"])
     log_audit("COTISATION_CONFIRMEE",
@@ -1596,7 +1600,7 @@ def saisir_caution_et_compenser_groupe(conn, membre_id: int, tontine_id: int,
     }
 
 
-@healed()
+@healed(financier=True)
 def verifier_et_liberer_cautions():
     """
     Lancé quotidiennement à 9h00.
