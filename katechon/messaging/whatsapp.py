@@ -16,7 +16,7 @@ from pathlib import Path
 
 import requests
 
-from katechon.messaging import wa_dispatch
+from katechon.messaging import canal, wa_dispatch
 from katechon.core.db import get_conn, release_conn, fetchone, fetchall
 
 __all__ = [
@@ -147,17 +147,41 @@ def _wa_request(method: str, payload: dict, max_retries: int = 3) -> bool:
     return False
 
 
+class GreenApiCanal(canal.Canal):
+    """WhatsApp via Green API, le canal par défaut : tout identifiant qui ne
+    porte le préfixe d'aucun autre canal est un numéro WhatsApp ou un JID."""
+    nom = "whatsapp"
+
+    def possede(self, identifiant: str) -> bool:
+        return "@c.us" in identifiant or "@g.us" in identifiant
+
+    def adresse(self, identifiant: str) -> str:
+        """+237XXXXXXXXX → JID @c.us ; un JID @c.us ou @g.us est rendu tel quel."""
+        if "@g.us" in identifiant or "@c.us" in identifiant:
+            return identifiant
+        return f"{identifiant.lstrip('+').replace(' ', '')}@c.us"
+
+    def est_groupe(self, adresse: str) -> bool:
+        return "@g.us" in adresse
+
+    def envoyer(self, adresse: str, texte: str) -> bool:
+        return _wa_request("sendMessage", {"chatId": adresse, "message": texte[:4096]})
+
+
+_GREENAPI = GreenApiCanal()
+canal.definir_defaut(_GREENAPI)
+
+
 def _chat_id(to: str) -> str:
-    """+237XXXXXXXXX → JID @c.us ; un JID @c.us ou @g.us est rendu tel quel."""
-    if "@g.us" in to or "@c.us" in to:
-        return to
-    return f"{to.lstrip('+').replace(' ', '')}@c.us"
+    """Forme canonique de l'adresse dans son canal (JID @c.us/@g.us pour WhatsApp)."""
+    return canal.canal_de(to).adresse(to)
 
 
 def _wa_send_direct(to: str, body: str) -> bool:
-    """Un envoi Green API immédiat, sans file ni espacement. Seul le thread
-    expéditeur (_expediteur) l'appelle : il porte le rythme d'envoi."""
-    return _wa_request("sendMessage", {"chatId": _chat_id(to), "message": body[:4096]})
+    """Un envoi immédiat sur le canal du destinataire, sans file ni espacement.
+    Seul le thread expéditeur (_expediteur) l'appelle : il porte le rythme d'envoi."""
+    c = canal.canal_de(to)
+    return c.envoyer(c.adresse(to), body)
 
 
 # ── Expéditeur WhatsApp unique ─────────────────────────────────────────────
@@ -271,7 +295,7 @@ def wa_groupe(group_id: str, message: str):
     ou nom de la tontine si on a le whatsapp_groupe en base.
     Fallback broadcast DM aux membres actifs si aucun JID @g.us disponible.
     """
-    if group_id and "@g.us" in group_id:
+    if group_id and canal.canal_de(group_id).est_groupe(group_id):
         _wa_send_group_chatid(group_id, message)
     elif group_id:
         conn = get_conn()
@@ -281,7 +305,7 @@ def wa_groupe(group_id: str, message: str):
         release_conn(conn)
         if tontine and tontine.get("whatsapp_groupe"):
             jid = tontine["whatsapp_groupe"]
-            if "@g.us" in jid:
+            if canal.canal_de(jid).est_groupe(jid):
                 _wa_send_group_chatid(jid, message)
             else:
                 _wa_send_groupe(jid, message)

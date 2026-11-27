@@ -49,10 +49,11 @@ from katechon.core.socle import (
     incrementer_tentatives_fraude,
     normaliser_numero,
 )
+from katechon.messaging.canal import MessageEntrant
 from katechon.messaging.whatsapp import OWNER_WA, wa_prive
 
 __all__ = ["webhook_whatsapp_verify", "_traiter_groupe_participants", "webhook_whatsapp_greenapi",
-    "_greenapi_telecharger_media", "_traiter_message_greenapi",
+    "_greenapi_telecharger_media", "_entrant_greenapi", "_traiter_message_greenapi", "traiter_message",
     "_traiter_screenshot_cotisation_bytes", "register_webhook"]
 
 log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie inchangée
@@ -241,14 +242,51 @@ def _greenapi_telecharger_media(url_media: str) -> bytes:
     return b""
 
 
+def _entrant_greenapi(payload: dict, wa: str, img_future=None, group_id: str = "") -> MessageEntrant:
+    """Traduit un événement Green API en MessageEntrant (aucune logique métier ici)."""
+    sender_data  = payload.get("senderData") or {}
+    message_data = payload.get("messageData") or {}
+    type_message = message_data.get("typeMessage", "")
+    texte, type_media, media_url, caption = "", "", "", ""
+    if type_message == "textMessage":
+        texte = (message_data.get("textMessageData") or {}).get("textMessage", "").strip()
+    elif type_message in ("imageMessage", "documentMessage"):
+        type_media = "image" if type_message == "imageMessage" else "document"
+        media_data = message_data.get("imageData" if type_media == "image" else "documentData") or {}
+        media_url  = media_data.get("downloadUrl", "")
+        caption    = media_data.get("caption", "")
+    elif type_message == "extendedTextMessage":
+        texte = (message_data.get("extendedTextMessageData") or {}).get("text", "").strip()
+    return MessageEntrant(
+        canal        = "whatsapp",
+        expediteur   = wa,
+        group_id     = group_id,
+        texte        = texte,
+        type_media   = type_media,
+        media_url    = media_url,
+        media_future = img_future,
+        caption      = caption,
+        nom_affiche  = sender_data.get("senderName", "").strip(),
+        nom_groupe   = sender_data.get("chatName", ""),
+        id_message   = payload.get("idMessage", ""),
+        telecharger  = _greenapi_telecharger_media,
+    )
+
+
 def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id: str = ""):
     """Parse un événement Green API et route vers la logique métier."""
+    traiter_message(_entrant_greenapi(payload, wa, img_future, group_id))
+
+
+def traiter_message(m: MessageEntrant):
+    """Route un message reçu, quel que soit son canal, vers la logique métier."""
+    wa, group_id = m.expediteur, m.group_id
     if not group_id and not est_owner(wa):
         if not get_membre_by_wa(wa) and not est_admin(wa) and wa not in _sessions_config:
             return
 
     # ── Capture passive du pushname ──────────────────────────────────────────
-    sender_name = (payload.get("senderData") or {}).get("senderName", "").strip()
+    sender_name = m.nom_affiche
     if _est_nom_valide(sender_name):
         m_pn = get_membre_by_wa(wa)
         if m_pn and (m_pn.get("nom_complet") or "").startswith("Membre_"):
@@ -265,39 +303,29 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
             except Exception:
                 pass
 
-    message_data = payload.get("messageData") or {}
-    type_message = message_data.get("typeMessage", "")
-
-    texte     = ""
+    texte     = m.texte
     est_image = False
     img_bytes = b""
+    caption   = m.caption
 
-    if type_message == "textMessage":
-        texte = (message_data.get("textMessageData") or {}).get("textMessage", "").strip()
-    elif type_message in ("imageMessage", "documentMessage"):
-        est_image  = True
-        data_key   = "imageData" if type_message == "imageMessage" else "documentData"
-        media_data = message_data.get(data_key) or {}
-        url_media  = media_data.get("downloadUrl", "")
-        caption    = media_data.get("caption", "")
-        if img_future is not None:
+    if m.type_media:
+        est_image = True
+        if m.media_future is not None:
             try:
-                img_bytes = img_future.result(timeout=25)
+                img_bytes = m.media_future.result(timeout=25)
             except Exception as e:
                 log.error(f"img_future.result() : {e}")
                 img_bytes = b""
-        elif url_media:
-            img_bytes = _greenapi_telecharger_media(url_media)
+        elif m.media_url:
+            img_bytes = m.telecharger(m.media_url)
         if not img_bytes and caption:
             texte = caption
             est_image = False
         elif not img_bytes:
             wa_prive(wa, "❌ Impossible de télécharger le reçu. Renvoyez le screenshot.")
             return
-    elif type_message == "extendedTextMessage":
-        texte = (message_data.get("extendedTextMessageData") or {}).get("text", "").strip()
 
-    log.info(f"WA ← {wa} : {texte[:60]!r}" + (" [IMG]" if est_image else ""))
+    log.info(f"{m.canal} ← {wa} : {texte[:60]!r}" + (" [IMG]" if est_image else ""))
 
     if est_image and img_bytes:
         try:
@@ -307,13 +335,12 @@ def _traiter_message_greenapi(payload: dict, wa: str, img_future=None, group_id:
             # feedback au membre.
             _traiter_screenshot_cotisation_bytes(wa, img_bytes, caption, group_id or "")
         except Exception as e:
-            log.error(f"Erreur image Green API : {e}")
+            log.error(f"Erreur image {m.canal} : {e}")
         return
 
     if group_id:
         try:
-            group_name = (payload.get("senderData") or {}).get("chatName", "")
-            _traiter_commande_groupe(wa, texte, group_id, group_name)
+            _traiter_commande_groupe(wa, texte, group_id, m.nom_groupe)
         except Exception as e:
             log.error(f"Erreur commande groupe {group_id} : {e}")
         return
