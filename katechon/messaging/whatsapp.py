@@ -17,6 +17,7 @@ from pathlib import Path
 import requests
 
 from katechon.messaging import canal, wa_dispatch
+from katechon.messaging import telegram as _telegram  # noqa: F401  enregistre le canal tg:
 from katechon.core.db import get_conn, release_conn, fetchone, fetchall
 
 __all__ = [

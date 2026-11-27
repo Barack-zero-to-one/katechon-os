@@ -359,6 +359,10 @@ def init_db():
         "ALTER TABLE admins_groupe ADD COLUMN IF NOT EXISTS numero_collecte TEXT",
         # ── Multi-pays ────────────────────────────────────────────────────
         "ALTER TABLE membres  ADD COLUMN IF NOT EXISTS pays_code TEXT NOT NULL DEFAULT 'CM'",
+        # Numéro Mobile Money de retrait, obligatoire pour un membre Telegram
+        # avant le calendrier de bouffage (un login tg: n'est pas un numéro).
+        "ALTER TABLE membres ADD COLUMN IF NOT EXISTS numero_momo TEXT",
+        "ALTER TABLE membres ADD COLUMN IF NOT EXISTS operateur_momo TEXT",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS pays_code TEXT NOT NULL DEFAULT 'CM'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS devise    TEXT NOT NULL DEFAULT 'FCFA'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS langue    TEXT NOT NULL DEFAULT 'fr'",

@@ -192,9 +192,13 @@ def inscrire_dans_tontine(membre_id: int, tontine_id: int,
         # cycle et la capacité lus ensuite ne peuvent plus changer sous nos pieds.
         verrou_ordre_tontine(conn, tontine_id)
         membre = fetchone(conn,
-            "SELECT nom_complet FROM membres WHERE id=%s", (membre_id,))
+            "SELECT nom_complet, whatsapp, numero_momo FROM membres WHERE id=%s", (membre_id,))
         if not membre:
             raise ValueError(f"Membre {membre_id} introuvable.")
+        # Un login Telegram n'est pas un numéro : sans numéro Mobile Money de
+        # retrait, le membre n'entre pas au calendrier (son bouffage bloquerait).
+        if est_telegram(membre["whatsapp"]) and not membre.get("numero_momo"):
+            raise ValueError("Numéro Mobile Money requis avant l'inscription au calendrier de bouffage.")
 
         tontine = fetchone(conn,
             "SELECT capacite_max, cycle_actuel, nom FROM tontines WHERE id=%s", (tontine_id,))

@@ -1,0 +1,177 @@
+"""
+Canal Telegram (Bot API), d'abord pour l'instance de staging.
+
+Possède tous les identifiants « tg: » : un membre est « tg:<user_id> », un
+groupe « tg:<chat_id> » (négatif). Il est enregistré dès l'import, même
+désactivé, pour qu'un identifiant Telegram ne parte jamais vers Green API ;
+désactivé, il journalise et n'envoie rien.
+
+Envoi : sendMessage en HTML (le *gras* et l'_italique_ de WhatsApp sont
+convertis, le reste échappé), découpé sous 4096 caractères. Un 400/403
+(membre qui n'a jamais ouvert le bot, chat introuvable) est définitif : il est
+journalisé et abandonné, jamais remis dans l'outbox, qui le rejouerait sans
+fin. Une erreur réseau ou 5xx rend False : l'outbox réessaie.
+
+Média : getFile puis téléchargement depuis le même hôte que l'API, sans
+redirection, plafonné à MEDIA_MAX_BYTES.
+
+Invitations : un lien t.me/<bot>?start=<code> où code = <tontine_id>_<hmac>,
+signé avec TELEGRAM_WEBHOOK_SECRET : impossible de deviner le code d'une
+autre tontine.
+
+Variables (lues à chaque appel) : KATECHON_TELEGRAM=1, TELEGRAM_BOT_TOKEN,
+TELEGRAM_WEBHOOK_SECRET, TELEGRAM_API_BASE (défaut https://api.telegram.org).
+"""
+import hashlib
+import hmac
+import html
+import logging
+import os
+import re
+from urllib.parse import urlsplit
+
+import requests
+
+from katechon.messaging import canal
+
+__all__ = ["TelegramCanal", "actif", "telecharger", "code_invitation", "lire_code"]
+
+log = logging.getLogger("BarackCorp")
+
+LIMITE_TEXTE = 4000           # marge sous les 4096 de Telegram après conversion HTML
+MEDIA_MAX_BYTES = int(os.getenv("MEDIA_MAX_BYTES", str(10 * 1024 * 1024)))
+
+
+def actif() -> bool:
+    return os.getenv("KATECHON_TELEGRAM") == "1" and bool(os.getenv("TELEGRAM_BOT_TOKEN"))
+
+
+def _base():
+    return (os.getenv("TELEGRAM_API_BASE") or "https://api.telegram.org").rstrip("/")
+
+
+def _appel(methode, corps, delai=15):
+    url = f"{_base()}/bot{os.getenv('TELEGRAM_BOT_TOKEN', '')}/{methode}"
+    return requests.post(url, json=corps, timeout=delai)
+
+
+def _vers_html(texte: str) -> str:
+    t = html.escape(texte, quote=False)
+    t = re.sub(r"\*([^*\n]+)\*", r"<b>\1</b>", t)
+    t = re.sub(r"(?<![\w])_([^_\n]+)_(?![\w])", r"<i>\1</i>", t)
+    return t
+
+
+def _decouper(texte: str):
+    """Coupe aux fins de ligne sous LIMITE_TEXTE (une ligne trop longue est coupée net)."""
+    morceaux, courant = [], ""
+    for ligne in texte.split("\n"):
+        while len(ligne) > LIMITE_TEXTE:
+            if courant:
+                morceaux.append(courant); courant = ""
+            morceaux.append(ligne[:LIMITE_TEXTE]); ligne = ligne[LIMITE_TEXTE:]
+        candidat = f"{courant}\n{ligne}" if courant else ligne
+        if len(candidat) > LIMITE_TEXTE:
+            morceaux.append(courant); courant = ligne
+        else:
+            courant = candidat
+    if courant or not morceaux:
+        morceaux.append(courant)
+    return morceaux
+
+
+class TelegramCanal(canal.Canal):
+    nom = "telegram"
+
+    def possede(self, identifiant: str) -> bool:
+        return str(identifiant).lower().startswith("tg:")
+
+    def adresse(self, identifiant: str) -> str:
+        return "tg:" + str(identifiant)[3:].strip()
+
+    def est_groupe(self, adresse: str) -> bool:
+        return str(adresse).startswith("tg:-")
+
+    def envoyer(self, adresse: str, texte: str) -> bool:
+        if not actif():
+            log.warning(f"⚠️ Telegram désactivé : message vers {adresse} abandonné")
+            return True
+        try:
+            chat_id = int(adresse[3:])
+        except ValueError:
+            log.warning(f"⚠️ Telegram : adresse invalide {adresse!r}, message abandonné")
+            return True
+        for morceau in _decouper(texte):
+            try:
+                r = _appel("sendMessage", {"chat_id": chat_id, "text": _vers_html(morceau),
+                                           "parse_mode": "HTML", "disable_web_page_preview": True})
+            except (requests.ConnectionError, requests.Timeout):
+                return False
+            if r.status_code in (400, 403):
+                log.warning(f"⚠️ Telegram {r.status_code} vers {adresse} : abandonné (membre sans /start "
+                            f"ou chat introuvable)")
+                return True
+            if r.status_code == 429 or r.status_code >= 500:
+                return False
+            if not 200 <= r.status_code < 300:
+                log.warning(f"⚠️ Telegram sendMessage → {r.status_code}, abandonné")
+                return True
+        return True
+
+
+def _chemin_fichier(file_id: str) -> str:
+    r = _appel("getFile", {"file_id": file_id})
+    if r.status_code != 200:
+        return ""
+    return ((r.json() or {}).get("result") or {}).get("file_path", "") or ""
+
+
+def telecharger(file_id: str) -> bytes:
+    """Octets d'un média Telegram, ou b"" (média absent, hôte ou chemin refusé, trop gros)."""
+    if not actif() or not file_id:
+        return b""
+    try:
+        chemin = _chemin_fichier(file_id)
+        if not chemin or ".." in chemin or chemin.startswith("/") or "://" in chemin:
+            log.warning("⚠️ Telegram : chemin de fichier refusé")
+            return b""
+        url = f"{_base()}/file/bot{os.getenv('TELEGRAM_BOT_TOKEN', '')}/{chemin}"
+        if urlsplit(url).netloc != urlsplit(_base()).netloc:
+            return b""
+        r = requests.get(url, timeout=15, allow_redirects=False, stream=True)
+        try:
+            if r.status_code != 200:
+                return b""
+            buf = bytearray()
+            for bloc in r.iter_content(65536):
+                buf.extend(bloc)
+                if len(buf) > MEDIA_MAX_BYTES:
+                    log.warning("⚠️ Média Telegram trop gros, rejeté")
+                    return b""
+            return bytes(buf)
+        finally:
+            r.close()
+    except Exception as e:
+        log.error(f"Téléchargement média Telegram : {type(e).__name__}")
+        return b""
+
+
+def _signature(tontine_id: int) -> str:
+    cle = (os.getenv("TELEGRAM_WEBHOOK_SECRET") or "").encode()
+    return hmac.new(cle, f"tontine:{tontine_id}".encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def code_invitation(tontine_id: int) -> str:
+    return f"{int(tontine_id)}_{_signature(int(tontine_id))}"
+
+
+def lire_code(code: str):
+    """Retourne l'id de tontine d'un code d'invitation valide, sinon None."""
+    m = re.fullmatch(r"([0-9]{1,9})_([0-9a-f]{16})", (code or "").strip())
+    if not m or not os.getenv("TELEGRAM_WEBHOOK_SECRET"):
+        return None
+    tid = int(m.group(1))
+    return tid if hmac.compare_digest(m.group(2), _signature(tid)) else None
+
+
+canal.enregistrer(TelegramCanal())
