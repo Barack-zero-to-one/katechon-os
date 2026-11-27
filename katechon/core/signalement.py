@@ -52,7 +52,7 @@ DLQ_FICHIER = os.path.join("logs", "dead_letter.jsonl")
 
 _SECRETS_ENV = ("GREENAPI_TOKEN", "GREENAPI_INSTANCE_ID", "GREENAPI_WEBHOOK_SECRET", "PG_PASS",
                 "NGROK_TOKEN", "FLASK_SECRET_KEY", "DASHBOARD_TOKEN", "HEALTH_TOKEN", "GITHUB_TOKEN",
-                "HEALTHCHECK_PING_URL")
+                "HEALTHCHECK_PING_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET")
 _CLES_SECRETES = re.compile(r"(?i)token|secret|password|passwd|pwd|api[_-]?key|jeton")
 
 _RACINE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -86,6 +86,9 @@ def masquer_secrets(texte) -> str:
             t = t.replace(v, "[secret]")
     t = re.sub(r"(waInstance)\d+(/[A-Za-z]+/)[A-Za-z0-9]+", r"\1[masqué]\2[masqué]", t)
     t = re.sub(r"waInstance\d+", "waInstance[masqué]", t)
+    # Token de bot Telegram : dans les URL de l'API (bot<ID>:<TOKEN>) ou seul.
+    t = re.sub(r"\bbot\d+:[A-Za-z0-9_-]{20,}", "bot[secret]", t)
+    t = re.sub(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}", "[secret]", t)
     t = re.sub(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})", "[secret]", t)
     t = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer [secret]", t)
     t = re.sub(r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key)=([^\s&,;]+)", r"\1=[secret]", t)
