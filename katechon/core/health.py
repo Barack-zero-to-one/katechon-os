@@ -16,6 +16,7 @@ import psycopg2
 import requests
 
 from katechon.core.db import get_conn, fetchone, release_conn, reinitialiser_pool
+from katechon.core.surveillance import ping_healthcheck
 from katechon.messaging.whatsapp import (GREENAPI_BASE, GREENAPI_INSTANCE_ID, GREENAPI_TOKEN, OWNER_WA,
                       _outbox_drain, _outbox_enqueue, _wa_send)
 
@@ -114,6 +115,7 @@ def _self_heal_check():
             prev_failures = _health_state["consecutive_db_failures"]
             _health_state["db_ok"] = True
             _health_state["consecutive_db_failures"] = 0
+        ping_healthcheck()   # dead man's switch : ne bloque ni ne lève jamais
         # Recovery : notifier le owner si on était en état d'alerte
         if prev_failures >= 5:
             try:
