@@ -181,7 +181,7 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
             return rep_bouffage
 
     if not session_valide(_sessions_membre, wa):
-        if texte in ("1","2","3","4","5","6","7","8","0"):
+        if texte in ("1","2","3","4","5","6","7","8","9","0"):
             _sessions_membre[wa] = {"etape": "menu", "data": {}, "ts": time_module.time()}
         else:
             return ""

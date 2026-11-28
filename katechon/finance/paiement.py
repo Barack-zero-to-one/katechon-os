@@ -734,8 +734,12 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
         f"Bénéficiaire : *{membre['nom_complet']}*\n\n"
         f"📊 *DÉCOMPTE FINANCIER :*\n"
         f"{detail}\n\n"
-        f"En attente du numéro Mobile Money...\n"
-        f"⏱ Délai : 2 heures\n\n"
+        + (f"Numéro Mobile Money déjà enregistré : *{numero_connu['numero_momo']}*.\n"
+           f"Le détail du virement suit.\n\n"
+           if numero_connu else
+           f"En attente du numéro Mobile Money...\n"
+           f"⏱ Délai : 2 heures\n\n")
+        +
         f"_TontineBot Pro — BADF Ltd_"
     )
 
