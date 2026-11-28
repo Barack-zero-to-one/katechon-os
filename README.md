@@ -197,16 +197,19 @@ The bot listens on port 5000, which is hard-coded in `katechon/core/socle.py`, `
    VALUES (<id>, 'tg:<your id>', 'Admin staging', '+2376XXXXXXXX');
    ```
 
+   This `admins_groupe` row is what lets your account link a Telegram group to the tontine later: the bot only links a group added by an admin of that tontine or by the owner.
+
 7. **Get the invitation link.** In a shell where `TELEGRAM_WEBHOOK_SECRET` holds the staging value, `python -c "from katechon.messaging.telegram import code_invitation; print(code_invitation(<id>))"` prints the code. The link is `https://t.me/<bot username>?start=<code>`. The code is signed with `TELEGRAM_WEBHOOK_SECRET`, so changing the secret invalidates old links.
 
 ### Test cycle for each change
 
 1. Pull the branch on the staging machine, make sure the staging ngrok tunnel is running, then restart through `DEMARRAGE.bat`.
 2. Play the scenarios touched by the change, among these:
-   - **Enrolment:** open the invitation link and press *Start*. The bot asks for the Mobile Money number; you only enter the payout calendar once you send e.g. `MTN +2376…`.
+   - **Enrolment:** open the invitation link and press *Start*. The bot asks for the Mobile Money number with its operator (e.g. `MTN +2376…`), reads it back, and keeps it only after you answer `OUI`. Only then do you enter the payout calendar. Any other answer starts the number over; a closed tontine refuses the enrolment.
+   - **Payout number change:** in the member menu, option 9 changes a Telegram member's withdrawal number, with the same `OUI` confirmation. The login itself never changes.
    - **Menu:** send `menu` in private.
    - **Contribution:** send a payment screenshot in private or in the group, then confirm it from the admin menu.
-   - **Group:** name a Telegram group exactly like the tontine, add the bot, then send `/liste@<bot>` and `/rappel@<bot>`.
+   - **Group:** name a Telegram group exactly like the tontine and add the bot **from the admin account** (the `tg:` id in `admins_groupe`, or the owner). A group added by anyone else is not linked, and the refusal is written to the audit log. Then send `/liste@<bot>` and `/rappel@<bot>`. If Telegram upgrades the group to a supergroup, the new id is picked up automatically.
    - **Late payment:** pay after the deadline and check the IRA amount.
    - **Payout:** at your turn, the stored number is applied at once and the admin receives *NUMÉRO REÇU*.
 3. When every touched scenario behaves as expected, merge the PR, then deploy to production. Production keeps `KATECHON_TELEGRAM` absent, so its members only ever see WhatsApp.
