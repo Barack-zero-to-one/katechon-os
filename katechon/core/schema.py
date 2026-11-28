@@ -361,6 +361,16 @@ def init_db():
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS bouffage_complet INTEGER NOT NULL DEFAULT 0",
         # Tour dont le versement a échoué techniquement : repris par le rattrapage, jamais à la main.
         "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS echec_le TIMESTAMPTZ",
+        # Début du cycle en cours : base du calcul des cotisations impayées du cycle.
+        # Ajoutée sans valeur par défaut (les tontines existantes restent NULL et
+        # retombent sur la première date de bouffage du cycle), puis CURRENT_DATE
+        # pour les tontines créées ensuite ; NOUVEAU_CYCLE la remet à jour.
+        "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS date_debut_cycle DATE",
+        "ALTER TABLE tontines ALTER COLUMN date_debut_cycle SET DEFAULT CURRENT_DATE",
+        # Tour retenu parce que le bénéficiaire n'est pas actif (suspendu, banni,
+        # sorti) : distinct de bloque_suspect, jamais intercepté ni saisi à 48 h.
+        "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS retenu_le TIMESTAMPTZ",
+        "ALTER TABLE liste_passage ADD COLUMN IF NOT EXISTS retenu_motif TEXT",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_ouverture TEXT NOT NULL DEFAULT '05:00'",
         "ALTER TABLE tontines ADD COLUMN IF NOT EXISTS heure_rappel TEXT NOT NULL DEFAULT '14:00'",
         "ALTER TABLE admins_groupe ADD COLUMN IF NOT EXISTS numero_collecte TEXT",
