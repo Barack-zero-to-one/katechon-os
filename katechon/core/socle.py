@@ -29,7 +29,7 @@ __all__ = ["FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "I
     "WEBHOOK_REPLAY_TTL", "_replay_guard", "MEDIA_MAX_BYTES", "SESSION_TIMEOUT",
     "enregistrer_liste_passage", "inscrire_dans_tontine", "normaliser_numero",
     "valider_numero_cameroun", "calculer_ira_mise", "get_membre_by_wa", "get_tontines_admin",
-    "est_owner", "est_admin", "incrementer_tentatives_fraude", "_alerter_burst_fraude",
+    "est_owner", "est_telegram", "lire_numero_momo", "OWNER_IDS", "_lire_owner_ids", "est_admin", "incrementer_tentatives_fraude", "_alerter_burst_fraude",
     "_JOURS_SEMAINE", "_est_jour_collecte", "_est_jour_cotisation", "_verifier_credit_comm",
     "PORT", "DELAI_SUSPENSION_HEURES", "DELAI_ALERTE_FUGUE", "DELAI_BLOCAGE_FUGUE", "BACKUP_ROTATION", "HEURE_BACKUP", "PG_HOST", "PG_PORT", "PG_DB", "PG_USER", "PG_PASS", "PG_BIN", "BACKUP_DIR", "NGROK_DOMAIN", "NGROK_TOKEN", "MONTANT_IRA", "GROUPE_ADMIN", "enregistrer_admins_groupe"]
 
@@ -192,9 +192,13 @@ def inscrire_dans_tontine(membre_id: int, tontine_id: int,
         # cycle et la capacité lus ensuite ne peuvent plus changer sous nos pieds.
         verrou_ordre_tontine(conn, tontine_id)
         membre = fetchone(conn,
-            "SELECT nom_complet FROM membres WHERE id=%s", (membre_id,))
+            "SELECT nom_complet, whatsapp, numero_momo FROM membres WHERE id=%s", (membre_id,))
         if not membre:
             raise ValueError(f"Membre {membre_id} introuvable.")
+        # Un login Telegram n'est pas un numéro : sans numéro Mobile Money de
+        # retrait, le membre n'entre pas au calendrier (son bouffage bloquerait).
+        if est_telegram(membre["whatsapp"]) and not membre.get("numero_momo"):
+            raise ValueError("Numéro Mobile Money requis avant l'inscription au calendrier de bouffage.")
 
         tontine = fetchone(conn,
             "SELECT capacite_max, cycle_actuel, nom FROM tontines WHERE id=%s", (tontine_id,))
@@ -264,6 +268,15 @@ def normaliser_numero(numero: str) -> str:
     if not numero:
         return numero
     n = numero.strip()
+    # Identifiant préfixé par son canal (tg:<id> pour Telegram) : jamais
+    # transformé en numéro, ramené à une seule forme (chiffres ASCII, sans zéro
+    # de tête). Un id mal formé devient une clé marquée « ! » qui ne correspond
+    # à aucun membre réel : jamais "" (les appelants chercheraient whatsapp='').
+    if n[:3].lower() == "tg:":
+        ident = re.sub(r"\s", "", n[3:])
+        if re.fullmatch(r"-?[0-9]+", ident):
+            return f"tg:{int(ident)}"
+        return f"tg:!{ident}"
     # Extraire avant @ (au cas où JID complet)
     if "@" in n:
         n = n.split("@")[0]
@@ -286,6 +299,19 @@ def normaliser_numero(numero: str) -> str:
 
 def valider_numero_cameroun(numero: str) -> bool:
     return bool(re.match(r"^\+237[26789]\d{8}$", numero))
+
+
+def lire_numero_momo(texte: str):
+    """(numéro, opérateur) d'un texte comme « MTN +237690123456 », ou None.
+    L'opérateur est obligatoire : c'est lui qui dit à l'admin sur quel réseau virer."""
+    m = re.search(r"(\+?237[26789]\d{8}|\b[26789]\d{8}\b)", texte or "")
+    tu = (texte or "").upper()
+    operateur = "cm.mtn" if "MTN" in tu else "cm.orange" if "ORANGE" in tu else None
+    if not m or not operateur:
+        return None
+    n = m.group(1)
+    numero = normaliser_numero(n if "237" in n else "237" + n)
+    return (numero, operateur) if valider_numero_cameroun(numero) else None
 
 
 def calculer_ira_mise(montant_mise: int, dt_paiement: datetime,
@@ -326,8 +352,36 @@ def get_tontines_admin(wa: str) -> list:
     return [r["tontine_id"] for r in rows]
 
 
+def est_telegram(identifiant: str) -> bool:
+    """Vrai pour un login Telegram bien formé (tg:<id>), qui n'a pas de numéro
+    de téléphone. Même règle que normaliser_numero."""
+    return bool(re.fullmatch(r"tg:-?[0-9]+", normaliser_numero(str(identifiant or "")) or ""))
+
+
+def _lire_owner_ids() -> tuple:
+    """OWNER_IDS : identifiants supplémentaires du owner, séparés par des
+    virgules (un tg:<id>, un autre numéro au format +XXXXXXXX). Lu au démarrage
+    du processus. Les entrées invalides sont ignorées et signalées."""
+    gardes, rejetes = [], []
+    for brut in os.getenv("OWNER_IDS", "").split(","):
+        if not brut.strip():
+            continue
+        n = normaliser_numero(brut.strip())
+        if est_telegram(n) or re.fullmatch(r"\+[0-9]{8,15}", n or ""):
+            gardes.append(n)
+        else:
+            rejetes.append(brut.strip())
+    if rejetes:
+        log.warning(f"⚠️ OWNER_IDS : {len(rejetes)} entrée(s) invalide(s) ignorée(s) : {rejetes}")
+    return tuple(gardes)
+
+
+OWNER_IDS = _lire_owner_ids()
+
+
 def est_owner(wa: str) -> bool:
-    return normaliser_numero(wa) == normaliser_numero(OWNER_WA)
+    n = normaliser_numero(wa)
+    return bool(n) and (n == normaliser_numero(OWNER_WA) or n in OWNER_IDS)
 
 
 def est_admin(wa: str) -> bool:

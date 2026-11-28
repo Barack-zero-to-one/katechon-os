@@ -15,6 +15,7 @@ import threading
 from katechon.core.app import _BOT_START, _DASH_TOKEN, log
 from katechon.core.db import get_conn, release_conn
 from katechon.handlers import dashboard
+from katechon.handlers.telegram import register_telegram
 from katechon.handlers.webhook import register_webhook
 
 __all__ = ["enregistrer_routes"]
@@ -27,6 +28,8 @@ def enregistrer_routes(app) -> None:
     with _verrou:
         if "webhook_whatsapp_greenapi" not in app.view_functions:
             register_webhook(app)   # GET et POST /webhook/whatsapp, endpoints inchangés
+        if "webhook_telegram" not in app.view_functions:
+            register_telegram(app)  # POST /webhook/telegram, 404 tant que KATECHON_TELEGRAM n'est pas à 1
         if "dashboard_data" not in app.view_functions:
             dashboard.register_dashboard(
                 app,

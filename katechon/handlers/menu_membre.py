@@ -23,7 +23,9 @@ from katechon.core.socle import (
     FRAIS_FMP,
     NUMERO_BADF_MTN,
     NUMERO_BADF_ORANGE,
+    est_telegram,
     get_membre_by_wa,
+    lire_numero_momo,
     normaliser_numero,
     valider_numero_cameroun,
 )
@@ -179,7 +181,7 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
             return rep_bouffage
 
     if not session_valide(_sessions_membre, wa):
-        if texte in ("1","2","3","4","5","6","7","8","0"):
+        if texte in ("1","2","3","4","5","6","7","8","9","0"):
             _sessions_membre[wa] = {"etape": "menu", "data": {}, "ts": time_module.time()}
         else:
             return ""
@@ -367,6 +369,42 @@ def traiter_menu_membre(wa: str, texte: str, est_media: bool = False) -> str:
         return "✅ Transmis aux admins. Réponse sous 24h.\n_Tapez *menu*_"
 
     # ── 9 : Changer numéro Mobile Money ──────────────────────────────────
+    elif texte == "9" and sess["etape"] == "menu" and est_telegram(wa):
+        # Un compte Telegram n'a pas de numéro de login : l'option 9 change le
+        # numéro Mobile Money qui reçoit le bouffage, confirmé avant d'être gardé.
+        _sessions_membre[wa]["etape"] = "tg_momo_saisie"
+        return ("📱 *Numéro Mobile Money de retrait*\n"
+                "Votre compte est lié à Telegram : ce numéro est celui qui reçoit votre bouffage.\n\n"
+                "Envoyez l'opérateur et le numéro, par exemple *MTN +237690123456*.\n"
+                "Tapez *0* pour annuler.")
+
+    elif sess.get("etape") == "tg_momo_saisie":
+        if texte == "0":
+            _sessions_membre[wa]["etape"] = "menu"
+            return "❌ Annulé.\n_Tapez *menu*_"
+        lu = lire_numero_momo(texte)
+        if not lu:
+            return "❌ Numéro ou opérateur non reconnu. Exemple : *MTN +237690123456*\nTapez *0* pour annuler."
+        sess["data"]["tg_momo"] = lu
+        _sessions_membre[wa]["etape"] = "tg_momo_confirm"
+        return (f"Votre bouffage sera versé sur *{lu[0]}* ({'MTN' if lu[1] == 'cm.mtn' else 'Orange'} Money).\n\n"
+                f"Répondez *OUI* pour confirmer, ou *0* pour annuler.")
+
+    elif sess.get("etape") == "tg_momo_confirm":
+        _sessions_membre[wa]["etape"] = "menu"
+        if texte.strip().upper() != "OUI":
+            return "❌ Annulé, votre numéro n'a pas changé.\n_Tapez *menu*_"
+        numero, operateur = sess["data"].pop("tg_momo")
+        conn = get_conn()
+        try:
+            q(conn, "UPDATE membres SET numero_momo=%s, operateur_momo=%s WHERE whatsapp=%s",
+              (numero, operateur, wa))
+            conn.commit()
+        finally:
+            release_conn(conn)
+        log_audit("TELEGRAM_NUMERO_MOMO_MODIFIE", f"{numero} ({operateur})", wa)
+        return f"✅ Numéro de retrait enregistré : *{numero}*.\n_Tapez *menu*_"
+
     elif texte == "9" and sess["etape"] == "menu":
         _sessions_membre[wa]["etape"] = "chgnum_nouveau"
         return (

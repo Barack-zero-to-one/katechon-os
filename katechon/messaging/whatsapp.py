@@ -16,13 +16,14 @@ from pathlib import Path
 
 import requests
 
-from katechon.messaging import wa_dispatch
+from katechon.messaging import canal, wa_dispatch
+from katechon.messaging import telegram as _telegram  # noqa: F401  enregistre le canal tg:
 from katechon.core.db import get_conn, release_conn, fetchone, fetchall
 
 __all__ = [
     "GREENAPI_INSTANCE_ID", "GREENAPI_TOKEN", "GREENAPI_BASE", "OWNER_WA",
     "_outbox_lock", "_outbox_path", "_outbox_enqueue", "_outbox_drain", "_wa_request", "_chat_id",
-    "_wa_send_direct", "WA_ECART_PAR_CHAT", "WA_DEBIT_GLOBAL", "_expediteur",
+    "_wa_send_direct", "WA_ECART_PAR_CHAT", "WA_DEBIT_GLOBAL", "_expediteur", "_expediteur_tg", "vider_expediteurs",
     "_wa_send_groupe_direct", "_wa_send", "_wa_send_groupe", "_wa_send_group_chatid",
     "wa_kick_membre", "wa_quitter_groupe", "wa_prive", "wa_owner", "wa_admins_tontine",
     "wa_groupe", "wa_admin",
@@ -147,17 +148,41 @@ def _wa_request(method: str, payload: dict, max_retries: int = 3) -> bool:
     return False
 
 
+class GreenApiCanal(canal.Canal):
+    """WhatsApp via Green API, le canal par défaut : tout identifiant qui ne
+    porte le préfixe d'aucun autre canal est un numéro WhatsApp ou un JID."""
+    nom = "whatsapp"
+
+    def possede(self, identifiant: str) -> bool:
+        return "@c.us" in identifiant or "@g.us" in identifiant
+
+    def adresse(self, identifiant: str) -> str:
+        """+237XXXXXXXXX → JID @c.us ; un JID @c.us ou @g.us est rendu tel quel."""
+        if "@g.us" in identifiant or "@c.us" in identifiant:
+            return identifiant
+        return f"{identifiant.lstrip('+').replace(' ', '')}@c.us"
+
+    def est_groupe(self, adresse: str) -> bool:
+        return "@g.us" in adresse
+
+    def envoyer(self, adresse: str, texte: str) -> bool:
+        return _wa_request("sendMessage", {"chatId": adresse, "message": texte[:4096]})
+
+
+_GREENAPI = GreenApiCanal()
+canal.definir_defaut(_GREENAPI)
+
+
 def _chat_id(to: str) -> str:
-    """+237XXXXXXXXX → JID @c.us ; un JID @c.us ou @g.us est rendu tel quel."""
-    if "@g.us" in to or "@c.us" in to:
-        return to
-    return f"{to.lstrip('+').replace(' ', '')}@c.us"
+    """Forme canonique de l'adresse dans son canal (JID @c.us/@g.us pour WhatsApp)."""
+    return canal.canal_de(to).adresse(to)
 
 
 def _wa_send_direct(to: str, body: str) -> bool:
-    """Un envoi Green API immédiat, sans file ni espacement. Seul le thread
-    expéditeur (_expediteur) l'appelle : il porte le rythme d'envoi."""
-    return _wa_request("sendMessage", {"chatId": _chat_id(to), "message": body[:4096]})
+    """Un envoi immédiat sur le canal du destinataire, sans file ni espacement.
+    Seul le thread expéditeur (_expediteur) l'appelle : il porte le rythme d'envoi."""
+    c = canal.canal_de(to)
+    return c.envoyer(c.adresse(to), body)
 
 
 # ── Expéditeur WhatsApp unique ─────────────────────────────────────────────
@@ -173,6 +198,54 @@ _expediteur = wa_dispatch.Expediteur(
     debit_global   = WA_DEBIT_GLOBAL,
     en_echec       = lambda chat, texte: _outbox_enqueue("send", {"to": chat, "body": texte}),
 )
+
+
+# ── Expéditeur Telegram : son propre rythme ─────────────────────────────────
+# Limites de la Bot API : environ 30 messages/s au total, 1 message/s par
+# conversation privée, 20 messages/minute par groupe. Le rythme WhatsApp
+# (1 message/s au total) ne s'applique pas à Telegram.
+TG_ECART_PRIVE  = float(os.getenv("TG_ECART_PRIVE",  "1"))
+TG_ECART_GROUPE = float(os.getenv("TG_ECART_GROUPE", "3"))
+TG_DEBIT_GLOBAL = float(os.getenv("TG_DEBIT_GLOBAL", "25"))
+_expediteur_tg = wa_dispatch.Expediteur(
+    envoyer        = lambda chat, texte: _wa_send_direct(chat, texte),
+    ecart_par_chat = TG_ECART_PRIVE,
+    debit_global   = TG_DEBIT_GLOBAL,
+    en_echec       = lambda chat, texte: _outbox_enqueue("send", {"to": chat, "body": texte}),
+    ecart_pour     = lambda chat: TG_ECART_GROUPE if str(chat).startswith("tg:-") else TG_ECART_PRIVE,
+    ecart_max      = max(TG_ECART_GROUPE, TG_ECART_PRIVE),
+)
+
+
+def _expediteur_de(adresse: str):
+    return _expediteur_tg if canal.canal_de(adresse).nom == "telegram" else _expediteur
+
+
+def vider_expediteurs(timeout: float) -> bool:
+    """Attend que les files WhatsApp et Telegram soient vides (arrêt, tests).
+    Les deux en parallèle, sur le même délai : une file WhatsApp bloquée
+    n'empêche jamais les messages Telegram de partir."""
+    fin = time_module.monotonic() + timeout
+    resultats = {}
+
+    def vider(nom, expediteur, delai):
+        resultats[nom] = expediteur.vider(delai)
+
+    fils, restants = [], []
+    for nom, exp in (("telegram", _expediteur_tg), ("whatsapp", _expediteur)):
+        f = threading.Thread(target=vider, args=(nom, exp, timeout), daemon=True)
+        try:
+            f.start()
+            fils.append(f)
+        except RuntimeError:
+            # Arrêt de l'interpréteur (atexit, Python 3.12+) : aucun thread ne
+            # peut démarrer. Cette file est vidée ici, sur le temps qui reste.
+            restants.append((nom, exp))
+    for nom, exp in restants:   # Telegram d'abord : il se vide vite
+        vider(nom, exp, max(0.0, fin - time_module.monotonic()))
+    for f in fils:
+        f.join(max(0.0, fin - time_module.monotonic()) + 1)
+    return bool(resultats.get("whatsapp")) and bool(resultats.get("telegram"))
 
 
 def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
@@ -210,8 +283,10 @@ def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
 def _wa_send(to: str, body: str, priorite: int = wa_dispatch.PRIORITE_REPONSE) -> bool:
     """Soumet un message à l'expéditeur et rend la main aussitôt ; un échec
     d'envoi ultérieur part dans l'outbox. Retourne True (message accepté)."""
-    _expediteur.demarrer()
-    _expediteur.soumettre(_chat_id(to), body, priorite)
+    adresse = _chat_id(to)
+    exp = _expediteur_de(adresse)
+    exp.demarrer()
+    exp.soumettre(adresse, body, priorite)
     return True
 
 
@@ -271,7 +346,7 @@ def wa_groupe(group_id: str, message: str):
     ou nom de la tontine si on a le whatsapp_groupe en base.
     Fallback broadcast DM aux membres actifs si aucun JID @g.us disponible.
     """
-    if group_id and "@g.us" in group_id:
+    if group_id and canal.canal_de(group_id).est_groupe(group_id):
         _wa_send_group_chatid(group_id, message)
     elif group_id:
         conn = get_conn()
@@ -281,7 +356,7 @@ def wa_groupe(group_id: str, message: str):
         release_conn(conn)
         if tontine and tontine.get("whatsapp_groupe"):
             jid = tontine["whatsapp_groupe"]
-            if "@g.us" in jid:
+            if canal.canal_de(jid).est_groupe(jid):
                 _wa_send_group_chatid(jid, message)
             else:
                 _wa_send_groupe(jid, message)
