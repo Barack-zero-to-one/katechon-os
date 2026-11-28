@@ -183,7 +183,8 @@ The bot listens on port 5000, which is hard-coded in `katechon/core/socle.py`, `
    curl -s "https://api.telegram.org/bot<TOKEN>/setWebhook" \
         -d "url=https://<staging-domain>/webhook/telegram" \
         -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>" \
-        -d "drop_pending_updates=true"         -d "max_connections=1"
+        -d "drop_pending_updates=true" \
+        -d "max_connections=1"
    curl -s "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
    ```
 
