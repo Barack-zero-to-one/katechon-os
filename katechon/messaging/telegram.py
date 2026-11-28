@@ -62,16 +62,35 @@ def _vers_html(texte: str) -> str:
     return t
 
 
+def _taille(texte: str) -> int:
+    """Longueur envoyée à Telegram : l'échappement HTML (&amp;, &lt;…) et les
+    balises peuvent rallonger le texte, la limite se mesure après conversion."""
+    return max(len(texte), len(_vers_html(texte)))
+
+
+def _couper_ligne(ligne: str):
+    """Coupe une ligne trop longue en tranches qui tiennent après conversion."""
+    tranches = []
+    while _taille(ligne) > LIMITE_TEXTE:
+        k = min(len(ligne), LIMITE_TEXTE)
+        while k > 1 and _taille(ligne[:k]) > LIMITE_TEXTE:
+            k = k * 3 // 4
+        tranches.append(ligne[:k]); ligne = ligne[k:]
+    return tranches, ligne
+
+
 def _decouper(texte: str):
-    """Coupe aux fins de ligne sous LIMITE_TEXTE (une ligne trop longue est coupée net)."""
+    """Coupe aux fins de ligne pour que chaque morceau, une fois converti en
+    HTML, reste sous LIMITE_TEXTE (une ligne trop longue est coupée net)."""
     morceaux, courant = [], ""
     for ligne in texte.split("\n"):
-        while len(ligne) > LIMITE_TEXTE:
+        tranches, ligne = _couper_ligne(ligne)
+        if tranches:
             if courant:
                 morceaux.append(courant); courant = ""
-            morceaux.append(ligne[:LIMITE_TEXTE]); ligne = ligne[LIMITE_TEXTE:]
+            morceaux.extend(tranches)
         candidat = f"{courant}\n{ligne}" if courant else ligne
-        if len(candidat) > LIMITE_TEXTE:
+        if _taille(candidat) > LIMITE_TEXTE:
             morceaux.append(courant); courant = ligne
         else:
             courant = candidat
@@ -84,10 +103,10 @@ class TelegramCanal(canal.Canal):
     nom = "telegram"
 
     def possede(self, identifiant: str) -> bool:
-        return str(identifiant).lower().startswith("tg:")
+        return str(identifiant).strip().lower().startswith("tg:")
 
     def adresse(self, identifiant: str) -> str:
-        return "tg:" + str(identifiant)[3:].strip()
+        return "tg:" + str(identifiant).strip()[3:].strip()
 
     def est_groupe(self, adresse: str) -> bool:
         return str(adresse).startswith("tg:-")

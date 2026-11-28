@@ -19,6 +19,7 @@ Deux parcours sont propres à Telegram :
 import logging
 import os
 import re
+import threading
 import time as time_module
 
 from flask import jsonify, request
@@ -40,7 +41,23 @@ __all__ = ["webhook_telegram", "register_telegram"]
 log = logging.getLogger("BarackCorp")
 
 DELAI_NUMERO = 3600          # s : au-delà, le lien doit être recliqué
-_attente_momo = {}           # tg:<id> → {"tontine_id": int, "ts": float}
+_attente_momo = {}           # tg:<id> → {"tontine_id": int, "ts": float, "propose": (numéro, opérateur)}
+_verrous = {}                # tg:<id> → Lock : une seule étape d'inscription à la fois par membre
+_verrous_lock = threading.Lock()
+
+
+def _verrou_de(wa: str) -> threading.Lock:
+    with _verrous_lock:
+        return _verrous.setdefault(wa, threading.Lock())
+
+
+def _purger_attentes():
+    """Oublie les attentes expirées (et leurs verrous) : la mémoire reste bornée."""
+    limite = time_module.time() - DELAI_NUMERO
+    for wa in [w for w, a in list(_attente_momo.items()) if a["ts"] < limite]:
+        _attente_momo.pop(wa, None)
+        with _verrous_lock:
+            _verrous.pop(wa, None)
 
 MSG_NUMERO = (
     "📱 *Dernière étape : votre numéro Mobile Money*\n\n"
@@ -56,7 +73,7 @@ def _demarrer(wa: str, code: str, prenom: str):
     conn = get_conn()
     try:
         tontine = fetchone(conn, "SELECT id, nom, statut FROM tontines WHERE id=%s", (tid,)) if tid else None
-        if not tontine or tontine.get("statut") not in (None, "Active"):
+        if not tontine or tontine.get("statut") != "Active":
             wa_prive(wa, "❌ Lien d'invitation invalide ou expiré. Demandez un nouveau lien à votre admin.")
             return
         nom = prenom.strip() if _est_nom_valide(prenom or "") else f"Membre_{wa[-4:]}"
@@ -74,6 +91,7 @@ def _demarrer(wa: str, code: str, prenom: str):
     if membre.get("numero_momo"):
         _inscrire(wa, membre["id"], tontine)
         return
+    _purger_attentes()
     _attente_momo[wa] = {"tontine_id": tid, "ts": time_module.time()}
     wa_prive(wa, f"👋 Bienvenue dans *{tontine['nom']}* !\n\n" + MSG_NUMERO)
 
@@ -216,15 +234,22 @@ def webhook_telegram():
         texte = f"{commande.split('@', 1)[0]} {reste}".strip()
 
     if not est_groupe:
+        # Les étapes d'inscription (lien, numéro, OUI) sont traitées ici, dans
+        # l'ordre d'arrivée et sous un verrou par membre, jamais dans le pool
+        # multi-thread où un « OUI » pourrait passer avant le numéro, ou deux
+        # « OUI » inscrire deux fois. Ce sont quelques requêtes courtes.
         if texte.split(" ", 1)[0] == "/start":
             code = texte[len("/start"):].strip()
             if code:
-                _msg_executor.submit(_demarrer, wa, code, expediteur.get("first_name", ""))
+                with _verrou_de(wa):
+                    _demarrer(wa, code, expediteur.get("first_name", ""))
                 return jsonify({"status": "ok"}), 200
             texte = "start"
-        elif _attente_valide(wa):
-            _msg_executor.submit(_recevoir_numero, wa, texte)
-            return jsonify({"status": "ok"}), 200
+        else:
+            with _verrou_de(wa):
+                if _attente_valide(wa):
+                    _recevoir_numero(wa, texte)
+                    return jsonify({"status": "ok"}), 200
 
     type_media, media_ref = "", ""
     if msg.get("photo"):
