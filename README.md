@@ -183,11 +183,11 @@ The bot listens on port 5000, which is hard-coded in `katechon/core/socle.py`, `
    curl -s "https://api.telegram.org/bot<TOKEN>/setWebhook" \
         -d "url=https://<staging-domain>/webhook/telegram" \
         -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>" \
-        -d "drop_pending_updates=true"
+        -d "drop_pending_updates=true"         -d "max_connections=1"
    curl -s "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
    ```
 
-   `getWebhookInfo` must show the URL, `pending_update_count` close to 0 and no `last_error_message`.
+   `getWebhookInfo` must show the URL, `pending_update_count` close to 0 and no `last_error_message`. `max_connections=1` makes Telegram deliver updates one at a time, in order; the bot also handles each member's enrolment steps one at a time.
 6. **Create a test tontine and its admin.** In `psql` on `barack_corp_staging`:
 
    ```sql
