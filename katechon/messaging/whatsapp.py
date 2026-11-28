@@ -23,7 +23,7 @@ from katechon.core.db import get_conn, release_conn, fetchone, fetchall
 __all__ = [
     "GREENAPI_INSTANCE_ID", "GREENAPI_TOKEN", "GREENAPI_BASE", "OWNER_WA",
     "_outbox_lock", "_outbox_path", "_outbox_enqueue", "_outbox_drain", "_wa_request", "_chat_id",
-    "_wa_send_direct", "WA_ECART_PAR_CHAT", "WA_DEBIT_GLOBAL", "_expediteur",
+    "_wa_send_direct", "WA_ECART_PAR_CHAT", "WA_DEBIT_GLOBAL", "_expediteur", "_expediteur_tg", "vider_expediteurs",
     "_wa_send_groupe_direct", "_wa_send", "_wa_send_groupe", "_wa_send_group_chatid",
     "wa_kick_membre", "wa_quitter_groupe", "wa_prive", "wa_owner", "wa_admins_tontine",
     "wa_groupe", "wa_admin",
@@ -200,6 +200,31 @@ _expediteur = wa_dispatch.Expediteur(
 )
 
 
+# ── Expéditeur Telegram : son propre rythme ─────────────────────────────────
+# Limites de la Bot API : environ 30 messages/s au total, 1 message/s par
+# conversation privée, 20 messages/minute par groupe. Le rythme WhatsApp
+# (1 message/s au total) ne s'applique pas à Telegram.
+TG_ECART_PRIVE  = float(os.getenv("TG_ECART_PRIVE",  "1"))
+TG_ECART_GROUPE = float(os.getenv("TG_ECART_GROUPE", "3"))
+TG_DEBIT_GLOBAL = float(os.getenv("TG_DEBIT_GLOBAL", "25"))
+_expediteur_tg = wa_dispatch.Expediteur(
+    envoyer        = lambda chat, texte: _wa_send_direct(chat, texte),
+    ecart_par_chat = TG_ECART_PRIVE,
+    debit_global   = TG_DEBIT_GLOBAL,
+    en_echec       = lambda chat, texte: _outbox_enqueue("send", {"to": chat, "body": texte}),
+    ecart_pour     = lambda chat: TG_ECART_GROUPE if str(chat).startswith("tg:-") else TG_ECART_PRIVE,
+)
+
+
+def _expediteur_de(adresse: str):
+    return _expediteur_tg if canal.canal_de(adresse).nom == "telegram" else _expediteur
+
+
+def vider_expediteurs(timeout: float) -> bool:
+    """Attend que les files WhatsApp et Telegram soient vides (arrêt, tests)."""
+    return _expediteur.vider(timeout) and _expediteur_tg.vider(timeout)
+
+
 def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
     """
     Broadcast : envoie un DM individuel à chaque membre actif de la tontine.
@@ -235,8 +260,10 @@ def _wa_send_groupe_direct(group_id: str, body: str) -> bool:
 def _wa_send(to: str, body: str, priorite: int = wa_dispatch.PRIORITE_REPONSE) -> bool:
     """Soumet un message à l'expéditeur et rend la main aussitôt ; un échec
     d'envoi ultérieur part dans l'outbox. Retourne True (message accepté)."""
-    _expediteur.demarrer()
-    _expediteur.soumettre(_chat_id(to), body, priorite)
+    adresse = _chat_id(to)
+    exp = _expediteur_de(adresse)
+    exp.demarrer()
+    exp.soumettre(adresse, body, priorite)
     return True
 
 

@@ -107,16 +107,48 @@ class TelegramCanal(canal.Canal):
                                            "parse_mode": "HTML", "disable_web_page_preview": True})
             except (requests.ConnectionError, requests.Timeout):
                 return False
+            parametres = _parametres(r)
+            nouveau = parametres.get("migrate_to_chat_id")
+            if r.status_code == 400 and nouveau:
+                # Groupe devenu supergroupe : son identifiant a changé.
+                nouvelle = f"tg:{int(nouveau)}"
+                _migrer_groupe(adresse, nouvelle)
+                return self.envoyer(nouvelle, texte) if nouvelle != adresse else True
             if r.status_code in (400, 403):
                 log.warning(f"⚠️ Telegram {r.status_code} vers {adresse} : abandonné (membre sans /start "
                             f"ou chat introuvable)")
                 return True
             if r.status_code == 429 or r.status_code >= 500:
+                if parametres.get("retry_after"):
+                    log.warning(f"⚠️ Telegram 429 : réessayer dans {parametres['retry_after']} s (outbox)")
                 return False
             if not 200 <= r.status_code < 300:
                 log.warning(f"⚠️ Telegram sendMessage → {r.status_code}, abandonné")
                 return True
         return True
+
+
+def _parametres(r) -> dict:
+    try:
+        corps = r.json()
+    except ValueError:
+        return {}
+    return (corps.get("parameters") or {}) if isinstance(corps, dict) else {}
+
+
+def _migrer_groupe(ancienne: str, nouvelle: str):
+    """Reporte le nouvel identifiant d'un supergroupe sur la tontine liée."""
+    from katechon.core.db import get_conn, q, release_conn   # import tardif : pas de cycle à l'import
+    try:
+        conn = get_conn()
+        try:
+            q(conn, "UPDATE tontines SET whatsapp_groupe=%s WHERE whatsapp_groupe=%s", (nouvelle, ancienne))
+            conn.commit()
+        finally:
+            release_conn(conn)
+        log.warning(f"⚠️ Groupe Telegram migré : {ancienne} → {nouvelle}")
+    except Exception as e:
+        log.error(f"❌ Migration du groupe Telegram {ancienne} non enregistrée : {type(e).__name__}")
 
 
 def _chemin_fichier(file_id: str) -> str:

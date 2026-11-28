@@ -186,6 +186,11 @@ def webhook_telegram():
     est_groupe = chat.get("type") in ("group", "supergroup")
     group_id = normaliser_numero(f"tg:{chat.get('id', '')}") if est_groupe else ""
     texte = (msg.get("text") or "").strip()
+    if est_groupe and texte.startswith("/"):
+        # Mode confidentialité (actif par défaut) : un bot ne reçoit en groupe que
+        # les commandes, sous la forme /liste@NomDuBot. On rend « liste ».
+        commande, _, reste = texte[1:].partition(" ")
+        texte = f"{commande.split('@', 1)[0]} {reste}".strip()
 
     if not est_groupe:
         if texte.split(" ", 1)[0] == "/start":

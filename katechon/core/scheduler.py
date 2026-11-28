@@ -60,7 +60,7 @@ from katechon.finance.supervision import (
     zto_supervision_quotidienne,
 )
 from katechon.finance.trust_graph import alerter_risques_bouffage_imminent, lever_pauses_echues
-from katechon.messaging.whatsapp import GREENAPI_INSTANCE_ID, OWNER_WA, _expediteur, _outbox_drain
+from katechon.messaging.whatsapp import GREENAPI_INSTANCE_ID, OWNER_WA, _expediteur, _outbox_drain, vider_expediteurs
 from katechon.handlers.owner import envoyer_releve_fmp_post_bouffage, rapport_groupes_fin_journee
 
 __all__ = ["PUBLIC_URL", "detecter_url_publique", "tester_connexion_postgresql",
@@ -260,7 +260,7 @@ def _shutdown_bot():
     scheduler = _demarrage["scheduler"]
     if scheduler is not None:
         _arreter_scheduler(scheduler)
-    _expediteur.vider(timeout=10)   # laisse partir les messages déjà soumis
+    vider_expediteurs(timeout=10)   # laisse partir les messages déjà soumis (WhatsApp et Telegram)
     if _demarrage.get("sessions_restaurees"):
         _sauvegarder_sessions()     # jamais avant la restauration : la sauvegarde serait écrasée à vide
     fermer_pool()
