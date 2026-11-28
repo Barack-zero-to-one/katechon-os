@@ -213,6 +213,7 @@ _expediteur_tg = wa_dispatch.Expediteur(
     debit_global   = TG_DEBIT_GLOBAL,
     en_echec       = lambda chat, texte: _outbox_enqueue("send", {"to": chat, "body": texte}),
     ecart_pour     = lambda chat: TG_ECART_GROUPE if str(chat).startswith("tg:-") else TG_ECART_PRIVE,
+    ecart_max      = max(TG_ECART_GROUPE, TG_ECART_PRIVE),
 )
 
 
@@ -221,8 +222,30 @@ def _expediteur_de(adresse: str):
 
 
 def vider_expediteurs(timeout: float) -> bool:
-    """Attend que les files WhatsApp et Telegram soient vides (arrêt, tests)."""
-    return _expediteur.vider(timeout) and _expediteur_tg.vider(timeout)
+    """Attend que les files WhatsApp et Telegram soient vides (arrêt, tests).
+    Les deux en parallèle, sur le même délai : une file WhatsApp bloquée
+    n'empêche jamais les messages Telegram de partir."""
+    fin = time_module.monotonic() + timeout
+    resultats = {}
+
+    def vider(nom, expediteur, delai):
+        resultats[nom] = expediteur.vider(delai)
+
+    fils, restants = [], []
+    for nom, exp in (("telegram", _expediteur_tg), ("whatsapp", _expediteur)):
+        f = threading.Thread(target=vider, args=(nom, exp, timeout), daemon=True)
+        try:
+            f.start()
+            fils.append(f)
+        except RuntimeError:
+            # Arrêt de l'interpréteur (atexit, Python 3.12+) : aucun thread ne
+            # peut démarrer. Cette file est vidée ici, sur le temps qui reste.
+            restants.append((nom, exp))
+    for nom, exp in restants:   # Telegram d'abord : il se vide vite
+        vider(nom, exp, max(0.0, fin - time_module.monotonic()))
+    for f in fils:
+        f.join(max(0.0, fin - time_module.monotonic()) + 1)
+    return bool(resultats.get("whatsapp")) and bool(resultats.get("telegram"))
 
 
 def _wa_send_groupe_direct(group_id: str, body: str) -> bool:

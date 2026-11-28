@@ -101,31 +101,61 @@ class TelegramCanal(canal.Canal):
         except ValueError:
             log.warning(f"⚠️ Telegram : adresse invalide {adresse!r}, message abandonné")
             return True
-        for morceau in _decouper(texte):
-            try:
-                r = _appel("sendMessage", {"chat_id": chat_id, "text": _vers_html(morceau),
-                                           "parse_mode": "HTML", "disable_web_page_preview": True})
-            except (requests.ConnectionError, requests.Timeout):
-                return False
-            parametres = _parametres(r)
-            nouveau = parametres.get("migrate_to_chat_id")
-            if r.status_code == 400 and nouveau:
-                # Groupe devenu supergroupe : son identifiant a changé.
-                nouvelle = f"tg:{int(nouveau)}"
-                _migrer_groupe(adresse, nouvelle)
-                return self.envoyer(nouvelle, texte) if nouvelle != adresse else True
-            if r.status_code in (400, 403):
-                log.warning(f"⚠️ Telegram {r.status_code} vers {adresse} : abandonné (membre sans /start "
-                            f"ou chat introuvable)")
-                return True
-            if r.status_code == 429 or r.status_code >= 500:
-                if parametres.get("retry_after"):
-                    log.warning(f"⚠️ Telegram 429 : réessayer dans {parametres['retry_after']} s (outbox)")
-                return False
-            if not 200 <= r.status_code < 300:
-                log.warning(f"⚠️ Telegram sendMessage → {r.status_code}, abandonné")
-                return True
+        morceaux = _decouper(texte)
+        for i, morceau in enumerate(morceaux):
+            ok = self._envoyer_morceau(adresse, chat_id, morceau, "\n".join(morceaux[i:]))
+            if ok is not None:
+                if ok is False and i > 0:
+                    # Les morceaux déjà partis ne sont jamais renvoyés : seul le
+                    # reste attend dans l'outbox.
+                    _vers_outbox(adresse, "\n".join(morceaux[i:]))
+                    return True
+                return ok
         return True
+
+    def _envoyer_morceau(self, adresse, chat_id, morceau, reste):
+        """None si le morceau est parti ; sinon le résultat final de envoyer()."""
+        try:
+            r = _appel("sendMessage", {"chat_id": chat_id, "text": _vers_html(morceau),
+                                       "parse_mode": "HTML", "disable_web_page_preview": True})
+            if r.status_code == 400 and "parse entities" in _description(r):
+                # HTML refusé (balises mal imbriquées) : le texte brut passe toujours.
+                r = _appel("sendMessage", {"chat_id": chat_id, "text": morceau,
+                                           "disable_web_page_preview": True})
+        except (requests.ConnectionError, requests.Timeout):
+            return False
+        parametres = _parametres(r)
+        nouveau = parametres.get("migrate_to_chat_id")
+        if r.status_code == 400 and nouveau:
+            # Groupe devenu supergroupe : son identifiant a changé.
+            nouvelle = f"tg:{int(nouveau)}"
+            _migrer_groupe(adresse, nouvelle)
+            return self.envoyer(nouvelle, reste) if nouvelle != adresse else True
+        if r.status_code in (400, 403):
+            log.warning(f"⚠️ Telegram {r.status_code} vers {adresse} : abandonné (membre sans /start "
+                        f"ou chat introuvable)")
+            return True
+        if r.status_code == 429 or r.status_code >= 500:
+            if parametres.get("retry_after"):
+                log.warning(f"⚠️ Telegram 429 : réessayer dans {parametres['retry_after']} s (outbox)")
+            return False
+        if not 200 <= r.status_code < 300:
+            log.warning(f"⚠️ Telegram sendMessage → {r.status_code}, abandonné")
+            return True
+        return None
+
+
+def _description(r) -> str:
+    try:
+        corps = r.json()
+    except ValueError:
+        return ""
+    return str(corps.get("description", "")) if isinstance(corps, dict) else ""
+
+
+def _vers_outbox(adresse: str, texte: str):
+    from katechon.messaging.whatsapp import _outbox_enqueue   # import tardif : whatsapp importe ce module
+    _outbox_enqueue("send", {"to": adresse, "body": texte})
 
 
 def _parametres(r) -> dict:

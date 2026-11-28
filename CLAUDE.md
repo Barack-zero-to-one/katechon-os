@@ -104,7 +104,7 @@ Phase 2 ajoute : frais sur mouvements USDC, underwriting crédit, assurance para
 5. **UNIQUE indexes partiels DB** — dédup physique niveau base de données sur membres et screenshots. Python ne peut pas contourner ça.
 6. **Rate limiting** — 10 messages / 60 secondes par numéro → audit log + drop silencieux.
 7. **MontantAberrantError** — écart > 50% → refus catégorique. 15–50% → commande FORCE obligatoire.
-8. **SSRF whitelist** — seuls whatsapp.net / fbcdn.net / cdninstagram.com sont autorisés, toute autre URL rejetée.
+8. **SSRF whitelist** — médias WhatsApp : seuls les hôtes de `DOMAINES_MEDIA_OK` (green-api.com, sms.by, whatsapp.net, frontière de label vérifiée) en https ; médias Telegram : uniquement l'hôte de l'API Bot (api.telegram.org), chemin `getFile` contrôlé. Sans redirection, taille plafonnée, toute autre URL rejetée.
 9. **Déduplication screenshots** — vérification hash avant OCR, empêche la preuve de paiement recyclée.
 10. **Onboarding zéro-friction** — inscription au prénom seul, accès menu instantané, zéro friction documentaire.
 11. **Auto-ban (×3 fraude)** — 3 tentatives de fraude confirmées → bannissement automatique réseau + `blackliste=1` en DB.
