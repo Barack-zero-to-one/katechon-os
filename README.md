@@ -143,6 +143,76 @@ Raw internal weights (sum = 145) are normalized to 100 at the end of scoring —
 
 ---
 
+## Staging — Testing on Telegram Before Members See It
+
+Every change is played on a staging bot reached through Telegram before it is deployed to the WhatsApp members. Staging runs the same `katechon/` code as production, on a separate machine, with its own Telegram bot, its own database and its own tunnel. It never touches a real member or a real franc.
+
+### What is isolated
+
+| | Production | Staging |
+|---|---|---|
+| Machine | production PC | second PC |
+| Channel | WhatsApp (Green API) | Telegram (Bot API) |
+| Database | `barack_corp` | `barack_corp_staging` |
+| Public URL | ngrok fixed domain | its own ngrok tunnel |
+| `KATECHON_TELEGRAM` | absent | `1` |
+| Green API variables | set | absent |
+
+The bot listens on port 5000, which is hard-coded in `katechon/core/socle.py`, `watchdog.js` and `DEMARRAGE.bat`. That is why staging needs its own machine rather than a second port next to production.
+
+### Telegram variables
+
+| Variable | Purpose |
+|----------|---------|
+| `KATECHON_TELEGRAM` | `1` enables the channel and `/webhook/telegram`; without it the route answers 404 |
+| `TELEGRAM_BOT_TOKEN` | Token given by @BotFather |
+| `TELEGRAM_WEBHOOK_SECRET` | 1 to 256 characters from `A-Z a-z 0-9 _ -` only (Telegram rejects anything else); checked on every update and used to sign invitation codes |
+| `TELEGRAM_API_BASE` | Defaults to `https://api.telegram.org`; only changed by the tests |
+| `TG_ECART_PRIVE`, `TG_ECART_GROUPE`, `TG_DEBIT_GLOBAL` | Pacing, defaults 1 s per private chat, 3 s per group, 25 messages/s overall (Telegram allows about 1/s per chat, 20/min per group, 30/s overall) |
+| `OWNER_WA` / `OWNER_IDS` | Your own login on staging: `OWNER_WA=tg:<your id>`, or add it to `OWNER_IDS` |
+
+### One-time setup
+
+1. **Create the bot.** In @BotFather, send `/newbot` and keep the token. Then send `/setprivacy`, choose the bot and select *Disable*. With privacy mode on, a bot only receives commands in groups (`/liste@NomDuBot`) and would never see the payment screenshots posted there. Making the bot an admin of the group has the same effect. A change of privacy mode only applies once the bot is removed from the group and added again.
+2. **Create the database.** Create an empty `barack_corp_staging` database. `init_db()` builds the schema at the first start. Never load production data into staging: test with test tontines and your own accounts.
+3. **Write the staging `ENV`.** It is the only configuration file of this machine, gitignored like production's. Set `PG_DB=barack_corp_staging`, the three startup secrets (`FLASK_SECRET_KEY`, `DASHBOARD_TOKEN`, `HEALTH_TOKEN`, 16 characters minimum), the Telegram variables above, and your own `tg:` id as owner. Leave every `GREENAPI_*` variable out. To find your Telegram id, send any message to @userinfobot.
+4. **Open the tunnel before `DEMARRAGE.bat`.** Run `ngrok http 127.0.0.1:5000` with the staging machine's own ngrok account. `DEMARRAGE.bat` only starts ngrok when none is running, and when it does, it uses production's fixed domain; starting the staging tunnel first keeps it away from that domain. Telegram only calls webhooks on ports 443, 80, 88 or 8443, and the ngrok HTTPS URL uses 443. A free account without a fixed domain gets a new URL at each start; register the webhook again when it changes.
+5. **Register the webhook.**
+
+   ```
+   curl -s "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+        -d "url=https://<staging-domain>/webhook/telegram" \
+        -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>" \
+        -d "drop_pending_updates=true"
+   curl -s "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
+   ```
+
+   `getWebhookInfo` must show the URL, `pending_update_count` close to 0 and no `last_error_message`.
+6. **Create a test tontine and its admin.** In `psql` on `barack_corp_staging`:
+
+   ```sql
+   INSERT INTO tontines (nom, type_tontine, montant_place, capacite_max)
+   VALUES ('Staging Njangi', 'Journaliere', 1000, 10) RETURNING id;
+   INSERT INTO admins_groupe (tontine_id, whatsapp, nom, numero_collecte)
+   VALUES (<id>, 'tg:<your id>', 'Admin staging', '+2376XXXXXXXX');
+   ```
+
+7. **Get the invitation link.** In a shell where `TELEGRAM_WEBHOOK_SECRET` holds the staging value, `python -c "from katechon.messaging.telegram import code_invitation; print(code_invitation(<id>))"` prints the code. The link is `https://t.me/<bot username>?start=<code>`. The code is signed with `TELEGRAM_WEBHOOK_SECRET`, so changing the secret invalidates old links.
+
+### Test cycle for each change
+
+1. Pull the branch on the staging machine, make sure the staging ngrok tunnel is running, then restart through `DEMARRAGE.bat`.
+2. Play the scenarios touched by the change, among these:
+   - **Enrolment:** open the invitation link and press *Start*. The bot asks for the Mobile Money number; you only enter the payout calendar once you send e.g. `MTN +2376…`.
+   - **Menu:** send `menu` in private.
+   - **Contribution:** send a payment screenshot in private or in the group, then confirm it from the admin menu.
+   - **Group:** name a Telegram group exactly like the tontine, add the bot, then send `/liste@<bot>` and `/rappel@<bot>`.
+   - **Late payment:** pay after the deadline and check the IRA amount.
+   - **Payout:** at your turn, the stored number is applied at once and the admin receives *NUMÉRO REÇU*.
+3. When every touched scenario behaves as expected, merge the PR, then deploy to production. Production keeps `KATECHON_TELEGRAM` absent, so its members only ever see WhatsApp.
+
+---
+
 ## Global South ROSCA Ecosystem
 
 The ROSCA (Rotating Savings and Credit Association) is the most widespread informal financial instrument in the developing world, coordinating the financial lives of 400–500 million unbanked people across 5 continents under dozens of local names, each embedded in the cultural fabric of its region.
