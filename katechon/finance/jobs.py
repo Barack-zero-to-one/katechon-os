@@ -41,7 +41,8 @@ from katechon.core.socle import (
     est_owner,
     get_tontines_admin,
 )
-from katechon.finance.paiement import _get_retardataires, declencher_bouffage_manuel
+from katechon.finance.paiement import (_get_retardataires, cotisations_manquantes_du_cycle,
+                                      declencher_bouffage_manuel)
 from katechon.finance.trust_graph import _update_score_confiance, calculer_score_risque_fugue
 from katechon.messaging.messages import MSG_DISSUASION
 from katechon.messaging.whatsapp import (
@@ -107,22 +108,13 @@ def traiter_bouffages_suspects_expires():
                 WHERE membre_id=%s AND tontine_id=%s AND statut='Due'
             """, (membre_id, tontine_id))["total"]
 
-            # Cotisations manquantes depuis inscription
-            # (nombre de périodes écoulées - cotisations payées)
-            cotis_payees = fetchone(conn, """
-                SELECT COUNT(*) n FROM transactions
-                WHERE membre_id=%s AND tontine_id=%s
-                  AND type_transaction='Cotisation' AND statut='Confirmee'
-            """, (membre_id, tontine_id))["n"]
-
-            # Position dans l'ordre — cotisations attendues = son ordre
-            cotis_attendues  = p["ordre"]
-            cotis_manquantes = max(0, cotis_attendues - cotis_payees)
+            # Toutes les cotisations impayées du cycle en cours, quel que soit l'historique passé.
             _places_debt = fetchone(conn,
                 "SELECT nombre_places FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
                 (membre_id, tontine_id))
             nb_places_debt = (_places_debt["nombre_places"] if _places_debt else 1) or 1
-            dette_cotis      = cotis_manquantes * p["montant_place"] * nb_places_debt
+            cotis_manquantes, dette_cotis = cotisations_manquantes_du_cycle(conn, tontine_id, membre_id,
+                                                                            nb_places_debt)
 
             # Caution bloquée
             caution = fetchone(conn, """
@@ -378,7 +370,8 @@ def notifier_prochain_bouffage():
                 WHERE lp.tontine_id=%s AND lp.cycle=%s
                   AND lp.statut='En_attente' AND lp.bloque_suspect=0
                   AND ((lp.debloque_le IS NOT NULL AND lp.debloque_pour = lp.membre_id)
-                       OR lp.echec_le IS NOT NULL)     -- tour en échec technique : repris ici
+                       OR lp.echec_le IS NOT NULL      -- tour en échec technique : repris ici
+                       OR lp.retenu_le IS NOT NULL)    -- bénéficiaire inactif : versé une fois réactivé
                   AND lp.date_bouffage < %s
                 ORDER BY lp.date_bouffage, lp.ordre
             """, (t["id"], t["cycle_actuel"], today))
@@ -451,6 +444,26 @@ def notifier_prochain_bouffage():
                             pass
     finally:
         release_conn(conn)
+
+
+def _motif_inactif(conn, tontine_id: int, membre_id: int):
+    """Pourquoi ce membre ne peut pas recevoir de bouffage automatique, ou None s'il le peut.
+    Pause et En_attente_kyc restent payables (impayés déduits)."""
+    r = fetchone(conn, """SELECT m.statut_global, a.statut AS adhesion
+                          FROM membres m
+                          LEFT JOIN adhesions a ON a.membre_id = m.id AND a.tontine_id = %s
+                          WHERE m.id = %s""", (tontine_id, membre_id))
+    if not r:
+        return "membre introuvable"
+    if r["statut_global"] == "Banni":
+        return "membre banni"
+    if r["statut_global"] == "Suspendu_global":
+        return "membre suspendu"
+    if r["adhesion"] is None or r["adhesion"] == "Quitte":
+        return "membre sorti de la tontine"
+    if r["adhesion"] == "Suspendu":
+        return "adhésion suspendue"
+    return None
 
 
 def _passage_notifie(conn, passage_id) -> bool:
@@ -547,6 +560,37 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
             log.error(f"alerte non enrôlé #{passage['id']} : {e}")
         return
 
+    # ── Bénéficiaire inactif : le tour est retenu, l'admin décide ─────
+    # Suspendu, banni ou sorti : rien n'est versé automatiquement. Le tour reste
+    # En_attente avec retenu_le (jamais bloque_suspect : ni interception ni saisie
+    # à 48 h) et le rattrapage le verse dès que le membre est réactivé.
+    if not approuve:
+        motif = _motif_inactif(conn, t["id"], passage["membre_id"])
+        if motif:
+            premiere = passage.get("retenu_le") is None
+            q(conn, """UPDATE liste_passage SET retenu_le = COALESCE(retenu_le, NOW()), retenu_motif=%s
+                       WHERE id=%s""", (motif, passage["id"]))
+            conn.commit()
+            if premiere:
+                cagnotte = fetchone(conn,
+                    "SELECT COALESCE(SUM(nombre_places),0) n FROM adhesions WHERE tontine_id=%s AND statut='Actif'",
+                    (t["id"],))["n"] * t["montant_place"]
+                alerte = (
+                    f"⛔ *BOUFFAGE RETENU — {t['nom']}*\n\n"
+                    f"Bénéficiaire : *{passage.get('nom_complet') or '?'}* ({motif})\n"
+                    f"Cagnotte du tour : *{cagnotte:,} FCFA*, non versée.\n\n"
+                    f"Aucun virement ne part tant que ce membre n'est pas actif. "
+                    f"Réactivez-le (option 5) : son tour sera versé à la prochaine heure de bouffage, "
+                    f"cotisations impayées du cycle déduites.")
+                for envoyer in (lambda: wa_admins_tontine(t["id"], alerte), lambda: wa_owner(alerte)):
+                    try:
+                        envoyer()
+                    except Exception as e:
+                        log.error(f"alerte bouffage retenu #{passage['id']} : {e}")
+                log_audit("BOUFFAGE_RETENU", f"Passage#{passage['id']} | Membre#{passage['membre_id']} | {motif}",
+                          passage.get("whatsapp") or "")
+            return
+
     # ── Vérification historique cotisation avant bouffage ────────────
     # Détecte le schéma : mauvais payeur qui cotise juste avant son tour
     alerte_suspect = None if approuve else _verifier_historique_avant_bouffage(
@@ -637,18 +681,12 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
     total_ira   = sum(d["montant"] for d in dettes_ira)
 
     # Cotisations manquantes — ce qu'il devait payer avant son tour
-    cotis_payees     = fetchone(conn, """
-        SELECT COUNT(*) n FROM transactions
-        WHERE membre_id=%s AND tontine_id=%s
-          AND type_transaction='Cotisation' AND statut='Confirmee'
-    """, (passage["mbr_id"], t["id"]))["n"]
-    cotis_attendues  = passage["ordre"]  # il devait cotiser autant de fois que son rang
-    cotis_manquantes = max(0, cotis_attendues - cotis_payees)
+    # Toutes les cotisations impayées du cycle en cours, quel que soit l'historique passé.
     _places_benef = fetchone(conn,
         "SELECT nombre_places FROM adhesions WHERE membre_id=%s AND tontine_id=%s",
         (passage["mbr_id"], t["id"]))
     nb_places_benef = (_places_benef["nombre_places"] if _places_benef else 1) or 1
-    dette_cotis      = cotis_manquantes * t["montant_place"] * nb_places_benef
+    cotis_manquantes, dette_cotis = cotisations_manquantes_du_cycle(conn, t, passage["mbr_id"], nb_places_benef)
 
     if complet:
         # BOUFFAGE_COMPLET : cagnotte intégrale, rien n'est retenu ; les dettes IRA restent dues.
@@ -675,11 +713,22 @@ def _payer_passage(conn, t: dict, passage: dict, rattrapage: bool = False) -> No
     # Déclencher le bouffage manuel
     # Pas de commit ici : 'Notifie' est commité avec la ligne bouffages_manuels par
     # declencher_bouffage_manuel, sinon une panne entre les deux perdrait le tour.
-    q(conn, "UPDATE liste_passage SET statut='Notifie' WHERE id=%s",
+    q(conn, "UPDATE liste_passage SET statut='Notifie', retenu_le=NULL, retenu_motif=NULL WHERE id=%s",
       (passage["id"],))
 
     # La caution dans declencher_bouffage_manuel inclut toutes les déductions
-    total_deductions = caution_mont + total_ira + dette_cotis
+    # Les retenues ne dépassent jamais la cagnotte : le net enregistré n'est jamais négatif.
+    # Le reste des impayés non couvert reste dû et est signalé à l'admin.
+    total_deductions = min(montant_brut, caution_mont + total_ira + dette_cotis)
+    reste_du = caution_mont + total_ira + dette_cotis - total_deductions
+    if reste_du > 0:
+        try:
+            wa_admins_tontine(t["id"],
+                f"⚠️ *IMPAYÉS SUPÉRIEURS À LA CAGNOTTE — {t['nom']}*\n\n"
+                f"*{passage.get('nom_complet') or '?'}* : les retenues dépassent la cagnotte de "
+                f"*{reste_du:,} FCFA*. Rien ne lui est versé ; ce montant reste dû au groupe.")
+        except Exception as e:
+            log.error(f"alerte impayés > cagnotte #{passage['id']} : {e}")
     bouffage_id = declencher_bouffage_manuel(
         conn         = conn,
         membre_id    = passage["mbr_id"],

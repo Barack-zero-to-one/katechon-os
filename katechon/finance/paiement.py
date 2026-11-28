@@ -35,7 +35,7 @@ from katechon.core.socle import (
 )
 from katechon.messaging.whatsapp import wa_admins_tontine, wa_groupe, wa_owner, wa_prive, wa_quitter_groupe
 
-__all__ = ["hash_screenshot", "screenshot_deja_utilise", "enregistrer_screenshot",
+__all__ = ["cotisations_manquantes_du_cycle", "hash_screenshot", "screenshot_deja_utilise", "enregistrer_screenshot",
     "reference_deja_utilisee", "enregistrer_reference", "screenshot_near_duplicate",
     "MontantAberrantError", "enregistrer_cotisation_manuelle", "_incrementer_slip_cycle",
     "_reclasser_en_dernier", "confirmer_cotisation", "rejeter_cotisation",
@@ -1023,6 +1023,41 @@ def _rapport_ponctualite_cycle(conn, tontine_id: int, cycle: int) -> dict:
     }
 
 
+def cotisations_manquantes_du_cycle(conn, tontine, membre_id: int, places: int = 1):
+    """(périodes impayées, montant) du membre sur le cycle EN COURS, quel que soit
+    son historique passé : périodes de collecte dues depuis le début du cycle jusqu'à
+    hier (le bouffage passe avant l'heure limite du jour), moins ce qu'il a payé
+    depuis ce début, en montant (une avance sur plusieurs périodes compte pour toutes).
+
+    Début du cycle : tontines.date_debut_cycle, sinon la première date de bouffage du
+    cycle courant, sinon la date de création de la tontine.
+    `tontine` est la ligne tontines (dict) ou son id.
+    """
+    if not isinstance(tontine, dict) or "date_debut_cycle" not in tontine or "type_tontine" not in tontine:
+        tid = tontine if not isinstance(tontine, dict) else tontine["id"]
+        tontine = fetchone(conn, "SELECT * FROM tontines WHERE id=%s", (tid,))
+    places = places or 1
+    mise   = int(tontine["montant_place"]) * places
+    debut  = tontine.get("date_debut_cycle")
+    if debut is None:
+        r = fetchone(conn, """SELECT MIN(date_bouffage) d FROM liste_passage
+                              WHERE tontine_id=%s AND cycle=%s""", (tontine["id"], tontine["cycle_actuel"]))
+        debut = r["d"] if r and r["d"] else None
+    if debut is None and tontine.get("date_creation"):
+        debut = tontine["date_creation"].date() if hasattr(tontine["date_creation"], "date") else tontine["date_creation"]
+    aujourd_hui = datetime.now().date()
+    if debut is None or debut >= aujourd_hui:
+        return 0, 0
+    dues = sum(1 for k in range((aujourd_hui - debut).days)
+               if _est_jour_collecte(tontine, debut + timedelta(days=k)))
+    paye = fetchone(conn, """SELECT COALESCE(SUM(montant_brut),0) s FROM transactions
+                             WHERE membre_id=%s AND tontine_id=%s AND type_transaction='Cotisation'
+                               AND statut='Confirmee' AND date_heure::date >= %s""",
+                    (membre_id, tontine["id"], debut))["s"]
+    manquantes = max(0, dues - int(paye) // mise) if mise else 0
+    return manquantes, manquantes * mise
+
+
 def _verifier_fin_cycle(conn, tontine_id: int):
     """
     Appelée après chaque bouffage confirmé.
@@ -1181,7 +1216,7 @@ def demarrer_nouveau_cycle(tontine_id: int, admin_wa: str) -> str:
         nouveau_cycle = ancien_cycle + 1
 
         # Incrémenter le cycle
-        q(conn, "UPDATE tontines SET cycle_actuel=%s WHERE id=%s",
+        q(conn, "UPDATE tontines SET cycle_actuel=%s, date_debut_cycle=CURRENT_DATE WHERE id=%s",
           (nouveau_cycle, tontine_id))
 
         # Remettre les passages en attente pour le nouveau cycle
