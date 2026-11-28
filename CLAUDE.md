@@ -162,18 +162,20 @@ Poids bruts internes (somme = 145) normalisés sur 100 en fin de calcul — `sco
 
 | Feature | Poids brut | Poids normalisé /100 | Signal |
 |---------|-----------|----------------------|--------|
-| 1. Régularité historique | 25 | 17 | Variance des intervalles de cotisation (coefficient de variation) |
-| 2. Tendance récente | 20 | 14 | Ratio cotisations 0–30j vs 30–60j |
+| 1. Régularité historique | 25 | 17 | Variance des intervalles entre les soumissions du membre (coefficient de variation) |
+| 2. Tendance récente | 20 | 14 | Ratio cotisations 0–30j vs 30–60j, ou jours de collecte manqués sur les 7 derniers jours (le plus fort) |
 | 3. Score confiance inversé | 15 | 10 | score_confiance 0–100 → risque |
-| 4. Dettes en cours | 15 | 10 | Ratio dette IRA / capacité mensuelle |
+| 4. Dettes en cours | 15 | 10 | Dette IRA due / capacité mensuelle réelle (mise × places × périodes par mois) |
 | 5. Profondeur d'engagement | 10 | 7 | Ancienneté + nb tontines actives |
-| 6. Vélocité paiement | 10 | 7 | Délai moyen après heure_ouverture |
+| 6. Vélocité paiement | 10 | 7 | Heure moyenne de soumission du membre après heure_ouverture |
 | 7. Signaux faibles | 5 | 4 | Suspensions passées + tentatives fraude |
 | 8. Comportement post-bouffage | 20 | 14 | A-t-il continué à cotiser après son dernier bouffage ? |
 | 9. Chute score confiance | 10 | 7 | Chute > 25 pts en 30 jours |
 | 10. Position dans le cycle | 15 | 10 | Position tardive dans la rotation = risque de fugue plus élevé (structurel, non manipulable) |
 
 Niveaux : 0–30 Vert / 31–55 Jaune / 56–75 Orange / 76–100 Rouge → bouffage retardé.
+
+Les heures de paiement sont celles où le membre soumet sa preuve, jamais celle de la confirmation par l'admin. Règle plancher « glissement avant bouffage » : un membre dont le bouffage tombe dans les 7 jours et qui a payé moins de la moitié de ses jours de collecte des 7 derniers jours est au moins Orange (alerte admin, aucun blocage).
 
 ---
 

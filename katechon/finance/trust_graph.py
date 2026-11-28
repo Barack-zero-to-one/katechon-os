@@ -9,7 +9,7 @@ versement notifier_prochain_bouffage reste dans le bot et appelle
 calculer_score_risque_fugue.
 """
 import logging
-from datetime import datetime
+from datetime import datetime, time, timedelta, timezone
 
 from katechon.core.audit import log_audit
 from katechon.core.db import get_conn, q, release_conn, fetchone, fetchall
@@ -31,16 +31,23 @@ log = logging.getLogger("BarackCorp")   # même logger que le bot : sortie incha
 #
 # Le modèle combine 10 features comportementales (poids bruts, somme 145,
 # normalisée sur 100 par _agreger_score_risque_fugue) :
-#   1. Régularité historique (variance des intervalles entre cotisations)  25
-#   2. Tendance récente (cotisations 0–30 j contre 30–60 j)                20
+#   1. Régularité historique (variance des intervalles entre soumissions)  25
+#   2. Tendance récente (0–30 j contre 30–60 j, et jours de collecte
+#      manqués sur les 7 derniers jours : le plus fort des deux)           20
 #   3. Score de confiance inversé                                          15
-#   4. Dettes en cours (dette IRA / capacité mensuelle)                    15
+#   4. Dettes en cours (dette IRA due / capacité mensuelle réelle)         15
 #   5. Profondeur d'engagement (ancienneté, nombre de tontines)            10
-#   6. Vélocité de paiement (délai après heure_ouverture)                  10
+#   6. Vélocité de paiement (heure de soumission après heure_ouverture)    10
 #   7. Signaux faibles (suspensions, tentatives de fraude)                  5
 #   8. Comportement post-bouffage                                          20
 #   9. Chute du score de confiance (> 25 pts en 30 j)                      10
 #  10. Position dans le cycle                                              15
+#
+# Les heures de paiement sont celles où le MEMBRE a soumis sa preuve
+# (cotisations_manuelles.date_soumission), jamais celle où l'admin l'a
+# confirmée. Règle plancher « glissement avant bouffage » : un membre dont le
+# bouffage tombe dans les 7 jours et qui a payé moins de la moitié de ses jours
+# de collecte des 7 derniers jours est au moins orange (alerte, jamais blocage).
 #
 # Pondération calibrée sur l'intuition cofondateur — sera affinée par ML
 # après 6 mois de données réelles.
@@ -70,6 +77,65 @@ def _update_score_confiance(conn, membre_id: int, raison: str,
 
 
 POIDS_MAX_TRUST_GRAPH = 145  # somme des poids max des 10 features (25+20+15+15+10+10+5+20+10+15)
+
+_WAT = timezone(timedelta(hours=1))           # fuseau de collecte (Africa/Douala, sans heure d'été)
+_PERIODES_PAR_MOIS = {"Journaliere": 30, "Hebdomadaire": 52 / 12, "Mensuelle": 1}
+FENETRE_JOURS_MANQUES = 7      # jours de collecte récents examinés (feature 2 et plancher)
+RECUL_AVANCE_JOURS = 60        # période avant la fenêtre où une avance payée est reportée
+SCORE_PLANCHER_GLISSEMENT = 56  # premier score orange
+
+
+def _paiements_membre(conn, membre_id: int, tontine_id: int, depuis: datetime) -> list:
+    """Cotisations confirmées du membre depuis `depuis`, triées par date : dicts
+    {ts, montant}. `ts` est l'heure où le membre a SOUMIS sa preuve
+    (cotisations_manuelles.date_soumission, seul chemin d'une cotisation confirmée),
+    pas l'heure de confirmation par l'admin. Repli sur transactions.date_heure pour
+    les données plus anciennes que les soumissions enregistrées."""
+    lignes = fetchall(conn, """
+        SELECT date_soumission AS ts, montant_declare AS montant FROM cotisations_manuelles
+        WHERE membre_id=%s AND tontine_id=%s AND statut='Confirme' AND date_soumission >= %s
+        ORDER BY date_soumission
+    """, (membre_id, tontine_id, depuis))
+    if lignes:
+        return lignes
+    return fetchall(conn, """
+        SELECT date_heure AS ts, montant_brut AS montant FROM transactions
+        WHERE membre_id=%s AND tontine_id=%s AND type_transaction='Cotisation' AND statut='Confirmee'
+          AND date_heure >= %s
+        ORDER BY date_heure
+    """, (membre_id, tontine_id, depuis))
+
+
+def _periodes_recentes(tontine: dict, adhesion, paiements: list, mise: int, aujourd_hui) -> tuple:
+    """(périodes payées, périodes dues) sur les FENETRE_JOURS_MANQUES derniers jours,
+    d'hier à J-7, jamais avant l'adhésion. Le payé est un montant divisé par la mise
+    (une avance couvre plusieurs périodes) ; l'avance payée dans les RECUL_AVANCE_JOURS
+    précédents est reportée sur la fenêtre, une dette plus ancienne ne l'est pas.
+    Pause, Exonere ou sortie : rien n'est dû."""
+    # Import local : socle importe déjà ce module (_update_score_confiance).
+    from katechon.core.socle import _est_jour_collecte
+    if not adhesion or adhesion["statut"] in ("Pause", "Exonere", "Quitte") or mise <= 0:
+        return 0.0, 0
+    entree = adhesion["date_adhesion"].astimezone(_WAT).date() if adhesion.get("date_adhesion") else None
+    debut_fenetre = aujourd_hui - timedelta(days=FENETRE_JOURS_MANQUES)
+    debut_recul = debut_fenetre - timedelta(days=RECUL_AVANCE_JOURS)
+    if entree:
+        debut_fenetre, debut_recul = max(debut_fenetre, entree), max(debut_recul, entree)
+    par_jour = {}
+    for p in paiements:
+        j = p["ts"].astimezone(_WAT).date()
+        par_jour[j] = par_jour.get(j, 0) + (p["montant"] or 0)
+    avance, j = 0.0, debut_recul
+    while j < debut_fenetre:                     # solde jour par jour, jamais négatif
+        du = 1 if _est_jour_collecte(tontine, j) else 0
+        avance = max(0.0, avance + par_jour.get(j, 0) / mise - du)
+        j += timedelta(days=1)
+    dues, payees = 0, avance
+    while j < aujourd_hui:
+        dues += 1 if _est_jour_collecte(tontine, j) else 0
+        payees += par_jour.get(j, 0) / mise
+        j += timedelta(days=1)
+    return min(payees, float(dues)), dues
 
 
 def _agreger_score_risque_fugue(score_brut: float, features: dict, signaux: list) -> dict:
@@ -124,7 +190,8 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             FROM membres WHERE id=%s
         """, (membre_id,))
         tontine = fetchone(conn,
-            "SELECT type_tontine, montant_place, cycle_actuel, heure_ouverture FROM tontines WHERE id=%s",
+            """SELECT id, type_tontine, montant_place, cycle_actuel, heure_ouverture, jour_semaine, jour_mois
+               FROM tontines WHERE id=%s""",
             (tontine_id,))
         if not membre or not tontine:
             return {"score": 0, "niveau": "inconnu", "features": {}, "recommandation": "", "signaux": []}
@@ -133,25 +200,26 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
         features = {}
         signaux = []
 
-        # ── Feature 1 : Régularité historique (poids 25) ────────────────────
-        # On mesure la variance des intervalles entre cotisations.
-        # Un membre fiable cotise à intervalle régulier (variance basse).
-        intervalles = fetchall(conn, """
-            WITH ordered_cotis AS (
-                SELECT date_heure,
-                       LAG(date_heure) OVER (ORDER BY date_heure) AS prev_date
-                FROM transactions
-                WHERE membre_id=%s AND tontine_id=%s
-                  AND type_transaction='Cotisation' AND statut='Confirmee'
-                  AND date_heure >= NOW() - INTERVAL '60 days'
-            )
-            SELECT EXTRACT(EPOCH FROM (date_heure - prev_date)) / 86400.0 AS jours_ecart
-            FROM ordered_cotis
-            WHERE prev_date IS NOT NULL
+        maintenant  = datetime.now(_WAT)
+        aujourd_hui = maintenant.date()
+        adhesion = fetchone(conn, """
+            SELECT nombre_places, statut, date_adhesion FROM adhesions WHERE membre_id=%s AND tontine_id=%s
         """, (membre_id, tontine_id))
+        places = (adhesion["nombre_places"] if adhesion else 1) or 1
+        mise   = (tontine["montant_place"] or 0) * places
+        # Heures où le membre a soumis ses preuves, sur la plus longue période utilisée.
+        recul = RECUL_AVANCE_JOURS + FENETRE_JOURS_MANQUES
+        paiements = _paiements_membre(conn, membre_id, tontine_id,
+                                      datetime.combine(aujourd_hui - timedelta(days=recul), time(0), _WAT))
+
+        # ── Feature 1 : Régularité historique (poids 25) ────────────────────
+        # On mesure la variance des intervalles entre les soumissions du membre.
+        # Un membre fiable cotise à intervalle régulier (variance basse).
+        dates_60j = [p["ts"] for p in paiements if p["ts"] >= maintenant - timedelta(days=60)]
+        intervalles = [(b - a).total_seconds() / 86400.0 for a, b in zip(dates_60j, dates_60j[1:])]
 
         if len(intervalles) >= 5:
-            ecarts = [float(i["jours_ecart"]) for i in intervalles if i["jours_ecart"] is not None]
+            ecarts = intervalles
             if ecarts:
                 moy = sum(ecarts) / len(ecarts)
                 variance = sum((e - moy) ** 2 for e in ecarts) / len(ecarts)
@@ -187,6 +255,7 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
               AND date_heure >= NOW() - INTERVAL '30 days'
         """, (membre_id, tontine_id))["n"]
 
+        tendance_score = 0
         if cotis_30_60j >= 5:
             ratio_recent = cotis_0_30j / cotis_30_60j if cotis_30_60j > 0 else 1
             if ratio_recent < 0.5:
@@ -196,12 +265,18 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             elif ratio_recent < 0.75:
                 tendance_score = 12
                 signaux.append("Léger ralentissement des cotisations")
-            else:
-                tendance_score = 0
-            features["tendance_recente"] = tendance_score
-            score += tendance_score
-        else:
-            features["tendance_recente"] = 0
+
+        # Jours de collecte manqués ces 7 derniers jours, mêmes paliers : visible même
+        # sans 60 jours d'historique, et quand le membre décroche juste avant son tour.
+        payees, dues = _periodes_recentes(tontine, adhesion, paiements, mise, aujourd_hui)
+        ratio_paye = payees / dues if dues else 1.0
+        manques_score = 20 if ratio_paye < 0.5 else 12 if ratio_paye < 0.75 else 0
+        if manques_score:
+            signaux.append(f"Jours de collecte manqués : {round(dues - payees)} sur {dues} "
+                           f"ces {FENETRE_JOURS_MANQUES} derniers jours")
+        tendance_score = max(tendance_score, manques_score)
+        features["tendance_recente"] = tendance_score
+        score += tendance_score
 
         # ── Feature 3 : Score de confiance inversé (poids 15) ──────────────
         # score_confiance va de 0 à 100. On l'inverse en risque.
@@ -213,15 +288,16 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             signaux.append(f"Score de confiance faible ({confiance}/100)")
 
         # ── Feature 4 : Dettes en cours (poids 15) ──────────────────────────
+        # Encours réel : les dettes IRA restent 'Due' jusqu'à leur prélèvement au bouffage.
         dettes = fetchone(conn, """
-            SELECT
-                COALESCE(SUM(CASE WHEN statut='Due' THEN montant ELSE 0 END), 0) AS ira_due
+            SELECT COALESCE(SUM(montant), 0) AS ira_due
             FROM dettes_ira
-            WHERE membre_id=%s AND tontine_id=%s
+            WHERE membre_id=%s AND tontine_id=%s AND statut='Due'
         """, (membre_id, tontine_id))
         dette_montant = dettes["ira_due"] or 0
-        # Ratio de dette / capacité de cotisation
-        capacite = tontine["montant_place"] * 30  # ~1 mois
+        # Ratio de dette / capacité de cotisation d'un mois réel : sa mise, ses places
+        # et le nombre de périodes de collecte dans un mois.
+        capacite = mise * _PERIODES_PAR_MOIS.get(tontine["type_tontine"], 30)
         ratio_dette = min(1.0, dette_montant / capacite) if capacite > 0 else 0
         dette_score = ratio_dette * 15
         features["dettes"] = round(dette_score, 1)
@@ -258,18 +334,14 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
             h_ouv, m_ouv = 5, 0
         ouverture_secondes = h_ouv * 3600 + m_ouv * 60
 
-        cotis_recent = fetchall(conn, """
-            SELECT EXTRACT(EPOCH FROM (date_heure - date_heure::date)) - %s AS secs_apres_ouverture
-            FROM transactions
-            WHERE membre_id=%s AND tontine_id=%s
-              AND type_transaction='Cotisation' AND statut='Confirmee'
-              AND date_heure >= NOW() - INTERVAL '14 days'
-            LIMIT 14
-        """, (ouverture_secondes, membre_id, tontine_id))
+        # Les 14 soumissions les plus récentes des 14 derniers jours, à l'heure locale.
+        cotis_recent = [p["ts"].astimezone(_WAT) for p in reversed(paiements)
+                        if p["ts"] >= maintenant - timedelta(days=14)][:14]
 
         if cotis_recent:
-            heures = [float(c["secs_apres_ouverture"]) / 3600 for c in cotis_recent
-                      if c["secs_apres_ouverture"] is not None and float(c["secs_apres_ouverture"]) >= 0]
+            secs = [ts.hour * 3600 + ts.minute * 60 + ts.second + ts.microsecond / 1e6 - ouverture_secondes
+                    for ts in cotis_recent]
+            heures = [s / 3600 for s in secs if s >= 0]
             if heures:
                 moy_heure = sum(heures) / len(heures)
                 if moy_heure > 10:  # paye 10h+ après l'ouverture → tard
@@ -385,6 +457,22 @@ def calculer_score_risque_fugue(conn, membre_id: int, tontine_id: int) -> dict:
                 position_score = 0
             features["position_cycle"] = position_score
             score += position_score
+
+        # ── Règle plancher : glissement avant bouffage ──────────────────────
+        # Bouffage dans les 7 jours et moins de la moitié des jours de collecte
+        # récents payés : au moins orange. Ne baisse jamais un score.
+        if dues and ratio_paye < 0.5:
+            prochain = fetchone(conn, """
+                SELECT date_bouffage FROM liste_passage
+                WHERE membre_id=%s AND tontine_id=%s AND cycle=%s AND statut IN ('En_attente','Notifie')
+                  AND date_bouffage BETWEEN CURRENT_DATE AND CURRENT_DATE + 7
+                ORDER BY date_bouffage LIMIT 1
+            """, (membre_id, tontine_id, tontine["cycle_actuel"]))
+            if prochain:
+                signaux.insert(0, f"Glissement avant bouffage : {payees:.0f} période(s) payée(s) sur {dues} "
+                                  f"ces {FENETRE_JOURS_MANQUES} derniers jours, bouffage le "
+                                  f"{prochain['date_bouffage']:%d/%m}")
+                score = max(score, SCORE_PLANCHER_GLISSEMENT * POIDS_MAX_TRUST_GRAPH / 100)
 
         # ── Normalisation et niveau final ───────────────────────────────────
         return _agreger_score_risque_fugue(score, features, signaux)
