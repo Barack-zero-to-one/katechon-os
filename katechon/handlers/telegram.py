@@ -26,8 +26,8 @@ from flask import jsonify, request
 from katechon.core.audit import log_audit
 from katechon.core.db import fetchone, get_conn, q, release_conn
 from katechon.core.etat import _msg_executor, rate_limit_ok
-from katechon.core.socle import (_replay_guard, est_telegram, inscrire_dans_tontine,
-                                 normaliser_numero, valider_numero_cameroun)
+from katechon.core.socle import (_replay_guard, est_owner, est_telegram, inscrire_dans_tontine,
+                                 lire_numero_momo, normaliser_numero)
 from katechon.handlers.groupe import _est_nom_valide
 from katechon.handlers.webhook import traiter_message
 from katechon.messaging.canal import MessageEntrant
@@ -78,39 +78,56 @@ def _demarrer(wa: str, code: str, prenom: str):
     wa_prive(wa, f"👋 Bienvenue dans *{tontine['nom']}* !\n\n" + MSG_NUMERO)
 
 
-def _lire_numero(texte: str):
-    m = re.search(r"(\+?237[26789]\d{8}|\b[26789]\d{8}\b)", texte or "")
-    tu = (texte or "").upper()
-    operateur = "cm.mtn" if "MTN" in tu else "cm.orange" if "ORANGE" in tu else None
-    if not m or not operateur:
+def _attente_valide(wa: str):
+    """L'attente du numéro de wa, ou None (et l'entrée est oubliée) si elle a expiré."""
+    attente = _attente_momo.get(wa)
+    if attente and time_module.time() - attente["ts"] > DELAI_NUMERO:
+        _attente_momo.pop(wa, None)
         return None
-    n = m.group(1)
-    numero = normaliser_numero(n if "237" in n else "237" + n)
-    return (numero, operateur) if valider_numero_cameroun(numero) else None
+    return attente
 
 
 def _recevoir_numero(wa: str, texte: str):
-    attente = _attente_momo.get(wa)
-    if not attente or time_module.time() - attente["ts"] > DELAI_NUMERO:
-        _attente_momo.pop(wa, None)
+    attente = _attente_valide(wa)
+    if not attente:
         wa_prive(wa, "⏱ Délai dépassé. Recliquez le lien d'invitation de votre tontine.")
         return
-    lu = _lire_numero(texte)
-    if not lu:
-        wa_prive(wa, "❌ Numéro ou opérateur non reconnu.\n\n" + MSG_NUMERO)
+    propose = attente.get("propose")
+    if propose:
+        if (texte or "").strip().upper() != "OUI":
+            attente.pop("propose", None)
+            wa_prive(wa, "D'accord, on recommence.\n\n" + MSG_NUMERO)
+            return
+        numero, operateur = propose
+    else:
+        lu = lire_numero_momo(texte)
+        if not lu:
+            wa_prive(wa, "❌ Numéro ou opérateur non reconnu.\n\n" + MSG_NUMERO)
+            return
+        attente["propose"] = lu
+        nom_op = "MTN" if lu[1] == "cm.mtn" else "Orange"
+        wa_prive(wa, f"Votre bouffage sera versé sur *{lu[0]}* ({nom_op} Money).\n\n"
+                     f"Répondez *OUI* pour confirmer, ou n'importe quoi d'autre pour corriger.")
         return
-    numero, operateur = lu
+
     conn = get_conn()
     try:
-        q(conn, "UPDATE membres SET numero_momo=%s, operateur_momo=%s WHERE whatsapp=%s",
-          (numero, operateur, wa))
-        conn.commit()
         membre  = fetchone(conn, "SELECT id FROM membres WHERE whatsapp=%s", (wa,))
-        tontine = fetchone(conn, "SELECT id, nom FROM tontines WHERE id=%s", (attente["tontine_id"],))
+        tontine = fetchone(conn, "SELECT id, nom, statut FROM tontines WHERE id=%s", (attente["tontine_id"],))
+        if membre:
+            q(conn, "UPDATE membres SET numero_momo=%s, operateur_momo=%s WHERE id=%s",
+              (numero, operateur, membre["id"]))
+            conn.commit()
     finally:
         release_conn(conn)
     _attente_momo.pop(wa, None)
+    if not membre:
+        wa_prive(wa, "❌ Votre compte est introuvable. Recliquez le lien d'invitation.")
+        return
     log_audit("TELEGRAM_NUMERO_MOMO", f"Membre#{membre['id']} | {numero} ({operateur})", wa)
+    if not tontine or tontine.get("statut") != "Active":
+        wa_prive(wa, "❌ Cette tontine n'est plus ouverte aux inscriptions. Votre numéro est enregistré.")
+        return
     _inscrire(wa, membre["id"], tontine)
 
 
@@ -132,16 +149,22 @@ def _bot_ajoute_groupe(evenement: dict):
     titre = (chat.get("title") or "").strip()
     if not est_telegram(group_id) or not titre:
         return
+    par = normaliser_numero(f"tg:{(evenement.get('from') or {}).get('id', '')}")
     conn = get_conn()
     try:
-        cur = q(conn, """UPDATE tontines SET whatsapp_groupe=%s
-                         WHERE nom=%s AND (whatsapp_groupe IS NULL OR whatsapp_groupe='')""", (group_id, titre))
-        conn.commit()
-        relie = cur.rowcount
+        tontine = fetchone(conn, """SELECT id FROM tontines
+                                    WHERE nom=%s AND (whatsapp_groupe IS NULL OR whatsapp_groupe='')""", (titre,))
+        autorise = tontine and est_telegram(par) and (est_owner(par) or fetchone(conn,
+            "SELECT 1 AS x FROM admins_groupe WHERE tontine_id=%s AND whatsapp=%s", (tontine["id"], par)))
+        if autorise:
+            q(conn, "UPDATE tontines SET whatsapp_groupe=%s WHERE id=%s", (group_id, tontine["id"]))
+            conn.commit()
     finally:
         release_conn(conn)
-    if relie:
-        log_audit("TELEGRAM_GROUPE_RELIE", f"{titre} → {group_id}")
+    if tontine and not autorise:
+        log_audit("TELEGRAM_GROUPE_REFUSE", f"{titre} → {group_id} : ajouté par {par}, ni admin ni owner")
+    elif autorise:
+        log_audit("TELEGRAM_GROUPE_RELIE", f"{titre} → {group_id} par {par}")
 
 
 def _plus_grande_photo(photos):
@@ -186,7 +209,7 @@ def webhook_telegram():
     est_groupe = chat.get("type") in ("group", "supergroup")
     group_id = normaliser_numero(f"tg:{chat.get('id', '')}") if est_groupe else ""
     texte = (msg.get("text") or "").strip()
-    if est_groupe and texte.startswith("/"):
+    if texte.startswith("/") and texte.split(" ", 1)[0] != "/start":
         # Mode confidentialité (actif par défaut) : un bot ne reçoit en groupe que
         # les commandes, sous la forme /liste@NomDuBot. On rend « liste ».
         commande, _, reste = texte[1:].partition(" ")
@@ -199,7 +222,7 @@ def webhook_telegram():
                 _msg_executor.submit(_demarrer, wa, code, expediteur.get("first_name", ""))
                 return jsonify({"status": "ok"}), 200
             texte = "start"
-        elif wa in _attente_momo:
+        elif _attente_valide(wa):
             _msg_executor.submit(_recevoir_numero, wa, texte)
             return jsonify({"status": "ok"}), 200
 

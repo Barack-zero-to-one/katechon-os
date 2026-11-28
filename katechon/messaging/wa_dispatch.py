@@ -26,7 +26,7 @@ _log = logging.getLogger(__name__)
 class Expediteur:
     def __init__(self, envoyer, ecart_par_chat: float = 3.0,
                  debit_global: float = 1.0, en_echec=None,
-                 horloge=time.monotonic, ecart_pour=None):
+                 horloge=time.monotonic, ecart_pour=None, ecart_max=None):
         if ecart_par_chat < 0:
             raise ValueError("ecart_par_chat doit être >= 0")
         if debit_global <= 0:
@@ -37,6 +37,7 @@ class Expediteur:
         self._en_echec       = en_echec
         self._horloge        = horloge
         self._ecart_pour     = ecart_pour   # chat -> écart propre (ex. groupes Telegram), sinon ecart_par_chat
+        self._ecart_max      = max(float(ecart_max or 0.0), self.ecart_par_chat)   # plus long écart possible
         self._files          = {}      # chat -> deque[(priorite, seq, texte)]
         self._dernier_chat   = {}      # chat -> instant du dernier envoi
         self._dernier_global = None
@@ -137,7 +138,7 @@ class Expediteur:
         """Oublie les destinataires dont l'écart est écoulé (mémoire bornée)."""
         if len(self._dernier_chat) < 10_000:
             return
-        limite = maintenant - max(self.ecart_par_chat, 3.0 if self._ecart_pour else 0.0)
+        limite = maintenant - self._ecart_max
         for chat in [c for c, t in self._dernier_chat.items() if t < limite]:
             del self._dernier_chat[chat]
 

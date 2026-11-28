@@ -662,6 +662,11 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
         "SELECT nom_complet, whatsapp FROM membres WHERE id=%s", (membre_id,))
     tontine = fetchone(conn,
         "SELECT nom FROM tontines WHERE id=%s", (tontine_id,))
+    # Numéro de retrait déjà connu (membre Telegram, enregistré à l'inscription) :
+    # le DM ne le redemande pas, et il est appliqué juste après.
+    numero_connu = fetchone(conn, "SELECT id, nom_complet, whatsapp, numero_momo, operateur_momo "
+                                  "FROM membres WHERE id=%s AND numero_momo IS NOT NULL "
+                                  "AND operateur_momo IN ('cm.mtn', 'cm.orange')", (membre_id,))
 
     if not membre or not tontine:
         return bouffage_id
@@ -702,11 +707,16 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
         f"*I. DÉCOMPTE FINANCIER*\n\n"
         f"{decompte}"
         f"*III. INSTRUCTIONS*\n\n"
-        f"  Envoyez votre numéro Mobile Money, précédé de l'opérateur :\n\n"
-        f"    *MTN +237690XXXXXX*\n"
-        f"  ou\n"
-        f"    *ORANGE +237699XXXXXX*\n\n"
-        f"  ⏱ Vous avez *2 heures* pour répondre.\n\n"
+        + (f"  Votre bouffage sera versé sur votre numéro enregistré :\n\n"
+           f"    *{numero_connu['numero_momo']}*\n\n"
+           f"  Vous n'avez rien à envoyer.\n\n"
+           if numero_connu else
+           f"  Envoyez votre numéro Mobile Money, précédé de l'opérateur :\n\n"
+           f"    *MTN +237690XXXXXX*\n"
+           f"  ou\n"
+           f"    *ORANGE +237699XXXXXX*\n\n"
+           f"  ⏱ Vous avez *2 heures* pour répondre.\n\n")
+        +
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"_Réf. COBAC R-2019/01 — Barack & AI Development Facilities Ltd_"
     )
@@ -732,11 +742,9 @@ def declencher_bouffage_manuel(conn, membre_id: int, tontine_id: int,
     log_audit("BOUFFAGE_DECLENCHE",
               f"Membre#{membre_id} | Tontine#{tontine_id} | Net:{montant_net:,} FCFA")
 
-    # Numéro de retrait déjà connu (membre Telegram, enregistré à l'inscription) :
-    # appliqué tout de suite, le bouffage n'attend jamais un numéro.
-    mm = fetchone(conn, "SELECT id, nom_complet, whatsapp, numero_momo, operateur_momo "
-                        "FROM membres WHERE id=%s", (membre_id,))
-    if mm and mm.get("numero_momo") and mm.get("operateur_momo") in ("cm.mtn", "cm.orange"):
+    # Numéro connu : appliqué tout de suite, le bouffage n'attend jamais un numéro.
+    if numero_connu:
+        mm = numero_connu
         op = "MTN" if mm["operateur_momo"] == "cm.mtn" else "ORANGE"
         rep = traiter_reponse_numero_bouffage(mm["whatsapp"], f"{op} {mm['numero_momo']}", mm)
         if rep:

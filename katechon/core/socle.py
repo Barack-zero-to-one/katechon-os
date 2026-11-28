@@ -29,7 +29,7 @@ __all__ = ["FRAIS_FMP", "HEURE_LIMITE_DEF", "IRA_CLIFF_PCT", "IRA_DAILY_PCT", "I
     "WEBHOOK_REPLAY_TTL", "_replay_guard", "MEDIA_MAX_BYTES", "SESSION_TIMEOUT",
     "enregistrer_liste_passage", "inscrire_dans_tontine", "normaliser_numero",
     "valider_numero_cameroun", "calculer_ira_mise", "get_membre_by_wa", "get_tontines_admin",
-    "est_owner", "est_telegram", "OWNER_IDS", "_lire_owner_ids", "est_admin", "incrementer_tentatives_fraude", "_alerter_burst_fraude",
+    "est_owner", "est_telegram", "lire_numero_momo", "OWNER_IDS", "_lire_owner_ids", "est_admin", "incrementer_tentatives_fraude", "_alerter_burst_fraude",
     "_JOURS_SEMAINE", "_est_jour_collecte", "_est_jour_cotisation", "_verifier_credit_comm",
     "PORT", "DELAI_SUSPENSION_HEURES", "DELAI_ALERTE_FUGUE", "DELAI_BLOCAGE_FUGUE", "BACKUP_ROTATION", "HEURE_BACKUP", "PG_HOST", "PG_PORT", "PG_DB", "PG_USER", "PG_PASS", "PG_BIN", "BACKUP_DIR", "NGROK_DOMAIN", "NGROK_TOKEN", "MONTANT_IRA", "GROUPE_ADMIN", "enregistrer_admins_groupe"]
 
@@ -299,6 +299,19 @@ def normaliser_numero(numero: str) -> str:
 
 def valider_numero_cameroun(numero: str) -> bool:
     return bool(re.match(r"^\+237[26789]\d{8}$", numero))
+
+
+def lire_numero_momo(texte: str):
+    """(numéro, opérateur) d'un texte comme « MTN +237690123456 », ou None.
+    L'opérateur est obligatoire : c'est lui qui dit à l'admin sur quel réseau virer."""
+    m = re.search(r"(\+?237[26789]\d{8}|\b[26789]\d{8}\b)", texte or "")
+    tu = (texte or "").upper()
+    operateur = "cm.mtn" if "MTN" in tu else "cm.orange" if "ORANGE" in tu else None
+    if not m or not operateur:
+        return None
+    n = m.group(1)
+    numero = normaliser_numero(n if "237" in n else "237" + n)
+    return (numero, operateur) if valider_numero_cameroun(numero) else None
 
 
 def calculer_ira_mise(montant_mise: int, dt_paiement: datetime,
