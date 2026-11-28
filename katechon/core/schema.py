@@ -471,6 +471,8 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_caution_active   ON cautions_garantie(membre_id,tontine_id,statut) WHERE statut='Bloquee'",
         "CREATE INDEX IF NOT EXISTS idx_audit_date       ON audit_log(date_heure DESC)",
         "CREATE INDEX IF NOT EXISTS idx_cotis_pending    ON cotisations_manuelles(tontine_id,date_soumission DESC) WHERE statut='En_attente'",
+        # Trust Graph : heures de soumission confirmées d'un membre dans une tontine.
+        "CREATE INDEX IF NOT EXISTS idx_cotis_mbr_conf   ON cotisations_manuelles(membre_id,tontine_id,date_soumission) WHERE statut='Confirme'",
         # Hash unique anti-recyclage déjà UNIQUE mais on confirme l'index
         "CREATE INDEX IF NOT EXISTS idx_screenshot_date  ON screenshots_hash(created_at DESC)",
         # Anti-recyclage renforcé (finding #3)
